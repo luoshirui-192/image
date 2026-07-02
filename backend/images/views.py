@@ -37,13 +37,15 @@ def _serialize_upload_results(results):
 
 
 def _serialize_duplicates(duplicates: list[dict]):
-    return [
-        {
-            "filename": item["filename"],
-            "existing": ImageInfoSerializer(item["existing"]).data,
-        }
-        for item in duplicates
-    ]
+    items = []
+    for item in duplicates:
+        entry = {"filename": item["filename"]}
+        if item.get("existing") is not None:
+            entry["existing"] = ImageInfoSerializer(item["existing"]).data
+        if item.get("batch_duplicate_of"):
+            entry["batch_duplicate_of"] = item["batch_duplicate_of"]
+        items.append(entry)
+    return items
 
 
 def _parse_overwrite_param(value) -> bool:

@@ -18,6 +18,7 @@ COPY docker/backend-entrypoint.sh /app/docker/backend-entrypoint.sh
 COPY docker/ensure_mysql57_triggers.py /app/docker/ensure_mysql57_triggers.py
 COPY docker/ensure_file_hash_column.py /app/docker/ensure_file_hash_column.py
 COPY scripts/generate_secret_key.py /app/scripts/generate_secret_key.py
+COPY import_samples /app/import_samples
 COPY upload /app/upload
 
 RUN sed -i 's/\r$//' /app/docker/backend-entrypoint.sh \

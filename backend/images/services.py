@@ -64,6 +64,51 @@ def find_duplicate_image(*, filename: str, content_hash: str) -> ImageInfo | Non
     return active.filter(image_name=name).first()
 
 
+def _collect_batch_duplicates(
+    items: list[tuple[str, bytes]],
+) -> list[dict]:
+    """Detect duplicates against DB and within the same batch."""
+    duplicates: list[dict] = []
+    seen_hashes: dict[str, str] = {}
+    seen_names: set[str] = set()
+
+    for name, content in items:
+        content_hash = compute_content_hash(content)
+        basename = Path(name).name
+
+        existing = find_duplicate_image(filename=name, content_hash=content_hash)
+        if existing:
+            duplicates.append({"filename": name, "existing_id": existing.id, "existing": existing})
+            continue
+
+        if content_hash in seen_hashes:
+            duplicates.append(
+                {
+                    "filename": name,
+                    "existing_id": None,
+                    "existing": None,
+                    "batch_duplicate_of": seen_hashes[content_hash],
+                }
+            )
+            continue
+
+        if basename in seen_names:
+            duplicates.append(
+                {
+                    "filename": name,
+                    "existing_id": None,
+                    "existing": None,
+                    "batch_duplicate_of": basename,
+                }
+            )
+            continue
+
+        seen_hashes[content_hash] = name
+        seen_names.add(basename)
+
+    return duplicates
+
+
 def _resolve_category_id(category_id: int | None) -> int:
     if category_id is None:
         return 0
@@ -265,14 +310,8 @@ def save_uploaded_files(
             prepared.append((name, content, None, None, str(exc)))
 
     if not overwrite:
-        duplicates: list[dict] = []
-        for name, content, validated, _mime, _err in prepared:
-            if validated is None:
-                continue
-            content_hash = compute_content_hash(content)
-            existing = find_duplicate_image(filename=name, content_hash=content_hash)
-            if existing:
-                duplicates.append({"filename": name, "existing_id": existing.id, "existing": existing})
+        batch_items = [(name, content) for name, content, validated, _mime, _err in prepared if validated is not None]
+        duplicates = _collect_batch_duplicates(batch_items)
         if duplicates:
             raise DuplicateBatchError(duplicates)
 
@@ -371,12 +410,8 @@ def import_images_from_directory(
         prepared.append((file_path, file_path.read_bytes()))
 
     if not overwrite:
-        duplicates: list[dict] = []
-        for file_path, content in prepared:
-            content_hash = compute_content_hash(content)
-            existing = find_duplicate_image(filename=file_path.name, content_hash=content_hash)
-            if existing:
-                duplicates.append({"filename": file_path.name, "existing_id": existing.id, "existing": existing})
+        batch_items = [(file_path.name, content) for file_path, content in prepared]
+        duplicates = _collect_batch_duplicates(batch_items)
         if duplicates:
             raise DuplicateBatchError(duplicates)
 

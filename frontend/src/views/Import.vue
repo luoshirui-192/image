@@ -89,7 +89,8 @@ loadCategories()
       <h2 class="page-title">批量导入</h2>
       <p class="page-desc">
         扫描<strong>服务器本地目录</strong>中的图片文件，复制到分层存储并写入数据库。
-        路径必须在项目根目录下（相对路径或绝对路径均可），不能从 <code>upload/</code> 目录导入。
+        Docker 部署请填写 <code>import_samples</code> 或 <code>import_data</code>（对应项目下的示例目录与自定义导入目录）。
+        路径必须在项目根目录下，不能从 <code>upload/</code> 目录导入。
       </p>
 
       <el-alert
@@ -104,14 +105,16 @@ loadCategories()
         <el-form-item label="目录路径" required>
           <el-input
             v-model="form.directory"
-            placeholder="例如：import_samples 或 D:/data/photos"
+            placeholder="例如：import_samples 或 import_data"
             clearable
           >
             <template #prefix>
               <el-icon><FolderOpened /></el-icon>
             </template>
           </el-input>
-          <div class="field-hint">相对路径基于项目根目录；支持 jpg/png/gif/webp/bmp</div>
+          <div class="field-hint">
+            相对路径基于项目根目录。可将图片放入项目 <code>import_data/</code> 文件夹后填写 <code>import_data</code>。
+          </div>
         </el-form-item>
 
         <el-row :gutter="16">

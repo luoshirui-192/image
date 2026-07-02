@@ -57,9 +57,9 @@ CREATE TABLE IF NOT EXISTS image_info (
 """
 
 
-def make_test_png(name: str = "test.png") -> tuple[str, io.BytesIO]:
+def make_test_png(name: str = "test.png", *, size: tuple[int, int] = (10, 8), color=(255, 0, 0)) -> tuple[str, io.BytesIO]:
     buf = io.BytesIO()
-    Image.new("RGB", (10, 8), color=(255, 0, 0)).save(buf, format="PNG")
+    Image.new("RGB", size, color=color).save(buf, format="PNG")
     buf.seek(0)
     buf.name = name
     return name, buf
@@ -274,3 +274,32 @@ class ImageUploadAPITestCase(TestCase):
         record = ImageInfo.objects.get(pk=first_id)
         self.assertEqual(record.tags, "new")
         self.assertEqual(ImageInfo.objects.filter(is_delete=0, image_name="overwrite.png").count(), 1)
+
+    def test_upload_batch_intra_batch_duplicate(self):
+        with self._settings():
+            self._auth(self.user)
+            _, png1 = make_test_png("batch-a.png")
+            _, png2 = make_test_png("batch-a.png")
+            response = self.client.post(
+                "/api/images/upload/",
+                {"files": [png1, png2]},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], 4006)
+        self.assertEqual(len(response.data["data"]["duplicates"]), 1)
+
+    def test_upload_multiple_files_success(self):
+        with self._settings():
+            self._auth(self.user)
+            _, png1 = make_test_png("multi1.png", size=(10, 8))
+            _, png2 = make_test_png("multi2.png", size=(12, 10))
+            response = self.client.post(
+                "/api/images/upload/",
+                {"files": [png1, png2]},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["summary"]["succeeded"], 2)

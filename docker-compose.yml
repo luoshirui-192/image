@@ -52,6 +52,8 @@ services:
     volumes:
       - upload_data:/app/upload
       - thumb_cache:/app/backend/thumb_cache
+      - ./import_samples:/app/import_samples:ro
+      - ./import_data:/app/import_data:ro
     expose:
       - "8000"
 

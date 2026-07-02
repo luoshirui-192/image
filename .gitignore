@@ -29,6 +29,10 @@ upload/*
 !upload/README.md
 !upload/.gitignore
 
+# User import staging (keep structure only)
+import_data/*
+!import_data/.gitkeep
+
 # IDE / OS
 .idea/
 .vscode/
