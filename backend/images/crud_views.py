@@ -8,12 +8,14 @@ from rest_framework.views import APIView
 from images.batch_delete_service import batch_logical_delete, serialize_batch_delete_result
 from images.deletion_policy import build_deletion_info, format_deletion_notice, get_retention_days
 from images.models import ImageInfo
+from images.permissions import can_modify_image, is_admin
 from images.querysets import filter_image_queryset, paginate_queryset, validate_category_id
 from images.restore_service import RestoreError, restore_image
 from images.serializers import (
     ImageBatchDeleteSerializer,
     ImageInfoSerializer,
     ImageInfoUpdateSerializer,
+    serialize_image_info,
 )
 from utils.audit import write_operate_log
 from utils.permissions import IsActiveAccount
@@ -30,10 +32,6 @@ def _format_errors(errors: dict) -> str:
     return "; ".join(parts)
 
 
-def _is_admin(user) -> bool:
-    return getattr(user, "role", "") == "admin"
-
-
 def _get_active_image(pk: int) -> ImageInfo | None:
     try:
         return ImageInfo.objects.get(pk=pk, is_delete=0)
@@ -41,13 +39,13 @@ def _get_active_image(pk: int) -> ImageInfo | None:
         return None
 
 
-def _logical_delete_image(image: ImageInfo) -> dict:
+def _logical_delete_image(image: ImageInfo, *, for_admin: bool) -> dict:
     image.is_delete = 1
     image.save(update_fields=["is_delete"])
     image.refresh_from_db()
     deletion_info = build_deletion_info(image.update_time)
     return {
-        "image": ImageInfoSerializer(image).data,
+        "image": serialize_image_info(image, is_admin=for_admin),
         "deletion_info": deletion_info,
         "notice": format_deletion_notice(deletion_info),
     }
@@ -93,13 +91,16 @@ class ImageListView(APIView):
     permission_classes = [IsAuthenticated, IsActiveAccount]
 
     def get(self, request):
+        admin = is_admin(request.user)
         try:
-            queryset = filter_image_queryset(request, is_admin=_is_admin(request.user))
+            queryset = filter_image_queryset(request, is_admin=admin)
             page_data = paginate_queryset(request, queryset)
         except ValueError as exc:
             return error_response(str(exc), code=4001, status=400)
 
-        page_data["results"] = ImageInfoSerializer(page_data["results"], many=True).data
+        page_data["results"] = [
+            serialize_image_info(item, is_admin=admin) for item in page_data["results"]
+        ]
         return success_response(page_data)
 
 
@@ -113,12 +114,14 @@ class ImageDetailView(APIView):
         image = _get_active_image(pk)
         if image is None:
             return error_response("图片不存在或已删除", code=4041, status=404)
-        return success_response(ImageInfoSerializer(image).data)
+        return success_response(serialize_image_info(image, is_admin=is_admin(request.user)))
 
     def patch(self, request, pk: int):
         image = _get_active_image(pk)
         if image is None:
             return error_response("图片不存在或已删除", code=4041, status=404)
+        if not can_modify_image(request.user, image):
+            return error_response("无权编辑他人上传的图片", code=4031, status=403)
 
         serializer = ImageInfoUpdateSerializer(data=request.data, partial=True)
         if not serializer.is_valid():
@@ -140,14 +143,20 @@ class ImageDetailView(APIView):
             "image_update",
             detail=f"image_id={pk} fields={','.join(data.keys())}",
         )
-        return success_response(ImageInfoSerializer(image).data, message="更新成功")
+        return success_response(
+            serialize_image_info(image, is_admin=is_admin(request.user)),
+            message="更新成功",
+        )
 
     def delete(self, request, pk: int):
         image = _get_active_image(pk)
         if image is None:
             return error_response("图片不存在或已删除", code=4041, status=404)
+        if not can_modify_image(request.user, image):
+            return error_response("无权删除他人上传的图片", code=4031, status=403)
 
-        payload = _logical_delete_image(image)
+        admin = is_admin(request.user)
+        payload = _logical_delete_image(image, for_admin=admin)
         write_operate_log(
             request,
             "image_delete",
@@ -167,7 +176,12 @@ class ImageBatchDeleteView(APIView):
         if not serializer.is_valid():
             return error_response(_format_errors(serializer.errors), code=4001, status=400)
 
-        result = batch_logical_delete(serializer.validated_data["ids"])
+        admin = is_admin(request.user)
+        result = batch_logical_delete(
+            serializer.validated_data["ids"],
+            username=getattr(request.user, "username", ""),
+            is_admin=admin,
+        )
         data = serialize_batch_delete_result(result)
 
         write_operate_log(
@@ -208,4 +222,7 @@ class ImageRestoreView(APIView):
             "image_restore",
             detail=f"image_id={pk} path={image.image_path}",
         )
-        return success_response(ImageInfoSerializer(image).data, message="图片已恢复")
+        return success_response(
+            serialize_image_info(image, is_admin=is_admin(request.user)),
+            message="图片已恢复",
+        )

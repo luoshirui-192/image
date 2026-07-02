@@ -129,9 +129,12 @@ class ImageUploadAPITestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["data"]["summary"]["succeeded"], 1)
         image = response.data["data"]["items"][0]["image"]
-        self.assertTrue(image["image_path"].startswith("upload/"))
         self.assertEqual(image["image_width"], 10)
         self.assertEqual(image["tags"], "demo")
+        from images.models import ImageInfo
+
+        record = ImageInfo.objects.get(pk=image["id"])
+        self.assertTrue(record.image_path.startswith("upload/"))
 
     def test_upload_sets_local_upload_time(self):
         from django.utils import timezone
@@ -145,7 +148,7 @@ class ImageUploadAPITestCase(TestCase):
             _, png = make_test_png("time_test.png")
             response = self.client.post(
                 "/api/images/upload/",
-                {"file": png},
+                {"file": png, "category_id": self.category.id},
                 format="multipart",
             )
         self.assertEqual(response.status_code, 200)
@@ -174,7 +177,10 @@ class ImageUploadAPITestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         image = response.data["data"]["items"][0]["image"]
         self.assertEqual(image["file_suffix"], "bmp")
-        self.assertTrue(image["image_path"].endswith(".bmp"))
+        from images.models import ImageInfo
+
+        record = ImageInfo.objects.get(pk=image["id"])
+        self.assertTrue(record.image_path.endswith(".bmp"))
 
     def test_upload_rejects_non_image(self):
         with self._settings():
@@ -196,21 +202,21 @@ class ImageUploadAPITestCase(TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertGreaterEqual(len(response.data["data"]), 1)
 
-            self._auth(self.admin)
+            self._auth(self.user)
             create_resp = self.client.post(
                 "/api/images/categories/",
-                {"category_name": "新分类", "sort": 5},
+                {"category_name": "用户新建", "sort": 3},
                 format="json",
             )
             self.assertEqual(create_resp.status_code, 201)
 
+    def test_upload_requires_category(self):
+        with self._settings():
             self._auth(self.user)
-            denied = self.client.post(
-                "/api/images/categories/",
-                {"category_name": "禁止", "sort": 9},
-                format="json",
-            )
-            self.assertEqual(denied.status_code, 403)
+            _, png = make_test_png("no_cat.png")
+            response = self.client.post("/api/images/upload/", {"file": png}, format="multipart")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("分类", response.data["message"])
 
     def test_batch_import_from_directory(self):
         staging = self.import_root / "staging"
@@ -242,11 +248,19 @@ class ImageUploadAPITestCase(TestCase):
         with self._settings():
             self._auth(self.user)
             _, png = make_test_png("dup.png")
-            first = self.client.post("/api/images/upload/", {"file": png}, format="multipart")
+            first = self.client.post(
+                "/api/images/upload/",
+                {"file": png, "category_id": self.category.id},
+                format="multipart",
+            )
             self.assertEqual(first.status_code, 200)
 
             _, png2 = make_test_png("dup.png")
-            second = self.client.post("/api/images/upload/", {"file": png2}, format="multipart")
+            second = self.client.post(
+                "/api/images/upload/",
+                {"file": png2, "category_id": self.category.id},
+                format="multipart",
+            )
 
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.data["code"], 4006)
@@ -259,13 +273,17 @@ class ImageUploadAPITestCase(TestCase):
         with self._settings():
             self._auth(self.user)
             _, png = make_test_png("overwrite.png")
-            first = self.client.post("/api/images/upload/", {"file": png, "tags": "old"}, format="multipart")
+            first = self.client.post(
+                "/api/images/upload/",
+                {"file": png, "category_id": self.category.id, "tags": "old"},
+                format="multipart",
+            )
             first_id = first.data["data"]["items"][0]["image"]["id"]
 
             _, png2 = make_test_png("overwrite.png")
             second = self.client.post(
                 "/api/images/upload/",
-                {"file": png2, "tags": "new", "overwrite": "true"},
+                {"file": png2, "category_id": self.category.id, "tags": "new", "overwrite": "true"},
                 format="multipart",
             )
 
@@ -282,7 +300,7 @@ class ImageUploadAPITestCase(TestCase):
             _, png2 = make_test_png("batch-a.png")
             response = self.client.post(
                 "/api/images/upload/",
-                {"files": [png1, png2]},
+                {"files": [png1, png2], "category_id": self.category.id},
                 format="multipart",
             )
 
@@ -297,7 +315,7 @@ class ImageUploadAPITestCase(TestCase):
             _, png2 = make_test_png("multi2.png", size=(12, 10))
             response = self.client.post(
                 "/api/images/upload/",
-                {"files": [png1, png2]},
+                {"files": [png1, png2], "category_id": self.category.id},
                 format="multipart",
             )
 

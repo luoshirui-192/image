@@ -285,3 +285,52 @@ class ImageCrudAPITestCase(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_client_list_hides_image_path(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/images/")
+        self.assertEqual(response.status_code, 200)
+        item = response.data["data"]["results"][0]
+        self.assertNotIn("image_path", item)
+
+    def test_client_cannot_delete_others_image(self):
+        other = ImageInfo.objects.create(
+            image_name="other.jpg",
+            image_path="upload/20260630/1/other.jpg",
+            image_width=100,
+            image_height=100,
+            file_size=100,
+            file_suffix="jpg",
+            upload_time=self.image.upload_time,
+            update_time=self.image.update_time,
+            upload_user="admin",
+            is_delete=0,
+            category_id=self.category.id,
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.delete(f"/api/images/{other.id}/")
+        self.assertEqual(response.status_code, 403)
+        other.refresh_from_db()
+        self.assertEqual(other.is_delete, 0)
+
+    def test_client_cannot_patch_others_image(self):
+        other = ImageInfo.objects.create(
+            image_name="other2.jpg",
+            image_path="upload/20260630/1/other2.jpg",
+            image_width=100,
+            image_height=100,
+            file_size=100,
+            file_suffix="jpg",
+            upload_time=self.image.upload_time,
+            update_time=self.image.update_time,
+            upload_user="admin",
+            is_delete=0,
+            category_id=self.category.id,
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(
+            f"/api/images/{other.id}/",
+            {"tags": "hack"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)

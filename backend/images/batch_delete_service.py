@@ -38,7 +38,12 @@ def _logical_delete_record(image: ImageInfo) -> dict:
     }
 
 
-def batch_logical_delete(ids: list[int]) -> BatchDeleteResult:
+def batch_logical_delete(
+    ids: list[int],
+    *,
+    username: str = "",
+    is_admin: bool = False,
+) -> BatchDeleteResult:
     """Logically delete multiple active images by id."""
     retention_days = get_retention_days()
     unique_ids: list[int] = []
@@ -65,6 +70,18 @@ def batch_logical_delete(ids: list[int]) -> BatchDeleteResult:
                     id=image_id,
                     success=False,
                     error="图片不存在或已删除",
+                )
+            )
+            result.failed += 1
+            continue
+
+        if not is_admin and image.upload_user != username:
+            result.items.append(
+                BatchDeleteItemResult(
+                    id=image_id,
+                    success=False,
+                    image_name=image.image_name,
+                    error="无权删除他人上传的图片",
                 )
             )
             result.failed += 1

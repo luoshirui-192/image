@@ -110,10 +110,8 @@ def _collect_batch_duplicates(
 
 
 def _resolve_category_id(category_id: int | None) -> int:
-    if category_id is None:
-        return 0
-    if category_id <= 0:
-        return 0
+    if category_id is None or category_id <= 0:
+        raise ValueError("必须选择有效分类")
     if not ImageCategory.objects.filter(id=category_id).exists():
         raise ValueError(f"分类不存在: id={category_id}")
     return category_id
@@ -176,7 +174,7 @@ def _overwrite_existing_image(
     existing.file_suffix = suffix
     existing.file_hash = content_hash
     existing.upload_user = upload_user
-    existing.category_id = cat_id or None
+    existing.category_id = cat_id
     existing.tags = (tags or "").strip()[:500]
     existing.save(
         update_fields=[
@@ -249,7 +247,7 @@ def save_image_bytes(
         update_time=now,
         upload_user=upload_user,
         is_delete=0,
-        category_id=cat_id or None,
+        category_id=cat_id,
         tags=(tags or "").strip()[:500],
     )
     return record

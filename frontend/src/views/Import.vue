@@ -1,9 +1,14 @@
 <script setup>
-import { ref } from 'vue'
+import { reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { FolderOpened } from '@element-plus/icons-vue'
+import { FolderOpened, Plus } from '@element-plus/icons-vue'
 import ImagePreview from '@/components/ImagePreview.vue'
-import { formatFileSize, importImagesApi, listCategoriesApi } from '@/api/images'
+import {
+  createCategoryApi,
+  formatFileSize,
+  importImagesApi,
+  listCategoriesApi,
+} from '@/api/images'
 
 const categories = ref([])
 const form = ref({
@@ -15,6 +20,13 @@ const form = ref({
 const importing = ref(false)
 const results = ref(null)
 
+const categoryDialogVisible = ref(false)
+const categoryDialogSaving = ref(false)
+const newCategoryForm = reactive({
+  category_name: '',
+  sort: 0,
+})
+
 async function loadCategories() {
   try {
     const res = await listCategoriesApi()
@@ -24,10 +36,44 @@ async function loadCategories() {
   }
 }
 
+function openCreateCategory() {
+  newCategoryForm.category_name = ''
+  newCategoryForm.sort = 0
+  categoryDialogVisible.value = true
+}
+
+async function submitCreateCategory() {
+  const name = newCategoryForm.category_name.trim()
+  if (!name) {
+    ElMessage.warning('请输入分类名称')
+    return
+  }
+
+  categoryDialogSaving.value = true
+  try {
+    const res = await createCategoryApi({
+      category_name: name,
+      sort: Number(newCategoryForm.sort) || 0,
+    })
+    ElMessage.success('分类已创建')
+    categoryDialogVisible.value = false
+    await loadCategories()
+    if (res.data?.id) {
+      form.value.categoryId = res.data.id
+    }
+  } finally {
+    categoryDialogSaving.value = false
+  }
+}
+
 async function submitImport(overwrite = false) {
   const directory = form.value.directory.trim()
   if (!directory) {
     ElMessage.warning('请输入服务器上的目录路径')
+    return
+  }
+  if (!form.value.categoryId) {
+    ElMessage.warning('请先选择或新建分类')
     return
   }
 
@@ -90,7 +136,7 @@ loadCategories()
       <p class="page-desc">
         扫描<strong>服务器本地目录</strong>中的图片文件，复制到分层存储并写入数据库。
         Docker 部署请填写 <code>import_samples</code> 或 <code>import_data</code>（对应项目下的示例目录与自定义导入目录）。
-        路径必须在项目根目录下，不能从 <code>upload/</code> 目录导入。
+        路径必须在项目根目录下，不能从 <code>upload/</code> 目录导入。导入前<strong>必须选择或新建分类</strong>。
       </p>
 
       <el-alert
@@ -119,15 +165,26 @@ loadCategories()
 
         <el-row :gutter="16">
           <el-col :xs="24" :sm="12">
-            <el-form-item label="分类">
-              <el-select v-model="form.categoryId" placeholder="选择分类（可选）" clearable style="width: 100%">
-                <el-option
-                  v-for="cat in categories"
-                  :key="cat.id"
-                  :label="cat.category_name"
-                  :value="cat.id"
-                />
-              </el-select>
+            <el-form-item label="分类" required>
+              <div class="category-row">
+                <el-select
+                  v-model="form.categoryId"
+                  placeholder="请选择分类"
+                  filterable
+                  style="width: 100%"
+                >
+                  <el-option
+                    v-for="cat in categories"
+                    :key="cat.id"
+                    :label="cat.category_name"
+                    :value="cat.id"
+                  />
+                </el-select>
+                <el-button type="primary" plain @click="openCreateCategory">
+                  <el-icon><Plus /></el-icon>
+                  新建
+                </el-button>
+              </div>
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="12">
@@ -198,6 +255,23 @@ loadCategories()
         </el-table-column>
       </el-table>
     </div>
+
+    <el-dialog v-model="categoryDialogVisible" title="新建分类" width="420px" destroy-on-close>
+      <el-form label-width="80px" @submit.prevent="submitCreateCategory">
+        <el-form-item label="名称" required>
+          <el-input v-model="newCategoryForm.category_name" maxlength="100" show-word-limit />
+        </el-form-item>
+        <el-form-item label="排序">
+          <el-input-number v-model="newCategoryForm.sort" :min="0" :max="9999" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="categoryDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="categoryDialogSaving" @click="submitCreateCategory">
+          创建并选用
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -227,6 +301,12 @@ loadCategories()
 
 .import-form {
   max-width: 720px;
+}
+
+.category-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
 }
 
 .field-hint {

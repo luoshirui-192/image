@@ -16,7 +16,7 @@ export const MENU_ITEMS = [
     title: '图片上传',
     icon: 'UploadFilled',
     adminOnly: false,
-    description: '拖拽上传、分类与标签',
+    description: '拖拽上传、分类与标签（存储在服务器）',
   },
   {
     path: 'import',
@@ -40,7 +40,7 @@ export const MENU_ITEMS = [
     title: '图片列表',
     icon: 'PictureFilled',
     adminOnly: false,
-    description: '筛选、预览、下载与管理',
+    description: '预览、下载服务器上的图片',
   },
   {
     path: 'categories',

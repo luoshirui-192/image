@@ -18,6 +18,14 @@ const quickMenus = computed(() =>
 
 const iconMap = { UploadFilled, FolderOpened, Document, PictureFilled }
 
+const roleLabel = computed(() => (auth.isAdmin ? '服务器管理员' : '客户端用户'))
+
+const roleHint = computed(() =>
+  auth.isAdmin
+    ? '可管理数据库、SQL 查询、批量导入与全部图片'
+    : '可上传图片到服务器、浏览/下载图片，无法访问数据库',
+)
+
 function goToMenu(item) {
   router.push(item.path ? `/${item.path}` : '/')
 }
@@ -38,7 +46,14 @@ onMounted(async () => {
   <div>
     <div class="page-card welcome-header">
       <h2 class="page-title">欢迎回来，{{ auth.username }}</h2>
-      <p class="desc">图像路径式数据库管理系统 — 上传、检索、SQL 查询与图片管理。</p>
+      <p class="desc">
+        <template v-if="auth.isAdmin">
+          图像路径式数据库管理系统 — 服务器端：原文件存储、路径入库、SQL 查询与运维管理。
+        </template>
+        <template v-else>
+          图像库客户端 — 上传图片到服务器、浏览与下载原文件；数据库仅服务器管理员可访问。
+        </template>
+      </p>
     </div>
 
     <el-row :gutter="16" class="stat-row">
@@ -46,22 +61,22 @@ onMounted(async () => {
         <el-card shadow="never" class="stat-card">
           <template #header>当前用户</template>
           <p><strong>用户名：</strong>{{ auth.username }}</p>
-          <p><strong>角色：</strong>{{ auth.isAdmin ? '管理员' : '普通用户' }}</p>
-          <p><strong>权限：</strong>{{ auth.isAdmin ? '可执行 SQL 查询' : '上传与浏览图片' }}</p>
+          <p><strong>角色：</strong>{{ roleLabel }}</p>
+          <p><strong>权限：</strong>{{ roleHint }}</p>
         </el-card>
       </el-col>
 
       <el-col :xs="24" :sm="12" :md="8">
         <el-card shadow="never" class="stat-card" v-loading="loading">
-          <template #header>后端状态</template>
+          <template #header>服务状态</template>
           <template v-if="health">
             <p><strong>服务：</strong>{{ health.service }}</p>
-            <p><strong>数据库：</strong>{{ health.db_engine }}</p>
+            <p><strong>数据库：</strong>{{ auth.isAdmin ? health.db_engine : '（客户端不可见）' }}</p>
             <p><strong>版本：</strong>{{ health.version }}</p>
           </template>
           <el-alert
             v-else
-            title="无法连接后端，请确认 Django 已启动在 :8000"
+            title="无法连接服务器，请确认服务已启动"
             type="warning"
             show-icon
             :closable="false"
@@ -71,9 +86,15 @@ onMounted(async () => {
 
       <el-col :xs="24" :sm="12" :md="8">
         <el-card shadow="never" class="stat-card">
-          <template #header>系统说明</template>
-          <p>图片文件保存在 <code>upload/</code> 分层目录，元数据与路径记录在 MySQL。</p>
-          <p>管理员可使用 SQL 面板自定义查询，并在结果中预览图片。</p>
+          <template #header>使用说明</template>
+          <template v-if="auth.isAdmin">
+            <p>图片原文件保存在服务器 <code>upload/</code> 目录，路径记录在 MySQL。</p>
+            <p>可在本机使用 Navicat 连接 <code>127.0.0.1:3306</code> 管理数据库。</p>
+          </template>
+          <template v-else>
+            <p>上传的图片保存在<strong>服务器</strong>，不会留在您的电脑里。</p>
+            <p>在「图片列表」可预览、下载原文件；默认显示您上传的图片。</p>
+          </template>
         </el-card>
       </el-col>
     </el-row>

@@ -9,7 +9,7 @@ from rest_framework.views import APIView
 from django.utils import timezone
 
 from images.models import ImageCategory, ImageInfo
-from images.serializers import ImageCategorySerializer, ImageImportSerializer, ImageInfoSerializer
+from images.serializers import ImageCategorySerializer, ImageImportSerializer, ImageInfoSerializer, serialize_image_info
 from images.services import (
     DuplicateBatchError,
     import_images_from_directory,
@@ -20,28 +20,28 @@ from utils.permissions import IsActiveAccount, IsAdminRole
 from utils.responses import error_response, success_response
 
 
-def _serialize_upload_results(results):
+def _serialize_upload_results(results, *, is_admin: bool = True):
     items = []
     for item in results:
         entry = {"filename": item.filename, "success": item.success}
         if item.success and item.image:
-            entry["image"] = ImageInfoSerializer(item.image).data
+            entry["image"] = serialize_image_info(item.image, is_admin=is_admin)
             entry["overwritten"] = item.overwritten
         elif item.error:
             entry["error"] = item.error
         if item.duplicate and item.existing_image:
             entry["duplicate"] = True
-            entry["existing"] = ImageInfoSerializer(item.existing_image).data
+            entry["existing"] = serialize_image_info(item.existing_image, is_admin=is_admin)
         items.append(entry)
     return items
 
 
-def _serialize_duplicates(duplicates: list[dict]):
+def _serialize_duplicates(duplicates: list[dict], *, is_admin: bool = True):
     items = []
     for item in duplicates:
         entry = {"filename": item["filename"]}
         if item.get("existing") is not None:
-            entry["existing"] = ImageInfoSerializer(item["existing"]).data
+            entry["existing"] = serialize_image_info(item["existing"], is_admin=is_admin)
         if item.get("batch_duplicate_of"):
             entry["batch_duplicate_of"] = item["batch_duplicate_of"]
         items.append(entry)
@@ -92,15 +92,17 @@ class ImageUploadView(APIView):
 
         category_id = request.data.get("category_id")
         if category_id in ("", None):
-            parsed_category_id = None
-        else:
-            try:
-                parsed_category_id = int(category_id)
-            except (TypeError, ValueError):
-                return error_response("category_id 必须为整数", code=4001, status=400)
+            return error_response("上传时必须选择分类", code=4001, status=400)
+        try:
+            parsed_category_id = int(category_id)
+        except (TypeError, ValueError):
+            return error_response("category_id 必须为整数", code=4001, status=400)
+        if parsed_category_id <= 0:
+            return error_response("必须选择有效分类", code=4001, status=400)
 
         tags = str(request.data.get("tags", ""))
         overwrite = _parse_overwrite_param(request.data.get("overwrite"))
+        admin = getattr(request.user, "role", "") == "admin"
 
         try:
             results = save_uploaded_files(
@@ -111,7 +113,7 @@ class ImageUploadView(APIView):
                 overwrite=overwrite,
             )
         except DuplicateBatchError as exc:
-            dupes = _serialize_duplicates(exc.duplicates)
+            dupes = _serialize_duplicates(exc.duplicates, is_admin=admin)
             return error_response(
                 "存在重复图片，请确认是否覆盖原有数据",
                 code=4006,
@@ -132,12 +134,12 @@ class ImageUploadView(APIView):
             return error_response(
                 "全部文件上传失败",
                 code=4002,
-                data={"summary": summary, "items": _serialize_upload_results(results)},
+                data={"summary": summary, "items": _serialize_upload_results(results, is_admin=admin)},
                 status=400,
             )
 
         return success_response(
-            {"summary": summary, "items": _serialize_upload_results(results)},
+            {"summary": summary, "items": _serialize_upload_results(results, is_admin=admin)},
             message=f"上传完成：成功 {summary['succeeded']}，失败 {summary['failed']}",
         )
 
@@ -169,7 +171,7 @@ class ImageImportView(APIView):
                 overwrite=overwrite,
             )
         except DuplicateBatchError as exc:
-            dupes = _serialize_duplicates(exc.duplicates)
+            dupes = _serialize_duplicates(exc.duplicates, is_admin=True)
             return error_response(
                 "存在重复图片，请确认是否覆盖原有数据",
                 code=4006,
@@ -193,7 +195,7 @@ class ImageImportView(APIView):
             return error_response("目录中未找到可导入的图片文件", code=4004, status=400)
 
         return success_response(
-            {"summary": summary, "items": _serialize_upload_results(results)},
+            {"summary": summary, "items": _serialize_upload_results(results, is_admin=True)},
             message=f"导入完成：成功 {summary['succeeded']}，失败 {summary['failed']}",
         )
 
@@ -205,8 +207,6 @@ class CategoryListCreateView(APIView):
     permission_classes = [IsAuthenticated, IsActiveAccount]
 
     def get_permissions(self):
-        if self.request.method == "POST":
-            return [IsAuthenticated(), IsActiveAccount(), IsAdminRole()]
         return [IsAuthenticated(), IsActiveAccount()]
 
     def get(self, request):

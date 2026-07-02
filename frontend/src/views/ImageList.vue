@@ -41,7 +41,12 @@ const filters = reactive({
   uploadUser: '',
   dateRange: null,
   includeDeleted: false,
+  scope: auth.isAdmin ? 'all' : 'mine',
 })
+
+function canModifyRow(row) {
+  return auth.isAdmin || row.upload_user === auth.username
+}
 
 const categoryMap = computed(() => {
   const map = {}
@@ -52,7 +57,9 @@ const categoryMap = computed(() => {
 })
 
 const selectedActiveCount = computed(() => selectedRows.value.filter((row) => !row.is_delete).length)
-const canBatchDelete = computed(() => selectedActiveCount.value > 0 && !batchDeleting.value)
+const canBatchDelete = computed(
+  () => auth.isAdmin && selectedActiveCount.value > 0 && !batchDeleting.value,
+)
 
 const previewVisible = ref(false)
 const previewLoading = ref(false)
@@ -118,6 +125,9 @@ function buildQueryParams() {
   if (filters.tags.trim()) params.tags = filters.tags.trim()
   if (filters.suffix.trim()) params.suffix = filters.suffix.trim()
   if (filters.uploadUser.trim()) params.upload_user = filters.uploadUser.trim()
+  else if (!auth.isAdmin && filters.scope === 'mine') {
+    params.upload_user = auth.username
+  }
   if (filters.dateRange?.length === 2) {
     params.upload_time_from = filters.dateRange[0]
     params.upload_time_to = filters.dateRange[1]
@@ -164,9 +174,20 @@ function resetFilters() {
   filters.categoryId = null
   filters.tags = ''
   filters.suffix = ''
-  filters.uploadUser = ''
+  filters.uploadUser = auth.isAdmin ? '' : auth.username
   filters.dateRange = null
   filters.includeDeleted = false
+  filters.scope = auth.isAdmin ? 'all' : 'mine'
+  pagination.page = 1
+  loadImages()
+}
+
+function handleScopeChange() {
+  if (filters.scope === 'mine') {
+    filters.uploadUser = auth.username
+  } else {
+    filters.uploadUser = ''
+  }
   pagination.page = 1
   loadImages()
 }
@@ -191,7 +212,7 @@ function revokePreviewUrl() {
 }
 
 async function openPreview(row) {
-  previewTitle.value = row.image_name || row.image_path
+  previewTitle.value = row.image_name || `图片 #${row.id}`
   previewVisible.value = true
   previewLoading.value = true
   revokePreviewUrl()
@@ -235,11 +256,15 @@ async function submitEdit() {
     ElMessage.warning('图片名称不能为空')
     return
   }
+  if (!editForm.category_id) {
+    ElMessage.warning('请选择分类')
+    return
+  }
   editSaving.value = true
   try {
     await updateImageApi(editForm.id, {
       image_name: editForm.image_name.trim(),
-      category_id: editForm.category_id ?? null,
+      category_id: editForm.category_id,
       tags: editForm.tags.trim(),
     })
     ElMessage.success('更新成功')
@@ -270,7 +295,7 @@ async function handleDelete(row) {
 }
 
 function rowSelectable(row) {
-  return !row.is_delete
+  return !row.is_delete && canModifyRow(row)
 }
 
 function handleSelectionChange(rows) {
@@ -343,6 +368,10 @@ async function loadDeletionPolicy() {
 }
 
 onMounted(async () => {
+  if (!auth.isAdmin) {
+    filters.scope = 'mine'
+    filters.uploadUser = auth.username
+  }
   await Promise.all([loadCategories(), loadDeletionPolicy()])
   await loadImages()
 })
@@ -353,13 +382,30 @@ onMounted(async () => {
     <div class="page-card">
       <h2 class="page-title">图片列表</h2>
       <p class="page-desc">
-        可视化筛选图片元数据，支持预览、下载、编辑与逻辑删除。
-        {{ deletionPolicy.summary || `逻辑删除后保留 ${deletionPolicy.retention_days} 天，到期自动永久删除。` }}
+        <template v-if="auth.isAdmin">
+          可视化筛选图片元数据，支持预览、下载、编辑与逻辑删除。
+          {{ deletionPolicy.summary || `逻辑删除后保留 ${deletionPolicy.retention_days} 天，到期自动永久删除。` }}
+        </template>
+        <template v-else>
+          浏览服务器上的图片，支持预览与下载原文件。默认显示「我的上传」，可切换查看全部。
+          仅可编辑/删除自己上传的图片。
+        </template>
       </p>
 
       <el-form :inline="true" class="filter-form" @submit.prevent="handleSearch">
+        <el-form-item v-if="!auth.isAdmin" label="范围">
+          <el-radio-group v-model="filters.scope" @change="handleScopeChange">
+            <el-radio-button value="mine">我的上传</el-radio-button>
+            <el-radio-button value="all">全部图片</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="关键词">
-          <el-input v-model="filters.keyword" placeholder="名称/路径/标签/上传人" clearable style="width: 180px" />
+          <el-input
+            v-model="filters.keyword"
+            :placeholder="auth.isAdmin ? '名称/路径/标签/上传人' : '名称/标签/上传人'"
+            clearable
+            style="width: 180px"
+          />
         </el-form-item>
         <el-form-item label="分类">
           <el-select v-model="filters.categoryId" placeholder="全部" clearable style="width: 140px">
@@ -383,7 +429,7 @@ onMounted(async () => {
             <el-option label="bmp" value="bmp" />
           </el-select>
         </el-form-item>
-        <el-form-item label="上传人">
+        <el-form-item v-if="auth.isAdmin" label="上传人">
           <el-input v-model="filters.uploadUser" clearable style="width: 120px" />
         </el-form-item>
         <el-form-item label="上传时间">
@@ -397,7 +443,7 @@ onMounted(async () => {
             style="width: 360px"
           />
         </el-form-item>
-        <el-form-item label="含已删">
+        <el-form-item v-if="auth.isAdmin" label="含已删">
           <el-switch v-model="filters.includeDeleted" @change="handleSearch" />
         </el-form-item>
         <el-form-item>
@@ -408,7 +454,7 @@ onMounted(async () => {
     </div>
 
     <div class="page-card table-panel">
-      <div class="table-toolbar">
+      <div v-if="auth.isAdmin" class="table-toolbar">
         <span class="selection-hint">
           已选 <strong>{{ selectedActiveCount }}</strong> 张（仅统计未删除）
         </span>
@@ -432,7 +478,7 @@ onMounted(async () => {
         style="width: 100%"
         @selection-change="handleSelectionChange"
       >
-        <el-table-column type="selection" width="48" align="center" fixed="left" :selectable="rowSelectable" />
+        <el-table-column v-if="auth.isAdmin" type="selection" width="48" align="center" fixed="left" :selectable="rowSelectable" />
         <el-table-column label="预览" width="88" align="center" fixed="left">
           <template #default="{ row }">
             <ImagePreview
@@ -463,7 +509,7 @@ onMounted(async () => {
         <el-table-column label="上传时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.upload_time) }}</template>
         </el-table-column>
-        <el-table-column prop="image_path" label="存储路径" min-width="200" show-overflow-tooltip />
+        <el-table-column v-if="auth.isAdmin" prop="image_path" label="存储路径" min-width="200" show-overflow-tooltip />
         <el-table-column v-if="filters.includeDeleted" label="状态" width="100" align="center">
           <template #default="{ row }">
             <el-tag :type="row.is_delete ? 'danger' : 'success'" size="small">
@@ -492,12 +538,14 @@ onMounted(async () => {
             <el-button v-if="!row.is_delete" link type="primary" :icon="Download" @click="handleDownload(row)">
               下载
             </el-button>
-            <el-button v-if="!row.is_delete" link type="primary" :icon="Edit" @click="openEdit(row)">
+            <el-button v-if="!row.is_delete && canModifyRow(row)" link type="primary" :icon="Edit" @click="openEdit(row)">
               编辑
             </el-button>
-            <el-button v-if="!row.is_delete" link type="danger" @click="handleDelete(row)">删除</el-button>
+            <el-button v-if="!row.is_delete && canModifyRow(row)" link type="danger" @click="handleDelete(row)">
+              删除
+            </el-button>
             <el-button
-              v-if="row.is_delete"
+              v-if="row.is_delete && canModifyRow(row)"
               link
               type="success"
               :icon="RefreshRight"
@@ -534,8 +582,8 @@ onMounted(async () => {
         <el-form-item label="名称" required>
           <el-input v-model="editForm.image_name" maxlength="255" />
         </el-form-item>
-        <el-form-item label="分类">
-          <el-select v-model="editForm.category_id" placeholder="无分类" clearable style="width: 100%">
+        <el-form-item label="分类" required>
+          <el-select v-model="editForm.category_id" placeholder="请选择分类" style="width: 100%">
             <el-option
               v-for="cat in categories"
               :key="cat.id"

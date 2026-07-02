@@ -1,9 +1,17 @@
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled } from '@element-plus/icons-vue'
+import { Plus, UploadFilled } from '@element-plus/icons-vue'
 import ImagePreview from '@/components/ImagePreview.vue'
-import { formatFileSize, listCategoriesApi, uploadImagesApi } from '@/api/images'
+import {
+  createCategoryApi,
+  formatFileSize,
+  listCategoriesApi,
+  uploadImagesApi,
+} from '@/api/images'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
 
 const ACCEPT_TYPES = '.jpg,.jpeg,.png,.gif,.webp,.bmp'
 const MAX_SIZE_MB = 20
@@ -17,10 +25,19 @@ const uploading = ref(false)
 const uploadProgress = ref(0)
 const results = ref(null)
 
+const categoryDialogVisible = ref(false)
+const categoryDialogSaving = ref(false)
+const newCategoryForm = reactive({
+  category_name: '',
+  sort: 0,
+})
+
 const localPreviews = ref(new Map())
 
 const pendingCount = computed(() => fileList.value.length)
-const canUpload = computed(() => pendingCount.value > 0 && !uploading.value)
+const canUpload = computed(
+  () => pendingCount.value > 0 && categoryId.value != null && categoryId.value > 0 && !uploading.value,
+)
 
 function rememberLocalPreview(file) {
   if (!localPreviews.value.has(file.uid)) {
@@ -73,8 +90,43 @@ async function loadCategories() {
   }
 }
 
+function openCreateCategory() {
+  newCategoryForm.category_name = ''
+  newCategoryForm.sort = 0
+  categoryDialogVisible.value = true
+}
+
+async function submitCreateCategory() {
+  const name = newCategoryForm.category_name.trim()
+  if (!name) {
+    ElMessage.warning('请输入分类名称')
+    return
+  }
+
+  categoryDialogSaving.value = true
+  try {
+    const res = await createCategoryApi({
+      category_name: name,
+      sort: Number(newCategoryForm.sort) || 0,
+    })
+    ElMessage.success('分类已创建')
+    categoryDialogVisible.value = false
+    await loadCategories()
+    if (res.data?.id) {
+      categoryId.value = res.data.id
+    }
+  } finally {
+    categoryDialogSaving.value = false
+  }
+}
+
 async function submitUpload(overwrite = false) {
-  if (!canUpload.value) return
+  if (!canUpload.value) {
+    if (!categoryId.value) {
+      ElMessage.warning('请先选择或新建分类')
+    }
+    return
+  }
 
   const files = fileList.value.map((f) => f.raw).filter(Boolean)
   if (!files.length) {
@@ -148,21 +200,36 @@ onBeforeUnmount(() => {
     <div class="page-card">
       <h2 class="page-title">图片上传</h2>
       <p class="page-desc">
-        支持拖拽或多选上传，自动分层存储并写入数据库路径。允许格式：JPG / PNG / GIF / WebP / BMP，单文件最大 {{ MAX_SIZE_MB }}MB。
+        支持拖拽或多选上传，自动分层存储并写入数据库路径。上传前<strong>必须选择或新建分类</strong>。
+        允许格式：JPG / PNG / GIF / WebP / BMP，单文件最大 {{ MAX_SIZE_MB }}MB。
       </p>
 
       <el-form label-width="80px" class="upload-form">
         <el-row :gutter="16">
           <el-col :xs="24" :sm="12">
-            <el-form-item label="分类">
-              <el-select v-model="categoryId" placeholder="选择分类（可选）" clearable style="width: 100%">
-                <el-option
-                  v-for="cat in categories"
-                  :key="cat.id"
-                  :label="cat.category_name"
-                  :value="cat.id"
-                />
-              </el-select>
+            <el-form-item label="分类" required>
+              <div class="category-row">
+                <el-select
+                  v-model="categoryId"
+                  placeholder="请选择分类"
+                  filterable
+                  style="width: 100%"
+                >
+                  <el-option
+                    v-for="cat in categories"
+                    :key="cat.id"
+                    :label="cat.category_name"
+                    :value="cat.id"
+                  />
+                </el-select>
+                <el-button type="primary" plain @click="openCreateCategory">
+                  <el-icon><Plus /></el-icon>
+                  新建
+                </el-button>
+              </div>
+              <div v-if="categories.length === 0" class="field-hint warn">
+                暂无分类，请先点击「新建」创建分类后再上传。
+              </div>
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="12">
@@ -195,7 +262,7 @@ onBeforeUnmount(() => {
         <el-icon class="upload-icon"><UploadFilled /></el-icon>
         <div class="el-upload__text">将图片拖到此处，或 <em>点击选择</em></div>
         <template #tip>
-          <div class="el-upload__tip">已选 {{ pendingCount }} 个文件，确认后点击「开始上传」</div>
+          <div class="el-upload__tip">已选 {{ pendingCount }} 个文件，选择分类后点击「开始上传」</div>
         </template>
         <template #file="{ file }">
           <div class="upload-file-item">
@@ -256,7 +323,8 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column label="存储路径 / 错误" min-width="220">
           <template #default="{ row }">
-            <span v-if="row.success && row.image" class="path-text">{{ row.image.image_path }}</span>
+            <span v-if="row.success && row.image && auth.isAdmin" class="path-text">{{ row.image.image_path }}</span>
+            <span v-else-if="row.success && row.image" class="text-muted">已保存至服务器</span>
             <span v-else class="error-text">{{ row.error }}</span>
           </template>
         </el-table-column>
@@ -274,6 +342,23 @@ onBeforeUnmount(() => {
         </el-table-column>
       </el-table>
     </div>
+
+    <el-dialog v-model="categoryDialogVisible" title="新建分类" width="420px" destroy-on-close>
+      <el-form label-width="80px" @submit.prevent="submitCreateCategory">
+        <el-form-item label="名称" required>
+          <el-input v-model="newCategoryForm.category_name" maxlength="100" show-word-limit />
+        </el-form-item>
+        <el-form-item label="排序">
+          <el-input-number v-model="newCategoryForm.sort" :min="0" :max="9999" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="categoryDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="categoryDialogSaving" @click="submitCreateCategory">
+          创建并选用
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -292,6 +377,23 @@ onBeforeUnmount(() => {
 
 .upload-form {
   margin-bottom: 8px;
+}
+
+.category-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.field-hint {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.field-hint.warn {
+  color: #e6a23c;
 }
 
 .upload-drop {
