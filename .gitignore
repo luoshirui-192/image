@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+
+# Secrets & local env（保留 *.example 模板）
+.env
+!.env.docker.example
+backend/.env
+frontend/.env.production
+frontend/.env.development
+frontend/.env.local
+frontend/.env.*.local
+
+backend/db.sqlite3
+backend/data/sql_templates.json
+backend/thumb_cache/*
+!backend/thumb_cache/.gitkeep
+backend/logs/*
+!backend/logs/.gitkeep
+
+# Upload files (keep structure)
+upload/*
+!upload/.gitkeep
+!upload/README.md
+!upload/.gitignore
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Word temp
+~$*.docx
+
+# Frontend build & deps
+frontend/node_modules/
+frontend/dist/
+
+# Deploy (server-specific generated)
+deploy/paths.env
+deploy/nginx/generated/*.conf
+deploy/gunicorn/generated/*.service
+
+# Runtime backups
+backups/*
+!backups/.gitkeep
+
+# Test / cache
+.pytest_cache/
+.coverage
+htmlcov/

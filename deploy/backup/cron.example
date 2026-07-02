@@ -1,0 +1,8 @@
+# 步骤 30 — 定时备份示例（Linux crontab）
+# 安装：sudo crontab -e  或  sudo crontab -u root -e
+#
+# 每天凌晨 2 点全量备份（MySQL + upload），日志追加到文件
+0 2 * * * cd /opt/image_db && /opt/image_db/.venv/bin/python scripts/backup_all.py >> /var/log/image_db_backup.log 2>&1
+
+# 仅工作日早上 8 点冒烟测试（需 Gunicorn + Nginx 已运行）
+# 0 8 * * 1-5 cd /opt/image_db && /opt/image_db/.venv/bin/python scripts/smoke_test.py --base-url http://127.0.0.1:8000 >> /var/log/image_db_smoke.log 2>&1

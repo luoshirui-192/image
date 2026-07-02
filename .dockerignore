@@ -1,0 +1,38 @@
+# Git
+.git
+.github
+
+# Python
+__pycache__
+*.pyc
+backend/.env
+backend/db.sqlite3
+backend/logs/gunicorn_*.log
+backend/thumb_cache/*
+.venv
+
+# Frontend dev
+frontend/node_modules
+frontend/dist
+
+# Runtime data
+upload/*
+!upload/.gitkeep
+backups/*
+!backups/.gitkeep
+
+# IDE
+.idea
+.vscode
+
+# Deploy generated
+deploy/paths.env
+deploy/nginx/generated
+deploy/gunicorn/generated
+
+# Local env (keep example)
+.env
+!.env.docker.example
+
+# Docs binary
+*.docx

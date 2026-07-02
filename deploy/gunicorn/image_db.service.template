@@ -1,0 +1,24 @@
+[Unit]
+Description=图像路径式数据库管理系统 — Gunicorn (Django)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{RUN_USER}}
+Group={{RUN_GROUP}}
+WorkingDirectory={{PROJECT_ROOT}}/backend
+Environment="GUNICORN_BIND={{GUNICORN_BIND}}"
+Environment="GUNICORN_WORKERS={{GUNICORN_WORKERS}}"
+Environment="GUNICORN_TIMEOUT={{GUNICORN_TIMEOUT}}"
+ExecStart={{VENV_BIN}}/gunicorn -c {{PROJECT_ROOT}}/deploy/gunicorn/gunicorn.conf.py config.wsgi:application
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# 上传目录、缩略图缓存、日志需可写
+ReadWritePaths={{PROJECT_ROOT}}/upload {{PROJECT_ROOT}}/backend/thumb_cache {{PROJECT_ROOT}}/backend/logs
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,53 @@
+# 图像路径式数据库管理系统 — Nginx 站点配置（步骤 28）
+# 由 scripts/render_nginx_config.py 根据 deploy/paths.env 生成，勿手改生成文件。
+#
+# 路由：
+#   /        → frontend/dist（Vue SPA）
+#   /api/    → 反代 Django（Gunicorn / runserver）
+#   /upload/ → 可选直出存储目录（默认关闭，图片经 /api/images/* 鉴权访问）
+
+upstream image_db_backend {
+    server {{BACKEND_UPSTREAM}};
+    keepalive 8;
+}
+
+server {
+    listen {{LISTEN_PORT}};
+    server_name {{SERVER_NAME}};
+
+    client_max_body_size {{CLIENT_MAX_BODY_SIZE}};
+
+    root {{FRONTEND_DIST}};
+    index index.html;
+
+    # Vite 构建产物带 hash，可长期缓存
+    location /assets/ {
+        try_files $uri =404;
+        expires 7d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location /api/ {
+        proxy_pass http://image_db_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_read_timeout 120s;
+        proxy_connect_timeout 10s;
+    }
+
+{{UPLOAD_LOCATION}}
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # 禁止访问隐藏文件
+    location ~ /\. {
+        deny all;
+        return 404;
+    }
+}

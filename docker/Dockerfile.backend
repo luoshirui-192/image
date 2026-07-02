@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1
+
+FROM python:3.11-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        default-libmysqlclient-dev build-essential pkg-config bash \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY backend/requirements.txt backend/requirements-production.txt /app/backend/
+RUN pip install --no-cache-dir -r /app/backend/requirements-production.txt
+
+COPY backend /app/backend
+COPY deploy/gunicorn/gunicorn.conf.py /app/deploy/gunicorn/gunicorn.conf.py
+COPY docker/backend-entrypoint.sh /app/docker/backend-entrypoint.sh
+COPY docker/ensure_mysql57_triggers.py /app/docker/ensure_mysql57_triggers.py
+COPY docker/ensure_file_hash_column.py /app/docker/ensure_file_hash_column.py
+COPY scripts/generate_secret_key.py /app/scripts/generate_secret_key.py
+COPY upload /app/upload
+
+RUN sed -i 's/\r$//' /app/docker/backend-entrypoint.sh \
+    && mkdir -p /app/backend/logs /app/backend/thumb_cache \
+    && chmod +x /app/docker/backend-entrypoint.sh
+
+ENV PYTHONUNBUFFERED=1
+ENV DJANGO_SETTINGS_MODULE=config.settings
+
+WORKDIR /app/backend
+
+ENTRYPOINT ["/bin/bash", "/app/docker/backend-entrypoint.sh"]

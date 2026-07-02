@@ -1,0 +1,172 @@
+<script setup>
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { Document, FolderOpened, PictureFilled, UploadFilled } from '@element-plus/icons-vue'
+import { healthApi } from '@/api/auth'
+import { APP_VERSION } from '@/config/app'
+import { filterMenuByRole } from '@/config/menu'
+import { useAuthStore } from '@/stores/auth'
+
+const router = useRouter()
+const auth = useAuthStore()
+const health = ref(null)
+const loading = ref(true)
+
+const quickMenus = computed(() =>
+  filterMenuByRole(auth.isAdmin).filter((item) => item.name !== 'home').slice(0, 4),
+)
+
+const iconMap = { UploadFilled, FolderOpened, Document, PictureFilled }
+
+function goToMenu(item) {
+  router.push(item.path ? `/${item.path}` : '/')
+}
+
+onMounted(async () => {
+  try {
+    const res = await healthApi()
+    health.value = res.data
+  } catch {
+    health.value = null
+  } finally {
+    loading.value = false
+  }
+})
+</script>
+
+<template>
+  <div>
+    <div class="page-card welcome-header">
+      <h2 class="page-title">欢迎回来，{{ auth.username }}</h2>
+      <p class="desc">图像路径式数据库管理系统 — 上传、检索、SQL 查询与图片管理。</p>
+    </div>
+
+    <el-row :gutter="16" class="stat-row">
+      <el-col :xs="24" :sm="12" :md="8">
+        <el-card shadow="never" class="stat-card">
+          <template #header>当前用户</template>
+          <p><strong>用户名：</strong>{{ auth.username }}</p>
+          <p><strong>角色：</strong>{{ auth.isAdmin ? '管理员' : '普通用户' }}</p>
+          <p><strong>权限：</strong>{{ auth.isAdmin ? '可执行 SQL 查询' : '上传与浏览图片' }}</p>
+        </el-card>
+      </el-col>
+
+      <el-col :xs="24" :sm="12" :md="8">
+        <el-card shadow="never" class="stat-card" v-loading="loading">
+          <template #header>后端状态</template>
+          <template v-if="health">
+            <p><strong>服务：</strong>{{ health.service }}</p>
+            <p><strong>数据库：</strong>{{ health.db_engine }}</p>
+            <p><strong>版本：</strong>{{ health.version }}</p>
+          </template>
+          <el-alert
+            v-else
+            title="无法连接后端，请确认 Django 已启动在 :8000"
+            type="warning"
+            show-icon
+            :closable="false"
+          />
+        </el-card>
+      </el-col>
+
+      <el-col :xs="24" :sm="12" :md="8">
+        <el-card shadow="never" class="stat-card">
+          <template #header>系统说明</template>
+          <p>图片文件保存在 <code>upload/</code> 分层目录，元数据与路径记录在 MySQL。</p>
+          <p>管理员可使用 SQL 面板自定义查询，并在结果中预览图片。</p>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <div class="page-card quick-nav">
+      <h3 class="section-title">快捷导航</h3>
+      <el-row :gutter="12">
+        <el-col v-for="item in quickMenus" :key="item.name" :xs="12" :sm="6">
+          <div class="nav-card" @click="goToMenu(item)">
+            <el-icon :size="28" color="#409eff">
+              <component :is="iconMap[item.icon] || Document" />
+            </el-icon>
+            <div class="nav-title">{{ item.title }}</div>
+            <div class="nav-desc">{{ item.description }}</div>
+          </div>
+        </el-col>
+      </el-row>
+    </div>
+
+    <p class="version-hint">前端 v{{ APP_VERSION }} · 图像路径式数据库管理系统</p>
+  </div>
+</template>
+
+<style scoped>
+.welcome-header {
+  margin-bottom: 16px;
+}
+
+.desc {
+  color: #606266;
+  margin: 0;
+  line-height: 1.6;
+}
+
+.stat-row {
+  margin-bottom: 16px;
+}
+
+.stat-card p {
+  margin: 6px 0;
+  color: #606266;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.stat-card code {
+  background: #f5f7fa;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 13px;
+}
+
+.quick-nav {
+  margin-bottom: 12px;
+}
+
+.section-title {
+  margin: 0 0 16px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.nav-card {
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  padding: 16px;
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  margin-bottom: 12px;
+  min-height: 110px;
+}
+
+.nav-card:hover {
+  border-color: #409eff;
+  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.12);
+}
+
+.nav-title {
+  font-weight: 600;
+  margin: 8px 0 4px;
+  color: #303133;
+}
+
+.nav-desc {
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.4;
+}
+
+.version-hint {
+  text-align: center;
+  font-size: 12px;
+  color: #909399;
+  margin: 8px 0 0;
+}
+</style>
