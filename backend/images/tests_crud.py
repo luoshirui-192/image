@@ -10,7 +10,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from images.models import ImageCategory, ImageInfo
+from images.models import ImageCategory, ImageInfo, ImageSourceMap
 from logs.models import OperateLog
 from users.models import SysUser
 
@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS image_info (
     is_delete SMALLINT NOT NULL DEFAULT 0,
     category_id INTEGER NULL,
     tags VARCHAR(500) NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS image_source_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_table VARCHAR(64) NOT NULL,
+    source_id VARCHAR(64) NOT NULL,
+    image_info_id INTEGER NOT NULL,
+    migrated_at DATETIME NOT NULL
 );
 """
 
@@ -112,18 +119,6 @@ class ImageCrudAPITestCase(TestCase):
             tags="风景,湖",
         )
 
-    def test_list_requires_auth(self):
-        response = self.client.get("/api/images/")
-        self.assertEqual(response.status_code, 401)
-
-    def test_list_and_filter(self):
-        self.client.force_authenticate(user=self.user)
-        response = self.client.get("/api/images/", {"keyword": "lake", "category_id": self.category.id})
-        self.assertEqual(response.status_code, 200)
-        data = response.data["data"]
-        self.assertEqual(data["count"], 1)
-        self.assertEqual(data["results"][0]["image_name"], "lake.jpg")
-
     def test_get_detail(self):
         self.client.force_authenticate(user=self.user)
         response = self.client.get(f"/api/images/{self.image.id}/")
@@ -143,28 +138,39 @@ class ImageCrudAPITestCase(TestCase):
         self.assertEqual(self.image.image_name, "new-name.jpg")
         self.assertTrue(OperateLog.objects.filter(action_type="image_update").exists())
 
-    def test_logical_delete(self):
-        self.client.force_authenticate(user=self.user)
-        response = self.client.delete(f"/api/images/{self.image.id}/")
+    def test_physical_delete(self):
+        self._write_image_file(self.image.image_path)
+        ImageSourceMap.objects.create(
+            source_table="legacy_images",
+            source_id="1",
+            image_info_id=self.image.id,
+            migrated_at=timezone.now(),
+        )
+        with self._settings():
+            self.client.force_authenticate(user=self.user)
+            response = self.client.delete(f"/api/images/{self.image.id}/")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("deletion_info", response.data["data"])
+        self.assertTrue(response.data["data"]["permanent"])
         self.assertIn("notice", response.data["data"])
 
-        self.image.refresh_from_db()
-        self.assertEqual(self.image.is_delete, 1)
+        self.assertFalse(ImageInfo.objects.filter(pk=self.image.id).exists())
+        self.assertEqual(ImageSourceMap.objects.filter(image_info_id=self.image.id).count(), 0)
+
+        file_path = self.upload_root.parent.joinpath(*self.image.image_path.split("/"))
+        self.assertFalse(file_path.is_file())
 
         detail = self.client.get(f"/api/images/{self.image.id}/")
         self.assertEqual(detail.status_code, 404)
+        self.assertTrue(OperateLog.objects.filter(action_type="image_delete").exists())
 
-        listed = self.client.get("/api/images/")
-        self.assertEqual(listed.data["data"]["count"], 0)
-
-    def test_restore_deleted_image(self):
+    def test_restore_legacy_soft_deleted_image(self):
+        """Restore API remains for historical is_delete=1 rows not yet purged."""
         self._write_image_file(self.image.image_path)
+        self.image.is_delete = 1
+        self.image.save(update_fields=["is_delete"])
+
         with self._settings():
             self.client.force_authenticate(user=self.user)
-            self.client.delete(f"/api/images/{self.image.id}/")
-
             restore = self.client.post(f"/api/images/{self.image.id}/restore/")
             self.assertEqual(restore.status_code, 200)
 
@@ -172,56 +178,8 @@ class ImageCrudAPITestCase(TestCase):
         self.assertEqual(self.image.is_delete, 0)
 
         self.client.force_authenticate(user=self.user)
-        listed = self.client.get("/api/images/")
-        self.assertEqual(listed.data["data"]["count"], 1)
-
-    def test_deletion_policy(self):
-        self.client.force_authenticate(user=self.user)
-        response = self.client.get("/api/images/deletion-policy/")
-        self.assertEqual(response.status_code, 200)
-        self.assertGreaterEqual(response.data["data"]["retention_days"], 1)
-
-    def test_user_include_own_deleted(self):
-        self.image.is_delete = 1
-        self.image.save(update_fields=["is_delete"])
-
-        self.client.force_authenticate(user=self.user)
-        response = self.client.get("/api/images/", {"include_deleted": "1"})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["count"], 1)
-        self.assertIsNotNone(response.data["data"]["results"][0]["deletion_info"])
-
-    def test_admin_include_deleted(self):
-        self.image.is_delete = 1
-        self.image.save(update_fields=["is_delete"])
-
-        self.client.force_authenticate(user=self.admin)
-        response = self.client.get("/api/images/", {"include_deleted": "1"})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["count"], 1)
-
-    def test_user_cannot_see_others_deleted(self):
-        self.image.is_delete = 0
-        self.image.save(update_fields=["is_delete"])
-        ImageInfo.objects.create(
-            image_name="other.jpg",
-            image_path="upload/20260630/1/other.jpg",
-            image_width=100,
-            image_height=100,
-            file_size=100,
-            file_suffix="jpg",
-            upload_time=self.image.upload_time,
-            update_time=self.image.update_time,
-            upload_user="admin",
-            is_delete=1,
-        )
-
-        self.client.force_authenticate(user=self.user)
-        response = self.client.get("/api/images/", {"include_deleted": "1"})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["count"], 1)
-        self.assertEqual(response.data["data"]["results"][0]["image_name"], "lake.jpg")
-        self.assertEqual(response.data["data"]["results"][0]["is_delete"], 0)
+        detail = self.client.get(f"/api/images/{self.image.id}/")
+        self.assertEqual(detail.status_code, 200)
 
     def test_user_cannot_restore_others_deleted(self):
         self._write_image_file("upload/20260630/1/other.jpg")
@@ -242,41 +200,6 @@ class ImageCrudAPITestCase(TestCase):
             response = self.client.post(f"/api/images/{other.id}/restore/")
         self.assertEqual(response.status_code, 400)
 
-    def test_batch_delete(self):
-        now = self.image.upload_time
-        second = ImageInfo.objects.create(
-            image_name="batch2.jpg",
-            image_path="upload/20260630/1/batch2.jpg",
-            image_width=100,
-            image_height=100,
-            file_size=100,
-            file_suffix="jpg",
-            upload_time=now,
-            update_time=now,
-            upload_user="viewer",
-            is_delete=0,
-        )
-
-        self.client.force_authenticate(user=self.user)
-        response = self.client.post(
-            "/api/images/batch-delete/",
-            {"ids": [self.image.id, second.id, 99999]},
-            format="json",
-        )
-        self.assertEqual(response.status_code, 200)
-        data = response.data["data"]
-        self.assertEqual(data["summary"]["succeeded"], 2)
-        self.assertEqual(data["summary"]["failed"], 1)
-
-        self.image.refresh_from_db()
-        second.refresh_from_db()
-        self.assertEqual(self.image.is_delete, 1)
-        self.assertEqual(second.is_delete, 1)
-
-        listed = self.client.get("/api/images/")
-        self.assertEqual(listed.data["data"]["count"], 0)
-        self.assertTrue(OperateLog.objects.filter(action_type="image_batch_delete").exists())
-
     def test_invalid_category_on_patch(self):
         self.client.force_authenticate(user=self.user)
         response = self.client.patch(
@@ -285,13 +208,6 @@ class ImageCrudAPITestCase(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 400)
-
-    def test_client_list_hides_image_path(self):
-        self.client.force_authenticate(user=self.user)
-        response = self.client.get("/api/images/")
-        self.assertEqual(response.status_code, 200)
-        item = response.data["data"]["results"][0]
-        self.assertNotIn("image_path", item)
 
     def test_client_cannot_delete_others_image(self):
         other = ImageInfo.objects.create(

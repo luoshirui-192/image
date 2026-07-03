@@ -8,6 +8,8 @@ import { ElMessageBox } from 'element-plus'
 
 import {
 
+  Connection,
+
   Document,
 
   Expand,
@@ -27,6 +29,8 @@ import {
   Setting,
 
   UploadFilled,
+
+  View,
 
 } from '@element-plus/icons-vue'
 
@@ -78,6 +82,8 @@ const iconMap = {
 
   Document,
 
+  Connection,
+
   PictureFilled,
 
   Menu: MenuIcon,
@@ -85,6 +91,10 @@ const iconMap = {
   List,
 
   Setting,
+
+  Connection,
+
+  View,
 
 }
 

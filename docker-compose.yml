@@ -1,70 +1,94 @@
-name: image-db
-
-services:
-  db:
-    image: mysql:5.7
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-image_db_root}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-image_db}
-      MYSQL_USER: ${MYSQL_USER:-image_db}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-image_db_pass}
-    command:
-      - --character-set-server=utf8
-      - --collation-server=utf8_general_ci
-    volumes:
-      - mysql_data:/var/lib/mysql
-      - ./sql:/sql:ro
-      - ./docker/mysql-init/00-init.sh:/docker-entrypoint-initdb.d/00-init.sh:ro
-    ports:
-      - "127.0.0.1:3306:3306"
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-
-  backend:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.backend
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      DEBUG: "False"
-      SECRET_KEY: ${SECRET_KEY:-change-me-docker-secret-key}
-      IMAGE_ACCESS_SECRET: ${IMAGE_ACCESS_SECRET:-change-me-docker-image-secret}
-      DB_ENGINE: mysql
-      DB_HOST: db
-      DB_PORT: "3306"
-      DB_NAME: ${MYSQL_DATABASE:-image_db}
-      DB_USER: ${MYSQL_USER:-image_db}
-      DB_PASSWORD: ${MYSQL_PASSWORD:-image_db_pass}
-      DB_CHARSET: utf8
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,backend}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost}
-      UPLOAD_ROOT: /app/upload
-      THUMB_CACHE_ROOT: /app/backend/thumb_cache
-      GUNICORN_BIND: "0.0.0.0:8000"
-    volumes:
-      - ./upload:/app/upload
-      - thumb_cache:/app/backend/thumb_cache
-    expose:
-      - "8000"
-
-  web:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.nginx
-    restart: unless-stopped
-    depends_on:
-      - backend
-    ports:
-      - "${HTTP_PORT:-80}:80"
-
-volumes:
-  mysql_data:
-  thumb_cache:
+name: image-db
+
+x-backend-environment: &backend-environment
+  DEBUG: "False"
+  SECRET_KEY: ${SECRET_KEY:-change-me-docker-secret-key}
+  IMAGE_ACCESS_SECRET: ${IMAGE_ACCESS_SECRET:-change-me-docker-image-secret}
+  DB_ENGINE: mysql
+  DB_HOST: db
+  DB_PORT: "3306"
+  DB_NAME: ${MYSQL_DATABASE:-image_db}
+  DB_USER: ${MYSQL_USER:-image_db}
+  DB_PASSWORD: ${MYSQL_PASSWORD:-image_db_pass}
+  DB_CHARSET: utf8
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,backend}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost}
+  UPLOAD_ROOT: /app/upload
+  THUMB_CACHE_ROOT: /app/backend/thumb_cache
+  LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-90}
+  DELETED_IMAGE_RETENTION_DAYS: ${DELETED_IMAGE_RETENTION_DAYS:-30}
+
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-image_db_root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-image_db}
+      MYSQL_USER: ${MYSQL_USER:-image_db}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-image_db_pass}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql:/sql:ro
+      - ./docker/mysql-init/00-init.sh:/docker-entrypoint-initdb.d/00-init.sh:ro
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *backend-environment
+      GUNICORN_BIND: "0.0.0.0:8000"
+    volumes:
+      - ./upload:/app/upload
+      - thumb_cache:/app/backend/thumb_cache
+    expose:
+      - "8000"
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/app/docker/maintenance-loop.sh"]
+    environment:
+      <<: *backend-environment
+      MAINTENANCE_INTERVAL_HOURS: ${MAINTENANCE_INTERVAL_HOURS:-24}
+    volumes:
+      - ./upload:/app/upload
+      - thumb_cache:/app/backend/thumb_cache
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.nginx
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${HTTP_PORT:-80}:80"
+
+volumes:
+  mysql_data:
+  thumb_cache:
+

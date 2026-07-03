@@ -85,17 +85,111 @@ class ImageInfoUpdateSerializer(serializers.Serializer):
     tags = serializers.CharField(required=False, allow_blank=True, max_length=500, trim_whitespace=True)
 
 
-class ImageImportSerializer(serializers.Serializer):
-    directory = serializers.CharField(max_length=500, trim_whitespace=True)
-    category_id = serializers.IntegerField(required=True, allow_null=False, min_value=1)
-    tags = serializers.CharField(required=False, allow_blank=True, max_length=500, default="")
-    recursive = serializers.BooleanField(required=False, default=False)
+class BlobMigrationDiscoverSerializer(serializers.Serializer):
+    db_alias = serializers.CharField(required=False, default="default", max_length=32)
 
 
-class ImageBatchDeleteSerializer(serializers.Serializer):
-    ids = serializers.ListField(
-        child=serializers.IntegerField(min_value=1),
-        min_length=1,
-        max_length=200,
-        allow_empty=False,
+class BlobMigrationSourceSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    name = serializers.CharField(required=False, allow_blank=True, max_length=100, default="")
+    source_table = serializers.CharField(max_length=64, trim_whitespace=True)
+    source_pk_column = serializers.CharField(required=False, default="id", max_length=64, trim_whitespace=True)
+    blob_column = serializers.CharField(max_length=64, trim_whitespace=True)
+    name_column = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    suffix_column = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    category_id = serializers.IntegerField(min_value=1)
+    upload_user = serializers.CharField(required=False, allow_blank=True, default="migration", max_length=100)
+    tags = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
+    where_clause = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
+    db_alias = serializers.CharField(required=False, default="default", max_length=32)
+    enabled = serializers.IntegerField(required=False, default=1)
+    last_run_at = serializers.DateTimeField(read_only=True)
+    create_time = serializers.DateTimeField(read_only=True)
+
+
+class BlobMigrationRunSerializer(serializers.Serializer):
+    source_id = serializers.IntegerField(min_value=1)
+    batch_size = serializers.IntegerField(required=False, default=50, min_value=1, max_value=500)
+    dry_run = serializers.BooleanField(required=False, default=False)
+    skip_existing = serializers.BooleanField(required=False, default=True)
+
+
+class ExternalDbConnectionSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    name = serializers.CharField(max_length=100, trim_whitespace=True)
+    host = serializers.CharField(max_length=255, trim_whitespace=True)
+    port = serializers.IntegerField(min_value=1, max_value=65535, default=3306)
+    db_name = serializers.CharField(max_length=64, trim_whitespace=True)
+    username = serializers.CharField(max_length=100, trim_whitespace=True)
+    password = serializers.CharField(max_length=255, write_only=True, required=False, allow_blank=True)
+    charset = serializers.CharField(required=False, default="utf8", max_length=16)
+    remark = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
+    enabled = serializers.IntegerField(required=False, default=1)
+
+
+class ExternalDbConnectionTestSerializer(serializers.Serializer):
+    name = serializers.CharField(required=False, allow_blank=True, default="test", max_length=100)
+    host = serializers.CharField(max_length=255, trim_whitespace=True)
+    port = serializers.IntegerField(min_value=1, max_value=65535, default=3306)
+    db_name = serializers.CharField(max_length=64, trim_whitespace=True)
+    username = serializers.CharField(max_length=100, trim_whitespace=True)
+    password = serializers.CharField(max_length=255, write_only=True)
+    charset = serializers.CharField(required=False, default="utf8", max_length=16)
+
+
+class BlobTableViewSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    name = serializers.CharField(max_length=100)
+    db_alias = serializers.CharField(max_length=32)
+    source_table = serializers.CharField(max_length=64)
+    source_pk_column = serializers.CharField(max_length=64)
+    blob_column = serializers.CharField(max_length=64)
+    display_columns = serializers.CharField(required=False, allow_blank=True, default="")
+    where_clause = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
+    remark = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
+    last_viewed_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    create_time = serializers.DateTimeField(read_only=True, allow_null=True)
+    update_time = serializers.DateTimeField(read_only=True, allow_null=True)
+
+
+class BlobTableViewCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(required=False, allow_blank=True, default="", max_length=100)
+    db_alias = serializers.CharField(required=False, default="default", max_length=32)
+    source_table = serializers.CharField(max_length=64, trim_whitespace=True)
+    source_pk_column = serializers.CharField(required=False, default="id", max_length=64, trim_whitespace=True)
+    blob_column = serializers.CharField(max_length=64, trim_whitespace=True)
+    display_columns = serializers.ListField(
+        child=serializers.CharField(max_length=64),
+        required=False,
+        allow_empty=True,
+    )
+    where_clause = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
+    remark = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
+
+
+class BlobTableViewUpdateSerializer(serializers.Serializer):
+    name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    display_columns = serializers.ListField(
+        child=serializers.CharField(max_length=64),
+        required=False,
+        allow_empty=True,
+    )
+    where_clause = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    remark = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class BlobTableViewRowsSerializer(serializers.Serializer):
+    offset = serializers.IntegerField(required=False, default=0, min_value=0)
+    limit = serializers.IntegerField(required=False, default=100, min_value=1, max_value=500)
+
+
+class BlobTableViewPreviewSchemaSerializer(serializers.Serializer):
+    db_alias = serializers.CharField(required=False, default="default", max_length=32)
+    source_table = serializers.CharField(max_length=64, trim_whitespace=True)
+    source_pk_column = serializers.CharField(required=False, default="id", max_length=64, trim_whitespace=True)
+    blob_column = serializers.CharField(max_length=64, trim_whitespace=True)
+    display_columns = serializers.ListField(
+        child=serializers.CharField(max_length=64),
+        required=False,
+        allow_empty=True,
     )

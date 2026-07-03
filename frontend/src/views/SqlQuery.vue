@@ -1,16 +1,23 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   CircleCheck,
   Delete,
   Document,
   Download,
+  Edit,
   VideoPlay,
+  View,
 } from '@element-plus/icons-vue'
-import ImagePreview from '@/components/ImagePreview.vue'
+import ImageGalleryPanel from '@/components/ImageGalleryPanel.vue'
 import SqlEditor from '@/components/SqlEditor.vue'
-import { fetchImageBlob } from '@/api/images'
+import {
+  deleteImageApi,
+  downloadImageFile,
+  listCategoriesApi,
+  updateImageApi,
+} from '@/api/images'
 import {
   executeSqlApi,
   findPathColumn,
@@ -21,6 +28,10 @@ import {
   validateSqlApi,
 } from '@/api/sql'
 import { exportSqlResultToExcel } from '@/utils/exportExcel'
+import { useAuthStore } from '@/stores/auth'
+import { highlightAndScrollTableRow } from '@/utils/tableScroll'
+
+const auth = useAuthStore()
 
 const SQL_DRAFT_KEY = 'image_db_sql_draft'
 
@@ -34,11 +45,25 @@ const lastError = ref('')
 
 const result = ref(null)
 
-const previewVisible = ref(false)
-const previewLoading = ref(false)
-const previewSrc = ref('')
-const previewTitle = ref('')
-let previewObjectUrl = ''
+const resultTableRef = ref(null)
+const galleryItems = ref([])
+const galleryIndex = ref(-1)
+
+const categories = ref([])
+const editVisible = ref(false)
+const editSaving = ref(false)
+const editForm = reactive({
+  id: null,
+  image_name: '',
+  category_id: null,
+  tags: '',
+})
+
+const IMAGE_NAME_FIELDS = ['image_name', 'name', 'filename']
+const UPLOAD_USER_FIELDS = ['upload_user', 'user', 'username']
+const SUFFIX_FIELDS = ['file_suffix', 'suffix']
+const CATEGORY_FIELDS = ['category_id']
+const TAGS_FIELDS = ['tags']
 
 const pathColumn = computed(() => {
   if (!result.value) return null
@@ -58,6 +83,53 @@ const idColumn = computed(() => {
 })
 
 const hasResult = computed(() => Boolean(result.value?.columns?.length))
+
+const showImageActions = computed(() => Boolean(pathColumn.value && idColumn.value))
+
+function pickRowField(row, candidates) {
+  for (const key of candidates) {
+    if (row[key] != null && row[key] !== '') return row[key]
+  }
+  const lowerMap = {}
+  Object.keys(row).forEach((key) => {
+    lowerMap[key.toLowerCase()] = key
+  })
+  for (const key of candidates) {
+    const actual = lowerMap[key.toLowerCase()]
+    if (actual && row[actual] != null && row[actual] !== '') return row[actual]
+  }
+  return ''
+}
+
+function canOperateImageRow(row) {
+  return getIdFromRow(row) != null && Boolean(getPathFromRow(row))
+}
+
+function canModifyImageRow(row) {
+  if (!canOperateImageRow(row)) return false
+  if (auth.isAdmin) return true
+  const uploader = String(pickRowField(row, UPLOAD_USER_FIELDS) || '').trim()
+  return uploader && uploader === auth.username
+}
+
+function buildDeleteConfirmMessage(row) {
+  const name = pickRowField(row, IMAGE_NAME_FIELDS) || `图片 #${getIdFromRow(row)}`
+  return [
+    `确定永久删除图片「${name}」吗？`,
+    '',
+    '• 将立即删除 upload/ 中的文件、image_info 记录及 BLOB 迁移映射。',
+    '• 此操作不可恢复；若来自 BLOB 迁移，需从源库重新迁移。',
+  ].join('\n')
+}
+
+async function loadCategories() {
+  try {
+    const res = await listCategoriesApi()
+    categories.value = res.data || []
+  } catch {
+    categories.value = []
+  }
+}
 
 function loadDraft() {
   const draft = localStorage.getItem(SQL_DRAFT_KEY)
@@ -131,6 +203,7 @@ async function handleExecute() {
   executing.value = true
   lastError.value = ''
   result.value = null
+  galleryIndex.value = -1
   persistDraft()
 
   try {
@@ -197,43 +270,140 @@ function isPathColumn(col) {
   return pathColumn.value && col === pathColumn.value
 }
 
-function revokePreviewUrl() {
-  if (previewObjectUrl) {
-    URL.revokeObjectURL(previewObjectUrl)
-    previewObjectUrl = ''
-  }
-  previewSrc.value = ''
+function buildGalleryItems() {
+  return tableData.value
+    .filter((row) => canOperateImageRow(row))
+    .map((row) => ({
+      id: getIdFromRow(row),
+      path: getPathFromRow(row),
+      title: pickRowField(row, IMAGE_NAME_FIELDS) || getPathFromRow(row),
+    }))
 }
 
-async function openOriginalPreview(row) {
-  const path = getPathFromRow(row)
-  if (!path) return
+function syncTableCurrentRow(row) {
+  highlightAndScrollTableRow(
+    resultTableRef,
+    row,
+    (a, b) => getIdFromRow(a) === getIdFromRow(b),
+  )
+}
 
-  previewTitle.value = path
-  previewVisible.value = true
-  previewLoading.value = true
-  revokePreviewUrl()
+function openOriginalPreview(row) {
+  if (!canOperateImageRow(row)) return
+  galleryItems.value = buildGalleryItems()
+  const id = getIdFromRow(row)
+  const index = galleryItems.value.findIndex((item) => item.id === id)
+  if (index < 0) return
+  galleryIndex.value = index
+  syncTableCurrentRow(row)
+}
 
+function onResultRowClick(row, _column, event) {
+  if (event?.target?.closest?.('button, a, .el-button')) return
+  if (canOperateImageRow(row)) {
+    openOriginalPreview(row)
+  }
+}
+
+watch(galleryIndex, (index) => {
+  if (index < 0) {
+    syncTableCurrentRow(null)
+    return
+  }
+  const item = galleryItems.value[index]
+  if (!item) return
+  const row = tableData.value.find((entry) => getIdFromRow(entry) === item.id)
+  syncTableCurrentRow(row)
+})
+
+watch(tableData, () => {
+  const prevId = galleryItems.value[galleryIndex.value]?.id
+  galleryItems.value = buildGalleryItems()
+  if (prevId == null) return
+  const nextIndex = galleryItems.value.findIndex((item) => item.id === prevId)
+  galleryIndex.value = nextIndex
+})
+
+async function handleDownload(row) {
+  if (!canOperateImageRow(row)) return
   try {
-    const blob = await fetchImageBlob(path, { id: getIdFromRow(row), thumb: false })
-    previewObjectUrl = URL.createObjectURL(blob)
-    previewSrc.value = previewObjectUrl
+    const id = getIdFromRow(row)
+    const path = getPathFromRow(row)
+    const suffix = pickRowField(row, SUFFIX_FIELDS) || 'jpg'
+    const filename = pickRowField(row, IMAGE_NAME_FIELDS) || `image_${id}.${suffix}`
+    await downloadImageFile({ id, path, filename })
+    ElMessage.success('下载已开始')
   } catch (err) {
-    previewVisible.value = false
-    ElMessage.error(err.message || '原图加载失败')
-  } finally {
-    previewLoading.value = false
+    ElMessage.error(err.message || '下载失败')
   }
 }
 
-function closePreview() {
-  previewVisible.value = false
-  revokePreviewUrl()
+function openEdit(row) {
+  if (!canModifyImageRow(row)) return
+  editForm.id = getIdFromRow(row)
+  editForm.image_name = pickRowField(row, IMAGE_NAME_FIELDS)
+  const categoryRaw = pickRowField(row, CATEGORY_FIELDS)
+  editForm.category_id = categoryRaw != null && categoryRaw !== '' ? Number(categoryRaw) : null
+  editForm.tags = pickRowField(row, TAGS_FIELDS) || ''
+  editVisible.value = true
+}
+
+async function submitEdit() {
+  if (!editForm.image_name?.trim()) {
+    ElMessage.warning('图片名称不能为空')
+    return
+  }
+  if (!editForm.category_id) {
+    ElMessage.warning('请选择分类')
+    return
+  }
+  editSaving.value = true
+  try {
+    await updateImageApi(editForm.id, {
+      image_name: editForm.image_name.trim(),
+      category_id: editForm.category_id,
+      tags: editForm.tags.trim(),
+    })
+    ElMessage.success('更新成功')
+    editVisible.value = false
+    await refreshResult()
+  } finally {
+    editSaving.value = false
+  }
+}
+
+async function handleDelete(row) {
+  if (!canModifyImageRow(row)) return
+  await ElMessageBox.confirm(
+    buildDeleteConfirmMessage(row).replace(/\n/g, '<br/>'),
+    '确认删除',
+    {
+      type: 'warning',
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
+      dangerouslyUseHTMLString: true,
+    },
+  )
+  const res = await deleteImageApi(getIdFromRow(row))
+  ElMessage.success(res.data?.notice || res.message || '图片已永久删除')
+  await refreshResult()
+}
+
+async function refreshResult() {
+  const sql = sqlText.value.trim()
+  if (!sql || !result.value) return
+  try {
+    const res = await executeSqlApi(sql)
+    result.value = res.data
+  } catch (err) {
+    ElMessage.error(err.message || '刷新结果失败')
+  }
 }
 
 onMounted(() => {
   loadDraft()
   loadTemplates()
+  loadCategories()
 })
 </script>
 
@@ -246,7 +416,7 @@ onMounted(() => {
           <p class="page-desc">
             仅支持 <code>SELECT</code> 查询。禁止 DROP / DELETE / UPDATE 等危险语句。
             快捷键 <kbd>Ctrl</kbd> + <kbd>Enter</kbd> 执行。
-            结果含 <code>image_path</code> 时将显示缩略图，点击可预览原图。
+            结果含 <code>id</code> 与 <code>image_path</code> 时，右侧预览框可浏览图片并同步选中行；预览时可继续下载、编辑、删除。
           </p>
         </div>
         <el-select
@@ -313,42 +483,37 @@ onMounted(() => {
       </div>
 
       <el-alert
+        v-if="hasResult && pathColumn && !idColumn"
+        type="info"
+        show-icon
+        :closable="false"
+        class="preview-hint"
+        title="已识别路径列，但未找到 id 列。请在 SELECT 中包含 id（image_info 主键），方可下载、编辑或删除。"
+      />
+
+      <el-alert
         v-if="hasResult && !pathColumn"
         type="info"
         show-icon
         :closable="false"
         class="preview-hint"
-        title="未识别到图片路径列。请在 SELECT 中包含 image_path（或 save_path），查询结果即可显示缩略图并点击预览原图。"
+        title="未识别到图片路径列。请在 SELECT 中包含 image_path（或 save_path），点击行或路径列即可在右侧预览。"
       />
 
+      <div class="result-with-preview">
+        <div class="result-table-area">
       <el-table
+        ref="resultTableRef"
         :data="tableData"
         stripe
         border
+        highlight-current-row
+        :row-key="(row) => getIdFromRow(row) ?? getPathFromRow(row)"
         max-height="520"
         style="width: 100%"
         empty-text="查询成功，但无数据行"
+        @row-click="onResultRowClick"
       >
-        <el-table-column
-          v-if="pathColumn"
-          label="预览"
-          width="96"
-          fixed="left"
-          align="center"
-        >
-          <template #default="{ row }">
-            <ImagePreview
-              v-if="getPathFromRow(row)"
-              :image-id="getIdFromRow(row)"
-              :image-path="getPathFromRow(row)"
-              :size="64"
-              clickable
-              @click="openOriginalPreview(row)"
-            />
-            <span v-else class="no-preview">—</span>
-          </template>
-        </el-table-column>
-
         <el-table-column
           v-for="col in result.columns"
           :key="col"
@@ -369,20 +534,83 @@ onMounted(() => {
             <span v-else>{{ formatCellValue(row[col]) }}</span>
           </template>
         </el-table-column>
+
+        <el-table-column
+          v-if="showImageActions"
+          label="操作"
+          width="220"
+          fixed="right"
+          align="center"
+        >
+          <template #default="{ row }">
+            <template v-if="canOperateImageRow(row)">
+              <el-button link type="primary" :icon="View" @click="openOriginalPreview(row)">
+                预览
+              </el-button>
+              <el-button link type="primary" :icon="Download" @click="handleDownload(row)">
+                下载
+              </el-button>
+              <el-button
+                v-if="canModifyImageRow(row)"
+                link
+                type="primary"
+                :icon="Edit"
+                @click="openEdit(row)"
+              >
+                编辑
+              </el-button>
+              <el-button
+                v-if="canModifyImageRow(row)"
+                link
+                type="danger"
+                @click="handleDelete(row)"
+              >
+                删除
+              </el-button>
+            </template>
+            <span v-else class="no-preview">—</span>
+          </template>
+        </el-table-column>
       </el-table>
+        </div>
+
+        <ImageGalleryPanel
+          v-if="pathColumn"
+          v-model:current-index="galleryIndex"
+          :items="galleryItems"
+          class="result-preview-pane"
+        />
+      </div>
     </div>
 
     <el-dialog
-      v-model="previewVisible"
-      :title="previewTitle"
-      width="80%"
-      top="5vh"
+      v-model="editVisible"
+      title="编辑图片信息"
+      width="480px"
       destroy-on-close
-      @closed="closePreview"
     >
-      <div v-loading="previewLoading" class="preview-dialog-body">
-        <img v-if="previewSrc" :src="previewSrc" alt="原图预览" class="preview-image" />
-      </div>
+      <el-form label-width="80px">
+        <el-form-item label="名称" required>
+          <el-input v-model="editForm.image_name" maxlength="255" />
+        </el-form-item>
+        <el-form-item label="分类" required>
+          <el-select v-model="editForm.category_id" placeholder="请选择分类" style="width: 100%">
+            <el-option
+              v-for="cat in categories"
+              :key="cat.id"
+              :label="cat.category_name"
+              :value="cat.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="标签">
+          <el-input v-model="editForm.tags" maxlength="500" placeholder="逗号分隔" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editVisible = false">取消</el-button>
+        <el-button type="primary" :loading="editSaving" @click="submitEdit">保存</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -469,6 +697,34 @@ onMounted(() => {
   margin-bottom: 12px;
 }
 
+.result-with-preview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 16px;
+  align-items: start;
+}
+
+.result-table-area {
+  min-width: 0;
+}
+
+.result-preview-pane {
+  position: sticky;
+  top: 12px;
+  max-height: 520px;
+}
+
+@media (max-width: 1100px) {
+  .result-with-preview {
+    grid-template-columns: 1fr;
+  }
+
+  .result-preview-pane {
+    position: static;
+    max-height: 320px;
+  }
+}
+
 .no-preview {
   color: #c0c4cc;
 }
@@ -487,18 +743,5 @@ onMounted(() => {
 
 .path-link:hover {
   text-decoration: underline;
-}
-
-.preview-dialog-body {
-  min-height: 200px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.preview-image {
-  max-width: 100%;
-  max-height: 75vh;
-  object-fit: contain;
 }
 </style>

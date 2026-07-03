@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Document, FolderOpened, PictureFilled, UploadFilled } from '@element-plus/icons-vue'
+import { Document, UploadFilled, View } from '@element-plus/icons-vue'
 import { healthApi } from '@/api/auth'
 import { APP_VERSION } from '@/config/app'
 import { filterMenuByRole } from '@/config/menu'
@@ -16,14 +16,14 @@ const quickMenus = computed(() =>
   filterMenuByRole(auth.isAdmin).filter((item) => item.name !== 'home').slice(0, 4),
 )
 
-const iconMap = { UploadFilled, FolderOpened, Document, PictureFilled }
+const iconMap = { UploadFilled, Document, View }
 
 const roleLabel = computed(() => (auth.isAdmin ? '服务器管理员' : '客户端用户'))
 
 const roleHint = computed(() =>
   auth.isAdmin
-    ? '可管理数据库、SQL 查询、批量导入与全部图片'
-    : '可上传图片到服务器、浏览/下载图片，无法访问数据库',
+    ? '可管理操作日志、系统设置及全部功能'
+    : '可上传图片、SQL 查询、BLOB 迁移/表视图与分类管理',
 )
 
 function goToMenu(item) {
@@ -51,7 +51,7 @@ onMounted(async () => {
           图像路径式数据库管理系统 — 服务器端：原文件存储、路径入库、SQL 查询与运维管理。
         </template>
         <template v-else>
-          图像库客户端 — 上传图片到服务器、浏览与下载原文件；数据库仅服务器管理员可访问。
+          图像路径式数据库 — 可上传图片，并通过 SQL 查询、BLOB 表视图浏览与管理数据。
         </template>
       </p>
     </div>
@@ -71,7 +71,7 @@ onMounted(async () => {
           <template #header>服务状态</template>
           <template v-if="health">
             <p><strong>服务：</strong>{{ health.service }}</p>
-            <p><strong>数据库：</strong>{{ auth.isAdmin ? health.db_engine : '（客户端不可见）' }}</p>
+            <p><strong>数据库：</strong>{{ health.db_engine }}</p>
             <p><strong>版本：</strong>{{ health.version }}</p>
           </template>
           <el-alert
@@ -93,7 +93,7 @@ onMounted(async () => {
           </template>
           <template v-else>
             <p>上传的图片保存在<strong>服务器</strong>，不会留在您的电脑里。</p>
-            <p>在「图片列表」可预览、下载原文件；默认显示您上传的图片。</p>
+            <p>使用「SQL 查询」或「BLOB 表视图」可预览、下载图片；「分类管理」维护上传分类。</p>
           </template>
         </el-card>
       </el-col>

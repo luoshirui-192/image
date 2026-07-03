@@ -23,7 +23,7 @@ chmod +x start.sh && ./start.sh
 首次运行会自动：
 
 1. 复制 `.env.docker.example` → `.env`
-2. 构建并启动 MySQL、Django（Gunicorn）、Nginx（含前端）
+2. 构建并启动 MySQL、Django（Gunicorn）、Nginx（含前端）、**定时维护 scheduler**
 3. 自动建库、导入 `sql/`、执行 `migrate`
 
 浏览器打开 **http://localhost**（若在别的机器访问，先改 `.env` 里的 `PUBLIC_URL` 再重新 `./start.sh`）。
@@ -49,7 +49,7 @@ MYSQL_PASSWORD=强密码
 
 ```bash
 docker compose ps          # 查看状态
-docker compose logs -f     # 查看日志
+docker compose logs -f scheduler # 定时维护日志（operate_log 清理等）
 docker compose down        # 停止
 docker compose down -v     # 停止并清空数据库与上传数据（慎用）
 ```

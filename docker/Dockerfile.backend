@@ -15,15 +15,16 @@ RUN pip install --no-cache-dir -r /app/backend/requirements-production.txt
 COPY backend /app/backend
 COPY deploy/gunicorn/gunicorn.conf.py /app/deploy/gunicorn/gunicorn.conf.py
 COPY docker/backend-entrypoint.sh /app/docker/backend-entrypoint.sh
+COPY docker/maintenance-loop.sh /app/docker/maintenance-loop.sh
 COPY docker/ensure_mysql57_triggers.py /app/docker/ensure_mysql57_triggers.py
 COPY docker/ensure_file_hash_column.py /app/docker/ensure_file_hash_column.py
 COPY scripts/generate_secret_key.py /app/scripts/generate_secret_key.py
-COPY import_samples /app/import_samples
 COPY upload /app/upload
 
 RUN sed -i 's/\r$//' /app/docker/backend-entrypoint.sh \
+    && sed -i 's/\r$//' /app/docker/maintenance-loop.sh \
     && mkdir -p /app/backend/logs /app/backend/thumb_cache \
-    && chmod +x /app/docker/backend-entrypoint.sh
+    && chmod +x /app/docker/backend-entrypoint.sh /app/docker/maintenance-loop.sh
 
 ENV PYTHONUNBUFFERED=1
 ENV DJANGO_SETTINGS_MODULE=config.settings

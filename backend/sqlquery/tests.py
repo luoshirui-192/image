@@ -92,14 +92,16 @@ class SqlExecuteAPITestCase(TestCase):
         self.assertGreaterEqual(response.data["data"]["row_count"], 1)
         self.assertTrue(OperateLog.objects.filter(action_type="sql_execute").exists())
 
-    def test_user_forbidden(self):
+    def test_user_execute_select(self):
         self.client.force_authenticate(user=self.user)
         response = self.client.post(
             "/api/sql/execute/",
-            {"sql": "SELECT 1"},
+            {"sql": "SELECT id, image_name FROM image_info WHERE is_delete = 0"},
             format="json",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["code"], 0)
+        self.assertGreaterEqual(response.data["data"]["row_count"], 1)
 
     def test_rejects_drop(self):
         self.client.force_authenticate(user=self.admin)
@@ -169,14 +171,15 @@ class SqlTemplateAPITestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertGreaterEqual(len(response.data["data"]), 3)
 
-    def test_create_template_admin_only(self):
+    def test_create_template_as_user(self):
         self.client.force_authenticate(user=self.user)
         response = self.client.post(
             "/api/sql/templates/",
             {"name": "test", "sql": "SELECT 1"},
             format="json",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["data"]["name"], "test")
 
     def test_create_template_as_admin(self):
         self.client.force_authenticate(user=self.admin)

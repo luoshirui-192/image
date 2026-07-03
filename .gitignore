@@ -56,6 +56,10 @@ deploy/gunicorn/generated/*.service
 backups/*
 !backups/.gitkeep
 
+# Ad-hoc local database exports (keep sql/ schema scripts)
+/backup_image_db.sql
+/image_db.sql
+
 # Test / cache
 .pytest_cache/
 .coverage

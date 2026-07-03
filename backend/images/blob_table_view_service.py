@@ -1,0 +1,468 @@
+"""Virtual read-only views over remote BLOB tables with local path substitution."""
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+from django.db import connections
+from django.utils import timezone
+
+from images.blob_migration_service import (
+    BLOB_TYPES_MYSQL,
+    BlobMigrationError,
+    validate_identifier,
+    validate_where_clause,
+)
+from images.external_db_service import db_alias_session, validate_db_alias_reference
+from images.models import BlobTableView, ImageInfo, ImageSourceMap
+
+logger = logging.getLogger(__name__)
+
+PATH_STATUS_PENDING = "pending"
+PATH_STATUS_MIGRATED = "migrated"
+PATH_STATUS_DELETED = "deleted"
+
+DEFAULT_ROW_LIMIT = 100
+MAX_ROW_LIMIT = 500
+
+
+class BlobTableViewError(Exception):
+    pass
+
+
+@dataclass
+class VirtualColumn:
+    name: str
+    data_type: str
+    is_blob: bool = False
+    is_path_substitute: bool = False
+
+
+def _quote_ident(name: str) -> str:
+    return f"`{validate_identifier(name)}`"
+
+
+def validate_db_alias(alias: str) -> str:
+    try:
+        return validate_db_alias_reference(alias)
+    except Exception as exc:
+        raise BlobTableViewError(str(exc)) from exc
+
+
+def _parse_display_columns(raw: str) -> list[str]:
+    value = (raw or "").strip()
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise BlobTableViewError("display_columns 必须是 JSON 数组") from exc
+    if not isinstance(parsed, list):
+        raise BlobTableViewError("display_columns 必须是 JSON 数组")
+    cols: list[str] = []
+    for item in parsed:
+        if not isinstance(item, str) or not item.strip():
+            raise BlobTableViewError("display_columns 元素必须是非空字符串")
+        cols.append(validate_identifier(item.strip(), label="列名"))
+    return cols
+
+
+def _serialize_display_columns(cols: list[str] | None) -> str:
+    if not cols:
+        return ""
+    return json.dumps(cols, ensure_ascii=False)
+
+
+def _load_view(view_id: int) -> BlobTableView:
+    try:
+        return BlobTableView.objects.get(pk=view_id)
+    except BlobTableView.DoesNotExist as exc:
+        raise BlobTableViewError("表视图不存在") from exc
+
+
+def _fetch_remote_columns(conn, table: str) -> list[VirtualColumn]:
+    table = validate_identifier(table, label="源表名")
+    if conn.vendor == "mysql":
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COLUMN_NAME, DATA_TYPE, ORDINAL_POSITION
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = %s
+                ORDER BY ORDINAL_POSITION
+                """,
+                [table],
+            )
+            rows = cursor.fetchall()
+        if not rows:
+            raise BlobTableViewError(f"源表不存在或不可访问: {table}")
+        return [
+            VirtualColumn(
+                name=col_name,
+                data_type=(data_type or "").lower(),
+                is_blob=(data_type or "").lower() in BLOB_TYPES_MYSQL,
+            )
+            for col_name, data_type, _ in rows
+        ]
+
+    if conn.vendor == "sqlite":
+        with conn.cursor() as cursor:
+            description = conn.introspection.get_table_description(cursor, table)
+        if not description:
+            raise BlobTableViewError(f"源表不存在或不可访问: {table}")
+        cols: list[VirtualColumn] = []
+        for col in description:
+            col_type = (getattr(col, "type_code", "") or "").upper()
+            cols.append(
+                VirtualColumn(
+                    name=col.name,
+                    data_type=col_type.lower(),
+                    is_blob="BLOB" in col_type,
+                )
+            )
+        return cols
+
+    raise BlobTableViewError(f"暂不支持 {conn.vendor} 的表视图")
+
+
+def _resolve_display_columns(view: BlobTableView, remote_cols: list[VirtualColumn]) -> list[VirtualColumn]:
+    blob_col = validate_identifier(view.blob_column, label="BLOB 列")
+    pk_col = validate_identifier(view.source_pk_column, label="主键列")
+    col_map = {c.name: c for c in remote_cols}
+
+    if blob_col not in col_map:
+        raise BlobTableViewError(f"源表缺少 BLOB 列: {blob_col}")
+    if pk_col not in col_map:
+        raise BlobTableViewError(f"源表缺少主键列: {pk_col}")
+
+    requested = _parse_display_columns(view.display_columns)
+    if requested:
+        for name in requested:
+            if name not in col_map:
+                raise BlobTableViewError(f"源表缺少列: {name}")
+        selected = [col_map[name] for name in requested if name != blob_col]
+    else:
+        selected = [c for c in remote_cols if c.name != blob_col]
+
+    result: list[VirtualColumn] = []
+    pk_added = False
+    for col in selected:
+        if col.is_blob:
+            continue
+        if col.name == pk_col:
+            pk_added = True
+        result.append(col)
+
+    if not pk_added:
+        result.insert(0, col_map[pk_col])
+
+    path_col = VirtualColumn(
+        name=blob_col,
+        data_type="path",
+        is_blob=False,
+        is_path_substitute=True,
+    )
+    result.append(path_col)
+    return result
+
+
+def get_view_schema(view_id: int) -> dict:
+    view = _load_view(view_id)
+    validate_db_alias(view.db_alias)
+    with db_alias_session(view.db_alias) as alias:
+        conn = connections[alias]
+        remote_cols = _fetch_remote_columns(conn, view.source_table)
+        display_cols = _resolve_display_columns(view, remote_cols)
+    return {
+        "view_id": view.id,
+        "source_table": view.source_table,
+        "source_pk_column": view.source_pk_column,
+        "blob_column": view.blob_column,
+        "columns": [
+            {
+                "name": col.name,
+                "data_type": col.data_type,
+                "is_path_substitute": col.is_path_substitute,
+            }
+            for col in display_cols
+        ],
+    }
+
+
+def preview_table_schema(
+    *,
+    db_alias: str,
+    source_table: str,
+    source_pk_column: str,
+    blob_column: str,
+    display_columns: list[str] | None = None,
+) -> dict:
+    validate_db_alias(db_alias)
+    table = validate_identifier(source_table, label="源表名")
+    pk = validate_identifier(source_pk_column, label="主键列")
+    blob = validate_identifier(blob_column, label="BLOB 列")
+
+    temp = BlobTableView(
+        source_table=table,
+        source_pk_column=pk,
+        blob_column=blob,
+        display_columns=_serialize_display_columns(display_columns),
+    )
+    with db_alias_session(db_alias) as alias:
+        conn = connections[alias]
+        remote_cols = _fetch_remote_columns(conn, table)
+        display_cols = _resolve_display_columns(temp, remote_cols)
+    return {
+        "source_table": table,
+        "source_pk_column": pk,
+        "blob_column": blob,
+        "columns": [
+            {
+                "name": col.name,
+                "data_type": col.data_type,
+                "is_path_substitute": col.is_path_substitute,
+            }
+            for col in display_cols
+        ],
+    }
+
+
+def count_view_rows(view_id: int) -> int:
+    view = _load_view(view_id)
+    where_sql, where_params = _build_where(view)
+    validate_db_alias(view.db_alias)
+    table = _quote_ident(view.source_table)
+    with db_alias_session(view.db_alias) as alias:
+        conn = connections[alias]
+        sql = f"SELECT COUNT(*) FROM {table}{where_sql}"
+        with conn.cursor() as cursor:
+            cursor.execute(sql, where_params)
+            row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def _build_where(view: BlobTableView) -> tuple[str, list[Any]]:
+    clause = validate_where_clause(view.where_clause)
+    if clause:
+        return f" WHERE {clause}", []
+    return "", []
+
+
+def _serialize_cell(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return f"<binary {len(value)} bytes>"
+    if isinstance(value, (int, float, bool, str)):
+        return value
+    return str(value)
+
+
+def _build_path_cell(
+    *,
+    source_table: str,
+    source_id: str,
+    path_map: dict[str, dict],
+) -> dict:
+    meta = path_map.get(source_id)
+    if not meta:
+        return {
+            "display": "未迁移",
+            "path": "",
+            "image_info_id": None,
+            "status": PATH_STATUS_PENDING,
+        }
+    if meta["status"] == PATH_STATUS_DELETED:
+        return {
+            "display": "已删除",
+            "path": "",
+            "image_info_id": meta.get("image_info_id"),
+            "status": PATH_STATUS_DELETED,
+        }
+    path = meta.get("path") or ""
+    return {
+        "display": path or "未迁移",
+        "path": path,
+        "image_info_id": meta.get("image_info_id"),
+        "status": PATH_STATUS_MIGRATED,
+    }
+
+
+def _load_path_map(source_table: str, source_ids: list[str]) -> dict[str, dict]:
+    if not source_ids:
+        return {}
+    mappings = ImageSourceMap.objects.filter(
+        source_table=source_table,
+        source_id__in=source_ids,
+    )
+    image_ids = [m.image_info_id for m in mappings]
+    images = {
+        img.id: img
+        for img in ImageInfo.objects.filter(id__in=image_ids)
+    }
+    result: dict[str, dict] = {}
+    for mapping in mappings:
+        image = images.get(mapping.image_info_id)
+        if image is None or image.is_delete:
+            result[mapping.source_id] = {
+                "image_info_id": mapping.image_info_id,
+                "path": "",
+                "status": PATH_STATUS_DELETED,
+            }
+        else:
+            result[mapping.source_id] = {
+                "image_info_id": image.id,
+                "path": image.image_path,
+                "status": PATH_STATUS_MIGRATED,
+            }
+    return result
+
+
+def fetch_view_rows(
+    view_id: int,
+    *,
+    offset: int = 0,
+    limit: int = DEFAULT_ROW_LIMIT,
+) -> dict:
+    view = _load_view(view_id)
+    if offset < 0:
+        raise BlobTableViewError("offset 不能为负数")
+    limit = min(max(1, limit), MAX_ROW_LIMIT)
+
+    validate_db_alias(view.db_alias)
+    pk = validate_identifier(view.source_pk_column, label="主键列")
+    blob_col = validate_identifier(view.blob_column, label="BLOB 列")
+    table = _quote_ident(view.source_table)
+    where_sql, where_params = _build_where(view)
+
+    with db_alias_session(view.db_alias) as alias:
+        conn = connections[alias]
+        remote_cols = _fetch_remote_columns(conn, view.source_table)
+        display_cols = _resolve_display_columns(view, remote_cols)
+        select_names = [c.name for c in display_cols if not c.is_path_substitute]
+        select_sql = ", ".join(_quote_ident(name) for name in select_names)
+        order_sql = _quote_ident(pk)
+        sql = (
+            f"SELECT {select_sql} FROM {table}{where_sql} "
+            f"ORDER BY {order_sql} LIMIT %s OFFSET %s"
+        )
+        params = [*where_params, limit, offset]
+        with conn.cursor() as cursor:
+            cursor.execute(sql, params)
+            raw_rows = cursor.fetchall()
+            col_names = [col[0] for col in cursor.description]
+
+    pk_index = col_names.index(pk) if pk in col_names else 0
+    source_ids = [str(row[pk_index]) for row in raw_rows]
+    path_map = _load_path_map(view.source_table, source_ids)
+
+    rows: list[dict] = []
+    for raw in raw_rows:
+        item: dict[str, Any] = {}
+        source_id = str(raw[pk_index])
+        for idx, name in enumerate(col_names):
+            item[name] = _serialize_cell(raw[idx])
+        item[blob_col] = _build_path_cell(
+            source_table=view.source_table,
+            source_id=source_id,
+            path_map=path_map,
+        )
+        rows.append(item)
+
+    total = count_view_rows(view_id)
+    BlobTableView.objects.filter(pk=view.id).update(last_viewed_at=timezone.now())
+
+    return {
+        "view_id": view.id,
+        "columns": [
+            {
+                "name": col.name,
+                "data_type": col.data_type,
+                "is_path_substitute": col.is_path_substitute,
+            }
+            for col in display_cols
+        ],
+        "rows": rows,
+        "offset": offset,
+        "limit": limit,
+        "total": total,
+        "has_more": offset + len(rows) < total,
+    }
+
+
+def create_table_view(
+    *,
+    name: str,
+    db_alias: str,
+    source_table: str,
+    source_pk_column: str,
+    blob_column: str,
+    display_columns: list[str] | None = None,
+    where_clause: str = "",
+    remark: str = "",
+) -> BlobTableView:
+    validate_db_alias(db_alias)
+    table = validate_identifier(source_table, label="源表名")
+    pk = validate_identifier(source_pk_column, label="主键列")
+    blob = validate_identifier(blob_column, label="BLOB 列")
+    where = validate_where_clause(where_clause)
+    display_json = _serialize_display_columns(display_columns)
+
+    with db_alias_session(db_alias) as alias:
+        conn = connections[alias]
+        remote_cols = _fetch_remote_columns(conn, table)
+        temp = BlobTableView(
+            source_table=table,
+            source_pk_column=pk,
+            blob_column=blob,
+            display_columns=display_json,
+            where_clause=where,
+        )
+        _resolve_display_columns(temp, remote_cols)
+
+    now = timezone.now()
+    return BlobTableView.objects.create(
+        name=(name or "").strip() or f"{table} 视图",
+        db_alias=db_alias,
+        source_table=table,
+        source_pk_column=pk,
+        blob_column=blob,
+        display_columns=display_json,
+        where_clause=where,
+        remark=(remark or "").strip(),
+        create_time=now,
+        update_time=now,
+    )
+
+
+def update_table_view(view_id: int, **fields) -> BlobTableView:
+    view = _load_view(view_id)
+    name = fields.get("name")
+    if name is not None:
+        view.name = (name or "").strip() or view.name
+    if "remark" in fields:
+        view.remark = (fields.get("remark") or "").strip()
+    if "where_clause" in fields:
+        view.where_clause = validate_where_clause(fields.get("where_clause") or "")
+    if "display_columns" in fields:
+        view.display_columns = _serialize_display_columns(fields.get("display_columns"))
+    if any(k in fields for k in ("db_alias", "source_table", "source_pk_column", "blob_column")):
+        raise BlobTableViewError("源表与连接配置创建后不可修改，请删除后重建")
+
+    validate_db_alias(view.db_alias)
+    with db_alias_session(view.db_alias) as alias:
+        conn = connections[alias]
+        remote_cols = _fetch_remote_columns(conn, view.source_table)
+        _resolve_display_columns(view, remote_cols)
+
+    view.update_time = timezone.now()
+    view.save()
+    return view
+
+
+def delete_table_view(view_id: int) -> None:
+    view = _load_view(view_id)
+    view.delete()

@@ -7,13 +7,13 @@ from rest_framework.views import APIView
 
 from sqlquery.serializers import SqlTemplateCreateSerializer
 from sqlquery.template_store import add_template, list_templates
-from utils.permissions import IsActiveAccount, IsAdminRole
+from utils.permissions import IsActiveAccount
 from utils.responses import error_response, success_response
 
 
 @extend_schema(tags=["sql"])
 class SqlTemplateListCreateView(APIView):
-    """GET/POST /api/sql/templates/ — list or save SQL templates (admin write)."""
+    """GET/POST /api/sql/templates/ — list or save SQL templates."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
 
@@ -21,9 +21,6 @@ class SqlTemplateListCreateView(APIView):
         return success_response(list_templates())
 
     def post(self, request):
-        if not IsAdminRole().has_permission(request, self):
-            return error_response("仅管理员可保存 SQL 模板", code=4030, status=403)
-
         serializer = SqlTemplateCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(str(serializer.errors), code=4001, status=400)

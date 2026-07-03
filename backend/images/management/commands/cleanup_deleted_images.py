@@ -7,7 +7,7 @@ from images.maintenance import cleanup_deleted_image_files
 
 
 class Command(BaseCommand):
-    help = "Delete on-disk files for logically deleted images past retention period."
+    help = "Permanently purge legacy soft-deleted image records past retention period."
 
     def add_arguments(self, parser):
         parser.add_argument(

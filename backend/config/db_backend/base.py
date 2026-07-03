@@ -28,11 +28,16 @@ class DatabaseWrapper(MySQLDatabaseWrapper):
 
     def get_new_connection(self, conn_params):
         """
-        Handshake uses latin1 (MySQL 5.1 + mysqlclient workaround via init_command SET NAMES utf8).
-        Force client-side binding encoding to utf8 without set_character_set (maps to utf8mb3 on 5.1).
+        Force UTF-8 client decoding so information_schema comments (Chinese) do not break migrate.
+        MySQL 5.1 deployments can set MYSQL51_COMPAT=true to restore latin1 handshake workaround.
         """
         connection = super().get_new_connection(conn_params)
         connection.encoding = "utf8"
+        if hasattr(connection, "set_character_set"):
+            try:
+                connection.set_character_set("utf8")
+            except Exception:
+                pass
         return connection
 
     @cached_property

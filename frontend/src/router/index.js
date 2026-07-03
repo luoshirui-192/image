@@ -7,9 +7,9 @@ const LoginView = () => import('@/views/Login.vue')
 const HomeView = () => import('@/views/Home.vue')
 const PagePlaceholder = () => import('@/views/PagePlaceholder.vue')
 const UploadView = () => import('@/views/Upload.vue')
-const ImportView = () => import('@/views/Import.vue')
+const BlobMigrateView = () => import('@/views/BlobMigrate.vue')
+const BlobTableViewsView = () => import('@/views/BlobTableViews.vue')
 const SqlQueryView = () => import('@/views/SqlQuery.vue')
-const ImageListView = () => import('@/views/ImageList.vue')
 const CategoryManageView = () => import('@/views/CategoryManage.vue')
 const LogsView = () => import('@/views/Logs.vue')
 const SettingsView = () => import('@/views/Settings.vue')
@@ -17,9 +17,9 @@ const SettingsView = () => import('@/views/Settings.vue')
 const VIEW_MAP = {
   home: HomeView,
   upload: UploadView,
-  import: ImportView,
+  'blob-migrate': BlobMigrateView,
+  'blob-views': BlobTableViewsView,
   sql: SqlQueryView,
-  images: ImageListView,
   categories: CategoryManageView,
   logs: LogsView,
   settings: SettingsView,

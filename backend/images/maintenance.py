@@ -10,8 +10,8 @@ from django.conf import settings
 from django.db.models import Count, Sum
 from django.utils import timezone
 
-from images.file_service import thumb_cache_path
 from images.models import ImageCategory, ImageInfo
+from images.purge_service import purge_image_record
 from logs.models import OperateLog
 from utils.file_security import PathSecurityError, resolve_safe_upload_file
 
@@ -46,7 +46,9 @@ def cleanup_deleted_image_files(
     dry_run: bool = False,
 ) -> CleanupResult:
     """
-    Remove on-disk files for logically deleted images older than retention period.
+    Permanently purge logically deleted images (legacy is_delete=1) past retention.
+
+    Web delete now purges immediately; this cleans historical soft-deleted rows.
     """
     days = retention_days if retention_days is not None else settings.DELETED_IMAGE_RETENTION_DAYS
     cutoff = timezone.now() - timedelta(days=days)
@@ -55,37 +57,28 @@ def cleanup_deleted_image_files(
     queryset = ImageInfo.objects.filter(is_delete=1, update_time__lte=cutoff).order_by("id")
     result.scanned = queryset.count()
 
-    for image in queryset.iterator():
-        relative_path = image.image_path
-        if not relative_path:
+    for image in list(queryset.iterator()):
+        if dry_run:
+            relative_path = image.image_path or ""
+            if relative_path:
+                try:
+                    abs_path = resolve_safe_upload_file(settings.UPLOAD_ROOT, relative_path)
+                    if abs_path.is_file():
+                        result.files_deleted += 1
+                        result.bytes_freed += abs_path.stat().st_size
+                except (PathSecurityError, OSError) as exc:
+                    result.errors.append(f"id={image.id}: {exc}")
             continue
 
-        file_bytes = 0
         try:
-            abs_path = resolve_safe_upload_file(settings.UPLOAD_ROOT, relative_path)
-            if abs_path.is_file():
-                file_bytes = abs_path.stat().st_size
-                if not dry_run:
-                    abs_path.unlink()
+            purge_result = purge_image_record(image)
+            if purge_result.file_deleted:
                 result.files_deleted += 1
-                result.bytes_freed += file_bytes
-        except PathSecurityError as exc:
-            result.errors.append(f"id={image.id}: {exc}")
-            logger.warning("skip unsafe path id=%s path=%s", image.id, relative_path)
-        except OSError as exc:
-            result.errors.append(f"id={image.id}: {exc}")
-            logger.warning("failed to delete file id=%s", image.id, exc_info=True)
-
-        try:
-            cache_path = thumb_cache_path(relative_path)
-            if cache_path.is_file():
-                thumb_bytes = cache_path.stat().st_size
-                if not dry_run:
-                    cache_path.unlink()
+            if purge_result.thumb_deleted:
                 result.thumbs_deleted += 1
-                result.bytes_freed += thumb_bytes
-        except (PathSecurityError, OSError) as exc:
-            result.errors.append(f"id={image.id} thumb: {exc}")
+        except Exception as exc:
+            result.errors.append(f"id={image.id}: {exc}")
+            logger.warning("failed to purge legacy deleted image id=%s", image.id, exc_info=True)
 
     return result
 

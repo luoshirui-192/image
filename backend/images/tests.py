@@ -1,4 +1,4 @@
-"""Image upload/import API tests — Step 12."""
+"""Image upload API tests — Step 12."""
 from __future__ import annotations
 
 import io
@@ -80,7 +80,6 @@ class ImageUploadAPITestCase(TestCase):
         cls._temp_dir = tempfile.TemporaryDirectory()
         cls.upload_root = Path(cls._temp_dir.name) / "upload"
         cls.upload_root.mkdir(parents=True)
-        cls.import_root = Path(cls._temp_dir.name)
         with connection.cursor() as cursor:
             cursor.executescript(SQLITE_TABLES)
 
@@ -113,7 +112,6 @@ class ImageUploadAPITestCase(TestCase):
     def _settings(self):
         return override_settings(
             UPLOAD_ROOT=str(self.upload_root),
-            IMPORT_SCAN_ROOT=str(self.import_root),
             MAX_UPLOAD_SIZE_BYTES=20 * 1024 * 1024,
         )
 
@@ -217,32 +215,6 @@ class ImageUploadAPITestCase(TestCase):
             response = self.client.post("/api/images/upload/", {"file": png}, format="multipart")
         self.assertEqual(response.status_code, 400)
         self.assertIn("分类", response.data["message"])
-
-    def test_batch_import_from_directory(self):
-        staging = self.import_root / "staging"
-        staging.mkdir()
-        _, png = make_test_png("import1.png")
-        (staging / "import1.png").write_bytes(png.read())
-
-        with self._settings():
-            self._auth(self.admin)
-            response = self.client.post(
-                "/api/images/import/",
-                {"directory": str(staging), "category_id": self.category.id, "recursive": False},
-                format="json",
-            )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["summary"]["succeeded"], 1)
-
-    def test_import_requires_admin(self):
-        with self._settings():
-            self._auth(self.user)
-            response = self.client.post(
-                "/api/images/import/",
-                {"directory": str(self.import_root)},
-                format="json",
-            )
-        self.assertEqual(response.status_code, 403)
 
     def test_upload_duplicate_prompts_without_overwrite(self):
         with self._settings():

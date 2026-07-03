@@ -1,4 +1,4 @@
-"""Image upload and batch import business logic — Step 12."""
+"""Image upload business logic — Step 12."""
 from __future__ import annotations
 
 import hashlib
@@ -17,8 +17,6 @@ from utils.file_security import UploadValidationError, validate_upload_file
 from utils.path_builder import build_relative_path, ensure_parent_dir, normalize_suffix
 
 logger = logging.getLogger(__name__)
-
-IMAGE_GLOB_SUFFIXES = ("*.jpg", "*.jpeg", "*.png", "*.gif", "*.webp", "*.bmp")
 
 
 class DuplicateImageError(Exception):
@@ -345,101 +343,5 @@ def save_uploaded_files(
         except Exception as exc:
             logger.exception("upload failed for %s", name)
             results.append(UploadResult(success=False, filename=name, error=f"保存失败: {exc}"))
-
-    return results
-
-
-def _resolve_import_directory(directory: str) -> Path:
-    raw = Path(directory).expanduser()
-    if not raw.is_absolute():
-        raw = Path(settings.IMPORT_SCAN_ROOT) / raw
-
-    resolved = raw.resolve()
-    scan_root = Path(settings.IMPORT_SCAN_ROOT).resolve()
-
-    try:
-        resolved.relative_to(scan_root)
-    except ValueError as exc:
-        raise ValueError(f"导入目录必须在 {scan_root} 之下") from exc
-
-    if not resolved.is_dir():
-        raise ValueError("导入路径不是有效目录")
-
-    upload_root = Path(settings.UPLOAD_ROOT).resolve()
-    try:
-        resolved.relative_to(upload_root)
-        raise ValueError("不能从 upload 目录导入（请使用上传接口）")
-    except ValueError:
-        pass
-
-    return resolved
-
-
-def _iter_import_files(directory: Path, *, recursive: bool) -> list[Path]:
-    files: list[Path] = []
-    if recursive:
-        for pattern in IMAGE_GLOB_SUFFIXES:
-            files.extend(directory.rglob(pattern))
-    else:
-        for pattern in IMAGE_GLOB_SUFFIXES:
-            files.extend(directory.glob(pattern))
-    return sorted({p.resolve() for p in files if p.is_file()})
-
-
-def import_images_from_directory(
-    directory: str,
-    *,
-    upload_user: str,
-    category_id: int | None = None,
-    tags: str = "",
-    recursive: bool = False,
-    overwrite: bool = False,
-) -> list[UploadResult]:
-    """Scan a server-local folder and import image files into upload storage."""
-    overwrite = _parse_overwrite(overwrite)
-    source_dir = _resolve_import_directory(directory)
-    file_paths = _iter_import_files(source_dir, recursive=recursive)
-
-    if not file_paths:
-        return []
-
-    prepared: list[tuple[Path, bytes]] = []
-    for file_path in file_paths:
-        prepared.append((file_path, file_path.read_bytes()))
-
-    if not overwrite:
-        batch_items = [(file_path.name, content) for file_path, content in prepared]
-        duplicates = _collect_batch_duplicates(batch_items)
-        if duplicates:
-            raise DuplicateBatchError(duplicates)
-
-    results: list[UploadResult] = []
-    for file_path, content in prepared:
-        try:
-            existing_before = find_duplicate_image(
-                filename=file_path.name,
-                content_hash=compute_content_hash(content),
-            )
-            record = save_image_bytes(
-                filename=file_path.name,
-                content=content,
-                upload_user=upload_user,
-                category_id=category_id,
-                tags=tags,
-                overwrite=overwrite,
-            )
-            results.append(
-                UploadResult(
-                    success=True,
-                    filename=file_path.name,
-                    image=record,
-                    overwritten=bool(existing_before and overwrite),
-                )
-            )
-        except (UploadValidationError, ValueError) as exc:
-            results.append(UploadResult(success=False, filename=file_path.name, error=str(exc)))
-        except Exception as exc:
-            logger.exception("import failed for %s", file_path)
-            results.append(UploadResult(success=False, filename=file_path.name, error=f"导入失败: {exc}"))
 
     return results

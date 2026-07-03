@@ -113,7 +113,6 @@ def run_smoke(
     authed_steps: list[tuple[str, str]] = [
         ("auth_me", "/api/auth/me/"),
         ("categories", "/api/images/categories/"),
-        ("images_list", "/api/images/?page=1&page_size=5"),
         ("system_config", "/api/config/"),
         ("logs_stats", "/api/logs/stats/"),
     ]

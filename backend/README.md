@@ -95,7 +95,6 @@ python manage.py migrate
 | 方法 | 路径 | 权限 | 说明 |
 |------|------|------|------|
 | POST | `/api/images/upload/` | 需登录 | 单/多文件上传 |
-| POST | `/api/images/import/` | 管理员 | 扫描本地目录批量导入 |
 | GET/POST | `/api/images/categories/` | 见接口 | 分类列表/新建 |
 | GET/PATCH/DELETE | `/api/images/categories/{id}/` | 见接口 | 分类详情/更新/删除 |
 

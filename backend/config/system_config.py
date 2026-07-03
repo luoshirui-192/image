@@ -31,7 +31,6 @@ READONLY_KEYS = (
     "DB_PORT",
     "DB_NAME",
     "THUMB_CACHE_ROOT",
-    "IMPORT_SCAN_ROOT",
 )
 
 

@@ -1,4 +1,4 @@
-"""Image upload, import, and category API — Step 12."""
+"""Image upload and category API — Step 12."""
 from __future__ import annotations
 
 from drf_spectacular.utils import extend_schema
@@ -9,14 +9,10 @@ from rest_framework.views import APIView
 from django.utils import timezone
 
 from images.models import ImageCategory, ImageInfo
-from images.serializers import ImageCategorySerializer, ImageImportSerializer, ImageInfoSerializer, serialize_image_info
-from images.services import (
-    DuplicateBatchError,
-    import_images_from_directory,
-    save_uploaded_files,
-)
+from images.serializers import ImageCategorySerializer, ImageInfoSerializer, serialize_image_info
+from images.services import DuplicateBatchError, save_uploaded_files
 from utils.audit import write_operate_log
-from utils.permissions import IsActiveAccount, IsAdminRole
+from utils.permissions import IsActiveAccount
 from utils.responses import error_response, success_response
 
 
@@ -144,62 +140,6 @@ class ImageUploadView(APIView):
         )
 
 
-@extend_schema(tags=["images"], request=ImageImportSerializer)
-class ImageImportView(APIView):
-    """POST /api/images/import/ — batch import from server-local directory (admin)."""
-
-    permission_classes = [IsAuthenticated, IsActiveAccount, IsAdminRole]
-
-    def post(self, request):
-        serializer = ImageImportSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                _format_errors(serializer.errors),
-                code=4001,
-                status=400,
-            )
-
-        data = serializer.validated_data
-        overwrite = _parse_overwrite_param(request.data.get("overwrite"))
-        try:
-            results = import_images_from_directory(
-                data["directory"],
-                upload_user=request.user.username,
-                category_id=data.get("category_id"),
-                tags=data.get("tags", ""),
-                recursive=data.get("recursive", False),
-                overwrite=overwrite,
-            )
-        except DuplicateBatchError as exc:
-            dupes = _serialize_duplicates(exc.duplicates, is_admin=True)
-            return error_response(
-                "存在重复图片，请确认是否覆盖原有数据",
-                code=4006,
-                data={"duplicates": dupes},
-                status=409,
-            )
-        except ValueError as exc:
-            return error_response(str(exc), code=4001, status=400)
-
-        summary = _upload_summary(results)
-        write_operate_log(
-            request,
-            "import",
-            detail=(
-                f"import dir={data['directory']} total={summary['total']} "
-                f"ok={summary['succeeded']} fail={summary['failed']}"
-            ),
-        )
-
-        if summary["total"] == 0:
-            return error_response("目录中未找到可导入的图片文件", code=4004, status=400)
-
-        return success_response(
-            {"summary": summary, "items": _serialize_upload_results(results, is_admin=True)},
-            message=f"导入完成：成功 {summary['succeeded']}，失败 {summary['failed']}",
-        )
-
-
 @extend_schema(tags=["categories"])
 class CategoryListCreateView(APIView):
     """GET/POST /api/images/categories/ — list or create categories."""
@@ -228,11 +168,6 @@ class CategoryDetailView(APIView):
     """GET/PATCH/DELETE /api/images/categories/{id}/."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
-
-    def get_permissions(self):
-        if self.request.method in ("PATCH", "DELETE"):
-            return [IsAuthenticated(), IsActiveAccount(), IsAdminRole()]
-        return [IsAuthenticated(), IsActiveAccount()]
 
     def _get_category(self, pk: int):
         try:

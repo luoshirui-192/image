@@ -87,14 +87,88 @@ export function uploadImagesApi(files, { categoryId, tags, overwrite = false } =
   return request.post('/images/upload/', form, { timeout: 120000, skipGlobalError: true })
 }
 
-export function importImagesApi({ directory, categoryId, tags, recursive = false, overwrite = false }) {
-  return request.post('/images/import/', {
-    directory,
-    category_id: categoryId ?? null,
-    tags: tags || '',
-    recursive,
-    overwrite,
-  }, { timeout: 300000, skipGlobalError: true })
+export function listBlobMigrationDatabasesApi() {
+  return request.get('/images/blob-migration/databases/')
+}
+
+export function discoverBlobTablesApi({ dbAlias = 'default' } = {}) {
+  return request.post('/images/blob-migration/discover/', { db_alias: dbAlias })
+}
+
+export function listBlobMigrationSourcesApi() {
+  return request.get('/images/blob-migration/sources/')
+}
+
+export function createBlobMigrationSourceApi(data) {
+  return request.post('/images/blob-migration/sources/', data)
+}
+
+export function deleteBlobMigrationSourceApi(id) {
+  return request.delete(`/images/blob-migration/sources/${id}/`)
+}
+
+export function runBlobMigrationApi({ sourceId, batchSize = 50, dryRun = false, skipExisting = true }) {
+  return request.post('/images/blob-migration/run/', {
+    source_id: sourceId,
+    batch_size: batchSize,
+    dry_run: dryRun,
+    skip_existing: skipExisting,
+  }, { timeout: 600000, skipGlobalError: true })
+}
+
+export function listExternalDbConnectionsApi() {
+  return request.get('/images/blob-migration/connections/')
+}
+
+export function createExternalDbConnectionApi(data) {
+  return request.post('/images/blob-migration/connections/', data)
+}
+
+export function updateExternalDbConnectionApi(id, data) {
+  return request.patch(`/images/blob-migration/connections/${id}/`, data)
+}
+
+export function deleteExternalDbConnectionApi(id) {
+  return request.delete(`/images/blob-migration/connections/${id}/`)
+}
+
+export function testExternalDbConnectionApi(data) {
+  return request.post('/images/blob-migration/connections/test/', data, { skipGlobalError: true })
+}
+
+export function testSavedExternalDbConnectionApi(id, data = {}) {
+  return request.post(`/images/blob-migration/connections/${id}/test/`, data, { skipGlobalError: true })
+}
+
+export function listBlobTableViewsApi() {
+  return request.get('/images/blob-migration/table-views/')
+}
+
+export function createBlobTableViewApi(data) {
+  return request.post('/images/blob-migration/table-views/', data)
+}
+
+export function updateBlobTableViewApi(id, data) {
+  return request.patch(`/images/blob-migration/table-views/${id}/`, data)
+}
+
+export function deleteBlobTableViewApi(id) {
+  return request.delete(`/images/blob-migration/table-views/${id}/`)
+}
+
+export function fetchBlobTableViewRowsApi(id, { offset = 0, limit = 100 } = {}) {
+  return request.get(`/images/blob-migration/table-views/${id}/rows/`, {
+    params: { offset, limit },
+    timeout: 120000,
+  })
+}
+
+export function getBlobTableViewSchemaApi(id) {
+  return request.get(`/images/blob-migration/table-views/${id}/schema/`)
+}
+
+export function previewBlobTableViewSchemaApi(data) {
+  return request.post('/images/blob-migration/table-views/preview-schema/', data)
 }
 
 export function formatFileSize(bytes) {
@@ -128,14 +202,6 @@ export function formatDeletionRemaining(deletionInfo) {
   return '不足 1 小时'
 }
 
-export function fetchDeletionPolicyApi() {
-  return request.get('/images/deletion-policy/')
-}
-
-export function listImagesApi(params = {}) {
-  return request.get('/images/', { params })
-}
-
 export function getImageApi(id) {
   return request.get(`/images/${id}/`)
 }
@@ -146,10 +212,6 @@ export function updateImageApi(id, data) {
 
 export function deleteImageApi(id) {
   return request.delete(`/images/${id}/`)
-}
-
-export function batchDeleteImagesApi(ids) {
-  return request.post('/images/batch-delete/', { ids })
 }
 
 export function restoreImageApi(id) {

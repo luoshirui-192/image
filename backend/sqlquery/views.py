@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 from sqlquery.serializers import SqlExecuteSerializer
 from sqlquery.services import SqlExecutionError, execute_select_sql
 from utils.audit import write_operate_log
-from utils.permissions import IsActiveAccount, IsAdminRole
+from utils.permissions import IsActiveAccount
 from utils.responses import error_response, success_response
 from utils.sql_validator import SqlValidationError, validate_sql
 
@@ -25,9 +25,9 @@ from utils.sql_validator import SqlValidationError, validate_sql
     ],
 )
 class SqlExecuteView(APIView):
-    """POST /api/sql/execute/ — admin-only SELECT execution."""
+    """POST /api/sql/execute/ — SELECT execution for authenticated users."""
 
-    permission_classes = [IsAuthenticated, IsActiveAccount, IsAdminRole]
+    permission_classes = [IsAuthenticated, IsActiveAccount]
 
     def post(self, request):
         serializer = SqlExecuteSerializer(data=request.data)
@@ -77,9 +77,9 @@ class SqlExecuteView(APIView):
     ],
 )
 class SqlValidateView(APIView):
-    """POST /api/sql/validate/ — validate SQL without executing (admin)."""
+    """POST /api/sql/validate/ — validate SQL without executing."""
 
-    permission_classes = [IsAuthenticated, IsActiveAccount, IsAdminRole]
+    permission_classes = [IsAuthenticated, IsActiveAccount]
 
     def post(self, request):
         serializer = SqlExecuteSerializer(data=request.data)

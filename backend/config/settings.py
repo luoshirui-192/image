@@ -85,6 +85,35 @@ TEMPLATES = [
 DB_ENGINE = os.getenv("DB_ENGINE", "mysql").lower()
 RUNNING_TESTS = "test" in sys.argv
 
+
+def _mysql_options(charset_env: str) -> dict:
+    db_charset = charset_env or "utf8"
+    mysql51_compat = os.getenv("MYSQL51_COMPAT", "false").lower() in {"1", "true", "yes", "on"}
+    if mysql51_compat and db_charset in ("utf8", "utf8mb3", "utf8mb4"):
+        return {
+            "charset": "latin1",
+            "init_command": "SET NAMES utf8; SET time_zone = '+08:00'",
+        }
+    wire_charset = "utf8mb4" if db_charset == "utf8mb4" else "utf8"
+    return {
+        "charset": wire_charset,
+        "init_command": f"SET NAMES {db_charset}; SET time_zone = '+08:00'",
+    }
+
+
+def _build_mysql_database(*, prefix: str = "DB_") -> dict:
+    db_charset = os.getenv(f"{prefix}CHARSET", os.getenv("DB_CHARSET", "utf8"))
+    return {
+        "ENGINE": "config.db_backend",
+        "NAME": os.getenv(f"{prefix}NAME", "image_db"),
+        "USER": os.getenv(f"{prefix}USER", "root"),
+        "PASSWORD": os.getenv(f"{prefix}PASSWORD", ""),
+        "HOST": os.getenv(f"{prefix}HOST", "127.0.0.1"),
+        "PORT": os.getenv(f"{prefix}PORT", "3306"),
+        "OPTIONS": _mysql_options(db_charset),
+    }
+
+
 if DB_ENGINE == "sqlite" or RUNNING_TESTS:
     DATABASES = {
         "default": {
@@ -95,29 +124,11 @@ if DB_ENGINE == "sqlite" or RUNNING_TESTS:
 else:
     # MySQL 5.1.x: no utf8mb4/utf8mb3. mysqlclient 2.2+ maps utf8→utf8mb3.
     # Workaround: handshake charset latin1, session charset via SET NAMES utf8.
-    db_charset = os.getenv("DB_CHARSET", "utf8")
-    if db_charset in ("utf8", "utf8mb3", "utf8mb4"):
-        db_options: dict = {
-            "charset": "latin1",
-            "init_command": "SET NAMES utf8; SET time_zone = '+08:00'",
-        }
-    else:
-        db_options = {
-            "charset": db_charset,
-            "init_command": f"SET NAMES {db_charset}",
-        }
-
     DATABASES = {
-        "default": {
-            "ENGINE": "config.db_backend",
-            "NAME": os.getenv("DB_NAME", "image_db"),
-            "USER": os.getenv("DB_USER", "root"),
-            "PASSWORD": os.getenv("DB_PASSWORD", ""),
-            "HOST": os.getenv("DB_HOST", "127.0.0.1"),
-            "PORT": os.getenv("DB_PORT", "3306"),
-            "OPTIONS": db_options,
-        }
+        "default": _build_mysql_database(prefix="DB_"),
     }
+    if os.getenv("LEGACY_DB_HOST", "").strip():
+        DATABASES["legacy"] = _build_mysql_database(prefix="LEGACY_DB_")
 
 # ---------------------------------------------------------------------------
 # Auth
@@ -151,7 +162,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # ---------------------------------------------------------------------------
 
 UPLOAD_ROOT = os.getenv("UPLOAD_ROOT", str(PROJECT_ROOT / "upload"))
-IMPORT_SCAN_ROOT = os.getenv("IMPORT_SCAN_ROOT", str(PROJECT_ROOT))
 THUMB_CACHE_ROOT = os.getenv("THUMB_CACHE_ROOT", str(BASE_DIR / "thumb_cache"))
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024

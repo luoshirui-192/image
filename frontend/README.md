@@ -14,10 +14,10 @@ cd frontend && npm install && npm run dev
 | 路由 | 说明 |
 |------|------|
 | `/upload` | 图片上传 |
-| `/import` | 批量导入（管理员） |
-| `/sql` | SQL 查询面板（管理员） |
-| `/images` | 图片列表 |
-| `/categories` | 分类管理（管理员） |
+| `/blob-migrate` | BLOB 迁移 |
+| `/blob-views` | BLOB 表视图 |
+| `/sql` | SQL 查询面板 |
+| `/categories` | 分类管理 |
 | `/logs` | 操作日志（管理员） |
 | `/settings` | 系统设置（管理员） |
 
