@@ -10,6 +10,8 @@ env/
 # Secrets & local env（保留 *.example 模板）
 .env
 !.env.docker.example
+!.env.app.example
+!.env.data.example
 backend/.env
 frontend/.env.production
 frontend/.env.development

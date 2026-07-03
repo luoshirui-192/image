@@ -1,0 +1,34 @@
+# 机器 B：仅数据层（MySQL 主库 + upload 目录 + NFS）
+# 不含 Web/Backend。机器 A 通过 DB_HOST 与本机 NFS 访问。
+# 启动：./start-data.sh
+
+name: image-db-data
+
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-image_db}
+      MYSQL_USER: ${MYSQL_USER:-image_db}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --bind-address=0.0.0.0
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql:/sql:ro
+      - ./docker/mysql-init/00-init-data.sh:/docker-entrypoint-initdb.d/00-init-data.sh:ro
+    ports:
+      - "${MYSQL_PUBLISH_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  mysql_data:
