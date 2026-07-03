@@ -4,6 +4,11 @@
 
 **推荐部署方式：Docker Compose 一键启动**（无需单独安装 Python、Node、MySQL、Nginx）。
 
+**双机部署：**
+
+- **机器 A（应用层）** → 分支 [`deploy/machine-a`](https://github.com/luoshirui-192/image/tree/deploy/machine-a)，见 [README-MACHINE-A.md](https://github.com/luoshirui-192/image/blob/deploy/machine-a/README-MACHINE-A.md)
+- **机器 B（数据层）** → 分支 [`deploy/machine-b`](https://github.com/luoshirui-192/image/tree/deploy/machine-b)，见 [README-MACHINE-B.md](https://github.com/luoshirui-192/image/blob/deploy/machine-b/README-MACHINE-B.md)
+
 ---
 
 ## 功能概览
