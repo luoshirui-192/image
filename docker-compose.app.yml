@@ -1,5 +1,5 @@
-# 机器 A：仅应用层（Web + Backend + Scheduler）
-# 主库 MySQL 与 upload/ 在机器 B，通过 DB_HOST 与 NFS 挂载访问。
+# 机器 A：MySQL + Web + Backend + Scheduler
+# 图片 upload/ 通过 NFS 挂载机器 B 的存储目录（启动前挂载 ./upload）
 # 启动：./start-app.sh  或  docker compose -f docker-compose.app.yml up -d --build
 
 name: image-db-app
@@ -9,8 +9,8 @@ x-backend-environment: &backend-environment
   SECRET_KEY: ${SECRET_KEY:-change-me-docker-secret-key}
   IMAGE_ACCESS_SECRET: ${IMAGE_ACCESS_SECRET:-change-me-docker-image-secret}
   DB_ENGINE: mysql
-  DB_HOST: ${DB_HOST}
-  DB_PORT: ${DB_PORT:-3306}
+  DB_HOST: db
+  DB_PORT: "3306"
   DB_NAME: ${MYSQL_DATABASE:-image_db}
   DB_USER: ${MYSQL_USER:-image_db}
   DB_PASSWORD: ${MYSQL_PASSWORD}
@@ -23,6 +23,30 @@ x-backend-environment: &backend-environment
   DELETED_IMAGE_RETENTION_DAYS: ${DELETED_IMAGE_RETENTION_DAYS:-30}
 
 services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-image_db}
+      MYSQL_USER: ${MYSQL_USER:-image_db}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql:/sql:ro
+      - ./docker/mysql-init/00-init-app.sh:/docker-entrypoint-initdb.d/00-init-app.sh:ro
+    ports:
+      - "127.0.0.1:${MYSQL_PUBLISH_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
   backend:
     build:
       context: .
@@ -30,6 +54,9 @@ services:
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
       <<: *backend-environment
       GUNICORN_BIND: "0.0.0.0:8000"
@@ -44,6 +71,9 @@ services:
       context: .
       dockerfile: docker/Dockerfile.backend
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     entrypoint: ["/bin/bash", "/app/docker/maintenance-loop.sh"]
     environment:
       <<: *backend-environment
@@ -63,4 +93,5 @@ services:
       - "${HTTP_PORT:-80}:80"
 
 volumes:
+  mysql_data:
   thumb_cache:

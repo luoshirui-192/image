@@ -1,4 +1,4 @@
-# Machine A one-click start (Windows PowerShell, app layer only)
+# Machine A one-click start (Windows PowerShell)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 $ComposeFile = "docker-compose.app.yml"
@@ -17,15 +17,8 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 if (-not (Test-Path .env)) {
     Copy-Item .env.app.example .env
     Write-Host "Created .env from .env.app.example"
-    Write-Host "Edit DB_HOST, MYSQL_PASSWORD, PUBLIC_URL, then run this script again."
+    Write-Host "Edit MYSQL_* passwords, PUBLIC_URL, MACHINE_B_NFS_*, then run again."
     exit 0
-}
-
-$dbHost = (Select-String -Path .env -Pattern '^DB_HOST=' | Select-Object -First 1).Line.Split('=', 2)[1].Trim()
-if (-not $dbHost -or $dbHost -in @('db', 'localhost', '127.0.0.1')) {
-    Write-Host "ERROR: DB_HOST must be machine B MySQL address (current: $dbHost)"
-    Write-Host "See README-MACHINE-A.md"
-    exit 1
 }
 
 if (-not (Test-Path upload)) {
@@ -45,9 +38,9 @@ if ($match) { $public = $match.Line.Split('=', 2)[1].Trim() }
 
 Write-Host ""
 Write-Host "=========================================="
-Write-Host " Machine A app layer started"
+Write-Host " Machine A started (MySQL + app layer)"
 Write-Host " Browser: $public"
-Write-Host " MySQL (machine B): $dbHost"
+Write-Host " upload/ should be NFS from machine B in production"
 Write-Host " Stop: docker compose -f $ComposeFile down"
 Write-Host " Docs: README-MACHINE-A.md"
 Write-Host "=========================================="

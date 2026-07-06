@@ -1,33 +1,52 @@
-# 机器 A 部署指南（应用层）
+# 机器 A 部署指南（数据库 + 服务端）
 
-本分支用于 **双机部署** 中的 **机器 A**：只跑 Web / Backend / Scheduler，**不包含 MySQL 容器**。
+本分支用于 **双机部署** 中的 **机器 A**：运行 **MySQL 主库**、**Web / Backend / Scheduler**，对外提供 HTTP 服务。
 
 | 机器 | 职责 |
 |------|------|
-| **A（本机）** | Docker 应用、对外 HTTP、连接 B 的库与 NFS |
-| **B（数据机）** | MySQL 主库 + `upload/` 图片目录 + NFS 导出 |
+| **A（本机）** | MySQL `image_db`、Docker 应用、对外 HTTP |
+| **B（存储机）** | 仅 `upload/` 图片目录 + NFS 导出 |
 
-其他办公电脑通过浏览器访问 **A 的 `PUBLIC_URL`** 即可使用全部 Web 功能（上传、SQL、BLOB 迁移等）。
+其他办公电脑通过浏览器访问 **A 的 `PUBLIC_URL`** 即可使用全部 Web 功能。图片文件经 NFS 读写 **B** 的磁盘。
+
+存储层部署见分支 **[deploy/machine-b](https://github.com/luoshirui-192/image/tree/deploy/machine-b)** 与 [README-MACHINE-B.md](https://github.com/luoshirui-192/image/blob/deploy/machine-b/README-MACHINE-B.md)。
+
+---
+
+## 架构
+
+```
+用户浏览器
+     │
+     ▼
+机器 A（本机）                    机器 B（存储）
+┌─────────────────────┐          ┌──────────────────┐
+│ web / backend       │          │ /data/.../upload │
+│ MySQL (Docker db)   │── NFS ──►│ NFS 导出         │
+└─────────────────────┘          └──────────────────┘
+```
 
 ---
 
 ## 快速开始
+
+**先部署机器 B**（NFS 存储），再部署 A。
 
 ```bash
 git clone -b deploy/machine-a https://github.com/luoshirui-192/image.git
 cd image
 
 cp .env.app.example .env
-# 编辑 .env：PUBLIC_URL、DB_HOST、MYSQL_PASSWORD、SECRET_KEY 等
+# 编辑：PUBLIC_URL、MYSQL_* 密码、MACHINE_B_NFS_*（B 的 IP 与路径）
 
-# 挂载机器 B 的 upload（见下文「NFS 挂载」）
+# 挂载机器 B 的 upload（生产必做）
 sudo mount -t nfs 192.168.1.20:/data/image_db/upload ./upload
 
 chmod +x start-app.sh
 ./start-app.sh
 ```
 
-浏览器打开 `.env` 里的 `PUBLIC_URL`，默认账号 **admin / admin123**（需机器 B 已导入种子数据）。
+浏览器打开 `.env` 里的 `PUBLIC_URL`，默认账号 **admin / admin123**。
 
 ---
 
@@ -35,39 +54,11 @@ chmod +x start-app.sh
 
 在部署 A 之前，**机器 B** 需完成：
 
-1. **MySQL 8.0** 已安装并监听内网
-2. **数据库已初始化**（在 B 上或任意能连 B 的客户端执行）：
+1. 创建图片目录（如 `/data/image_db/upload`）
+2. 配置 **NFS 导出** 给 A 的 IP
+3. 防火墙对 **A 的 IP** 开放 **2049**（NFS）
 
-```bash
-mysql -h <B_IP> -u root -p < sql/image_db.sql
-mysql -h <B_IP> -u root -p image_db < sql/optimize_indexes.sql
-mysql -h <B_IP> -u root -p image_db < sql/fix_mysql57_triggers.sql
-mysql -h <B_IP> -u root -p image_db < sql/seed_test_data.sql
-mysql -h <B_IP> -u root -p image_db < sql/blob_migration.sql
-```
-
-3. **应用账号**（允许 A 连接）：
-
-```sql
-CREATE USER 'image_db'@'192.168.1.10' IDENTIFIED BY '你的密码';
-GRANT ALL ON image_db.* TO 'image_db'@'192.168.1.10';
-FLUSH PRIVILEGES;
-```
-
-将 `192.168.1.10` 换成 **机器 A 的 IP**。
-
-4. **图片目录 + NFS**：
-
-```bash
-sudo mkdir -p /data/image_db/upload
-# /etc/exports 示例（仅允许 A）：
-# /data/image_db/upload  192.168.1.10(rw,sync,no_subtree_check,no_root_squash)
-sudo exportfs -ra
-```
-
-5. **防火墙**：B 上对 **A 的 IP** 开放 **3306**（MySQL）、**2049**（NFS）。
-
-> 机器 B **不需要**安装 Docker 或 clone 本仓库（仅需 `sql/` 脚本初始化库）。
+> 机器 B **不需要** MySQL，也 **不需要** Docker。详见 [README-MACHINE-B.md](README-MACHINE-B.md)。
 
 ---
 
@@ -77,7 +68,7 @@ sudo exportfs -ra
 - Git、Docker Engine、Docker Compose 插件
 - 4GB+ 内存（首次构建前端镜像）
 - 项目路径建议 **纯英文**（Windows Docker 限制）
-- 能访问 B 的 **3306** 与 **NFS**
+- 能访问 B 的 **NFS**（2049）
 
 ---
 
@@ -91,23 +82,25 @@ cp .env.app.example .env
 |------|------|------|
 | `PUBLIC_URL` | **A** 的访问地址 | `http://192.168.1.10` |
 | `HTTP_PORT` | A 对外端口 | `80` |
-| `DB_HOST` | **B** 的 MySQL IP | `192.168.1.20` |
-| `DB_PORT` | MySQL 端口 | `3306` |
+| `MYSQL_ROOT_PASSWORD` | 本机 MySQL root 密码 | 强密码 |
+| `MYSQL_PASSWORD` | 应用库用户密码 | 强密码 |
 | `MYSQL_DATABASE` | 库名 | `image_db` |
 | `MYSQL_USER` | 库用户 | `image_db` |
-| `MYSQL_PASSWORD` | 库密码（与 B 上一致） | 强密码 |
+| `MYSQL_PUBLISH_PORT` | 本机映射 MySQL 端口 | `3306`（仅 127.0.0.1） |
+| `MACHINE_B_NFS_HOST` | **B** 的 IP（供挂载参考） | `192.168.1.20` |
+| `MACHINE_B_NFS_PATH` | B 上 NFS 导出路径 | `/data/image_db/upload` |
 | `SECRET_KEY` | Django 密钥 | `python3 scripts/generate_secret_key.py` |
 | `IMAGE_ACCESS_SECRET` | 图片令牌密钥 | 再生成一段 |
 
-`ALLOWED_HOSTS` / `CORS_ALLOWED_ORIGINS` 由 `docker/set-env.py` 根据 `PUBLIC_URL` **自动写入**，无需手写。
+`ALLOWED_HOSTS` / `CORS_ALLOWED_ORIGINS` 由 `docker/set-env.py` 根据 `PUBLIC_URL` **自动写入**。
 
-**不要**把 `DB_HOST` 设为 `db`、`localhost`（除非 MySQL 真的在 A 本机——那样请用 `main` 分支的单机 compose）。
+MySQL 在 A 本机 Docker 容器 `db` 内，**无需**配置 `DB_HOST` 指向 B。
 
 ---
 
 ## NFS 挂载 upload
 
-Backend 将 `./upload` 映射为容器内 `/app/upload`，**生产环境此目录应对应 B 上的真实存储**。
+Backend 将 `./upload` 映射为容器内 `/app/upload`，**生产环境必须挂载 B 的 NFS**。
 
 **Linux（A 上）：**
 
@@ -174,21 +167,34 @@ docker compose -f docker-compose.app.yml logs -f backend
 |------|----------------------|------------------------|
 | Compose 文件 | `docker-compose.yml` | `docker-compose.app.yml` |
 | 环境模板 | `.env.docker.example` | `.env.app.example` |
-| MySQL 容器 | ✅ 本地 `db` 服务 | ❌ 连远程 `DB_HOST` |
+| MySQL | ✅ 本地容器 | ✅ 本地容器 |
 | upload | 本地目录 | **NFS 来自 B** |
-| 适用场景 | 一台机器.all-in-one | A 应用 + B 数据 |
+| 适用场景 | 一台机器 all-in-one | A 库+服务 + B 纯存储 |
 
 ---
 
 ## 功能说明
 
-在 A 的 Web 上可完成与单机相同的业务操作：
-
 - 上传、SQL 查询、BLOB 迁移、BLOB 表视图、分类管理
 - 连接**外部旧库**迁 BLOB：由 **A 的 backend 容器**发起连接，旧库需允许 **A 的 IP** 访问
-- 数据与文件最终写入 **B 的主库** 与 **B 的 upload**
+- 元数据写入 **A 的 MySQL**；图片文件写入 **B 的 upload**（经 NFS）
 
 缩略图缓存 `thumb_cache` 在 A 本地 Docker 卷，丢失可自动重建。
+
+---
+
+## 备份
+
+**数据库（A 上）：**
+
+```bash
+docker compose -f docker-compose.app.yml exec db \
+  mysqldump -u root -p"${MYSQL_ROOT_PASSWORD}" image_db > backup_$(date +%F).sql
+```
+
+**图片（B 上）：**
+
+在 B 上对 `DATA_UPLOAD_ROOT` 做 tar 备份，见 [README-MACHINE-B.md](README-MACHINE-B.md)。
 
 ---
 
@@ -196,14 +202,13 @@ docker compose -f docker-compose.app.yml logs -f backend
 
 | 现象 | 处理 |
 |------|------|
-| `DB_HOST 必须设为机器 B` | 编辑 `.env`，`DB_HOST` 填 B 的内网 IP |
-| backend 一直 waiting for MySQL | 检查 B 的 MySQL 是否启动；A 能否 `telnet B_IP 3306`；用户是否授权给 A 的 IP |
-| 上传/预览失败 | 检查 NFS 是否挂载到 `./upload`；B 上目录权限 |
+| backend 一直 waiting for MySQL | `docker compose -f docker-compose.app.yml logs db`；检查 `.env` 密码 |
+| 上传/预览失败 | NFS 是否挂载到 `./upload`；B 上 `exportfs -v`；目录权限 |
 | 502 | `docker compose -f docker-compose.app.yml logs backend` |
-| 登录失败 | 确认 B 上已执行 `seed_test_data.sql`；或 A 首次启动后 backend 已 migrate 成功 |
-| 连旧库失败 | 旧库防火墙放行 **A 的 IP**，不是 B |
+| 登录失败 | 首次启动是否完成 sql 初始化；`seed_test_data.sql` |
+| 连旧库失败 | 旧库防火墙放行 **A 的 IP** |
 
-**测试 A → B 数据库：**
+**测试本机数据库：**
 
 ```bash
 docker compose -f docker-compose.app.yml exec backend \
@@ -216,8 +221,9 @@ docker compose -f docker-compose.app.yml exec backend \
 
 | 文件 | 用途 |
 |------|------|
-| `docker-compose.app.yml` | 仅 web / backend / scheduler |
+| `docker-compose.app.yml` | db + web + backend + scheduler |
 | `.env.app.example` | 环境变量模板 |
+| `docker/mysql-init/00-init-app.sh` | 首次建库（含 BLOB 表） |
 | `start-app.sh` / `start-app.ps1` | 一键启动 |
 | `README-MACHINE-A.md` | 本文档 |
 
@@ -225,6 +231,6 @@ docker compose -f docker-compose.app.yml exec backend \
 
 ## 相关链接
 
-- 单机 all-in-one 部署：仓库 `main` 分支 [README.md](README.md)
-- 仓库地址：https://github.com/luoshirui-192/image.git
-- 分支：`deploy/machine-a`
+- 机器 B 存储：[deploy/machine-b](https://github.com/luoshirui-192/image/tree/deploy/machine-b)
+- 单机 all-in-one：`main` 分支 [README.md](README.md)
+- 仓库：https://github.com/luoshirui-192/image.git
