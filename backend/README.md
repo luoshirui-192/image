@@ -51,7 +51,7 @@ python manage.py runserver 0.0.0.0:8000
 - `DB_CHARSET`：MySQL **5.1.x 必须为 `utf8`**
 | `STORAGE_BACKEND` | 存储后端：`local` 或 `minio` | `local` |
 | `UPLOAD_ROOT` | 本地存储根目录（`local` 模式） | 项目根 `upload/` |
-| `MINIO_ENDPOINT` | MinIO VIP（`minio` 模式） | `http://192.168.9.100:9000` |
+| `MINIO_ENDPOINT` | MinIO VIP（`minio` 模式） | `http://192.168.9.9:9000` |
 | `MINIO_BUCKET` / `MINIO_PREFIX` | 桶与前缀 | `biox` / `data/image_db` |
 - `IMAGE_ACCESS_SECRET`：图片访问令牌密钥
 

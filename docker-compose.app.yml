@@ -20,7 +20,7 @@ x-backend-environment: &backend-environment
   STORAGE_BACKEND: ${STORAGE_BACKEND:-minio}
   UPLOAD_ROOT: /app/upload
   THUMB_CACHE_ROOT: /app/backend/thumb_cache
-  MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://192.168.9.100:9000}
+  MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://192.168.9.9:9000}
   MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
   MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
   MINIO_BUCKET: ${MINIO_BUCKET:-biox}

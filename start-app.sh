@@ -39,7 +39,7 @@ if [ "$STORAGE_BACKEND" = "minio" ]; then
     echo "错误: STORAGE_BACKEND=minio 时须设置 MINIO_ACCESS_KEY 与 MINIO_SECRET_KEY"
     exit 1
   fi
-  ENDPOINT="${MINIO_ENDPOINT:-http://192.168.9.100:9000}"
+  ENDPOINT="${MINIO_ENDPOINT:-http://192.168.9.9:9000}"
   echo "图片存储: MinIO ${ENDPOINT} / ${MINIO_BUCKET:-biox}/${MINIO_PREFIX:-data/image_db}"
 else
   if [ ! -d upload ]; then
