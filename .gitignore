@@ -22,8 +22,9 @@ backend/db.sqlite3
 backend/data/sql_templates.json
 backend/thumb_cache/*
 !backend/thumb_cache/.gitkeep
-backend/logs/*
-!backend/logs/.gitkeep
+# Runtime log files only (do not ignore the logs Django app package)
+backend/logs/django.log
+backend/logs/*.log
 
 # Upload files (keep structure)
 upload/*
