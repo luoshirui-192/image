@@ -45,7 +45,7 @@ class MinioImageStorageTests(SimpleTestCase):
     def test_object_key_includes_prefix(self, minio_cls):
         minio_cls.return_value = mock.Mock()
         storage = MinioImageStorage(
-            endpoint="http://192.168.9.100:9000",
+            endpoint="http://192.168.9.9:9000",
             access_key="key",
             secret_key="secret",
             bucket="biox",
@@ -67,7 +67,7 @@ class GetImageStorageFactoryTests(SimpleTestCase):
 
     @override_settings(
         STORAGE_BACKEND="minio",
-        MINIO_ENDPOINT="http://192.168.9.100:9000",
+        MINIO_ENDPOINT="http://192.168.9.9:9000",
         MINIO_ACCESS_KEY="user",
         MINIO_SECRET_KEY="pass",
         MINIO_BUCKET="biox",
