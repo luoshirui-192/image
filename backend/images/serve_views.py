@@ -1,7 +1,7 @@
 """Image file serving API — Step 14."""
 from __future__ import annotations
 
-from django.http import FileResponse
+from django.http import FileResponse, HttpResponse
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -16,8 +16,10 @@ from images.file_service import (
     ensure_access_allowed,
     get_absolute_image_path,
     get_or_create_thumbnail,
+    read_image_bytes,
     resolve_image_location,
 )
+from utils.storage import get_image_storage
 from utils.file_security import AccessDeniedError, PathSecurityError
 from utils.permissions import IsActiveAccount
 from utils.responses import error_response, success_response
@@ -53,6 +55,13 @@ def _serve_file(abs_path, filename: str, *, as_attachment: bool, content_type: s
     return response
 
 
+def _serve_bytes(data: bytes, filename: str, *, as_attachment: bool, content_type: str) -> HttpResponse:
+    disposition = "attachment" if as_attachment else "inline"
+    response = HttpResponse(data, content_type=content_type)
+    response["Content-Disposition"] = f'{disposition}; filename="{filename}"'
+    return response
+
+
 class _BaseImageServeView(APIView):
     """Shared auth + path resolution for image streaming endpoints."""
 
@@ -76,13 +85,28 @@ class _BaseImageServeView(APIView):
                 abs_path = get_or_create_thumbnail(relative_path)
                 content_type = "image/jpeg"
                 serve_name = f"thumb_{filename.rsplit('.', 1)[0]}.jpg"
-            else:
-                abs_path = get_absolute_image_path(relative_path)
-                content_type = content_type_for_path(relative_path)
-                serve_name = filename
+                return _serve_file(
+                    abs_path,
+                    serve_name,
+                    as_attachment=self.as_attachment,
+                    content_type=content_type,
+                )
 
-            return _serve_file(
-                abs_path,
+            content_type = content_type_for_path(relative_path)
+            serve_name = filename
+            storage = get_image_storage()
+            if storage.backend_name == "local":
+                abs_path = get_absolute_image_path(relative_path)
+                return _serve_file(
+                    abs_path,
+                    serve_name,
+                    as_attachment=self.as_attachment,
+                    content_type=content_type,
+                )
+
+            data = read_image_bytes(relative_path)
+            return _serve_bytes(
+                data,
                 serve_name,
                 as_attachment=self.as_attachment,
                 content_type=content_type,

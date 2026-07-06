@@ -14,7 +14,8 @@ from images.file_service import thumb_cache_path
 from images.models import ImageCategory, ImageInfo
 from utils.db_time import fetch_db_now
 from utils.file_security import UploadValidationError, validate_upload_file
-from utils.path_builder import build_relative_path, ensure_parent_dir, normalize_suffix
+from utils.path_builder import build_relative_path, normalize_suffix
+from utils.storage import get_image_storage
 
 logger = logging.getLogger(__name__)
 
@@ -144,23 +145,20 @@ def _overwrite_existing_image(
     old_path = existing.image_path
     suffix = validated.suffix
 
+    storage = get_image_storage()
     if normalize_suffix(Path(old_path).suffix.lstrip(".")) == suffix:
-        abs_path = ensure_parent_dir(settings.UPLOAD_ROOT, old_path)
-        abs_path.write_bytes(content)
+        storage.write_bytes(old_path, content)
         relative_path = old_path
     else:
         now = fetch_db_now()
         relative_path = build_relative_path(cat_id, suffix, when=now)
-        abs_path = ensure_parent_dir(settings.UPLOAD_ROOT, relative_path)
-        abs_path.write_bytes(content)
+        storage.write_bytes(relative_path, content)
         if old_path and old_path != relative_path:
-            try:
-                old_abs = ensure_parent_dir(settings.UPLOAD_ROOT, old_path)
-                if old_abs.is_file():
-                    old_abs.unlink()
+            deleted, _ = storage.delete(old_path)
+            if deleted:
                 _invalidate_thumbnail(old_path)
-            except OSError:
-                logger.warning("failed to remove old file %s", old_path, exc_info=True)
+            elif old_path:
+                logger.warning("failed to remove old file %s", old_path)
 
     _invalidate_thumbnail(relative_path)
 
@@ -230,8 +228,7 @@ def save_image_bytes(
 
     now = fetch_db_now()
     relative_path = build_relative_path(cat_id, validated.suffix, when=now)
-    abs_path = ensure_parent_dir(settings.UPLOAD_ROOT, relative_path)
-    abs_path.write_bytes(content)
+    get_image_storage().write_bytes(relative_path, content)
 
     record = ImageInfo.objects.create(
         image_name=Path(filename).name,

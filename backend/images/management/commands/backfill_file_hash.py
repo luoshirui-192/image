@@ -1,14 +1,12 @@
-"""Backfill empty file_hash from on-disk upload files."""
+"""Backfill empty file_hash from stored upload files."""
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
-from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from images.models import ImageInfo
-from utils.path_builder import resolve_upload_file
+from utils.storage import get_image_storage
 
 
 class Command(BaseCommand):
@@ -23,6 +21,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
+        storage = get_image_storage()
         qs = ImageInfo.objects.filter(is_delete=0, file_hash="").order_by("id")
         total = qs.count()
         updated = 0
@@ -31,19 +30,12 @@ class Command(BaseCommand):
         self.stdout.write(f"Found {total} active rows with empty file_hash")
 
         for record in qs.iterator():
-            try:
-                abs_path = resolve_upload_file(settings.UPLOAD_ROOT, record.image_path)
-            except ValueError:
+            if not storage.exists(record.image_path):
                 missing += 1
-                self.stderr.write(f"skip id={record.id} invalid path {record.image_path}")
+                self.stderr.write(f"skip id={record.id} file not found {record.image_path}")
                 continue
 
-            if not abs_path.is_file():
-                missing += 1
-                self.stderr.write(f"skip id={record.id} file not found {abs_path}")
-                continue
-
-            content_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()
+            content_hash = hashlib.sha256(storage.read_bytes(record.image_path)).hexdigest()
             if dry_run:
                 self.stdout.write(f"would update id={record.id} {record.image_name} -> {content_hash[:12]}...")
             else:

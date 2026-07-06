@@ -1,13 +1,13 @@
-# 机器 B 部署指南（图片存储层）
+# 机器 B 部署指南（MinIO 存储层）
 
-本分支用于 **双机部署** 中的 **机器 B**：**仅负责图片文件存储**，通过 **NFS** 供机器 A 读写 `upload/`。
+本分支用于 **双机部署** 中的 **机器 B**：对接公司 **MinIO 对象存储**（亚略特 AI 框架 VIP `192.168.9.100`），为 image_db 准备 `biox` 桶内的对象前缀与访问账号。
 
 | 机器 | 职责 |
 |------|------|
-| **B（本机）** | 大容量磁盘、`upload/` 目录、NFS 导出 |
-| **A（服务机）** | MySQL + Docker Web/Backend，挂载 B 的 NFS |
+| **B（本机）** | MinIO 租户配置：前缀初始化、权限验证、备份同步（可选） |
+| **A（服务机）** | MySQL + Docker Web/Backend，通过 **S3 SDK** 直连 MinIO |
 
-机器 B **不需要** MySQL、Docker 应用或对外 HTTP。也 **不需要** 跑 `start.sh`（单机版）。
+机器 B **不需要** MySQL、Docker 应用、NFS 服务端。也 **不需要** 跑 `start.sh`（单机版）。
 
 数据库与服务端部署见分支 **[deploy/machine-a](https://github.com/luoshirui-192/image/tree/deploy/machine-a)** 与 [README-MACHINE-A.md](https://github.com/luoshirui-192/image/blob/deploy/machine-a/README-MACHINE-A.md)。
 
@@ -19,12 +19,17 @@
 用户浏览器
      │
      ▼
-机器 A（服务）                    机器 B（本机，仅存储）
-┌─────────────────────┐          ┌──────────────────┐
-│ web / backend       │          │ /data/.../upload │
-│ MySQL (Docker)      │── NFS ──►│ NFS 导出         │
-└─────────────────────┘          └──────────────────┘
+机器 A（服务）                         192.168.9.100 MinIO VIP
+┌─────────────────────┐   S3 API    ┌──────────────────────────┐
+│ web / backend       │────────────►│ biox/data/image_db/      │
+│ MySQL (Docker)      │  (9000)     │   upload/YYYYMMDD/...    │
+└─────────────────────┘             │        ↓ 101/102 节点      │
+                                    └──────────────────────────┘
 ```
+
+- **9.100** 是对外统一入口（Keepalived + Nginx LB），实际数据在 **9.101 / 9.102**。
+- image_db 数据库仍存相对路径 `upload/{date}/{category}/{uuid}.ext`；物理文件在 MinIO 的 `data/image_db/upload/...`。
+- 缩略图缓存仍在 **机器 A** 本地 `thumb_cache/`，不写入 MinIO。
 
 ---
 
@@ -35,19 +40,13 @@ git clone -b deploy/machine-b https://github.com/luoshirui-192/image.git
 cd image
 
 cp .env.storage.example .env
-# 编辑：DATA_UPLOAD_ROOT、MACHINE_A_HOSTS（A 的 IP）
+# 编辑：MINIO_ACCESS_KEY、MINIO_SECRET_KEY、MACHINE_A_HOSTS
 
-chmod +x start-storage.sh scripts/setup-nfs-export.sh
+chmod +x scripts/setup-minio-prefix.sh start-storage.sh
 ./start-storage.sh
 ```
 
-完成后告知机器 A 管理员 NFS 挂载信息：
-
-```bash
-# 在 A 上执行（IP 与路径按 B 的 .env 填写）
-sudo mkdir -p /opt/image_db/upload
-sudo mount -t nfs 192.168.1.20:/data/image_db/upload /opt/image_db/upload
-```
+完成后将 `.env` 中的 MinIO 配置交给 **机器 A** 管理员（或自行部署 A）。
 
 ---
 
@@ -55,13 +54,12 @@ sudo mount -t nfs 192.168.1.20:/data/image_db/upload /opt/image_db/upload
 
 | 项目 | 建议 |
 |------|------|
-| 操作系统 | **Linux**（Ubuntu 22.04 / Debian 12）；NFS 服务端需 Linux |
-| CPU / 内存 | 1 核、1GB+ 即可（无数据库与应用） |
-| 磁盘 | **大容量数据盘** 专存图片 |
-| 软件 | Git（可选，仅需脚本时）；`nfs-kernel-server` |
-| 网络 | 内网固定 IP；对 **机器 A** 开放 **2049**（NFS） |
+| 操作系统 | Linux / macOS / Windows（仅需 mc 与管理脚本） |
+| 软件 | [MinIO Client (`mc`)](https://min.io/docs/minio/linux/reference/minio-mc.html) |
+| 网络 | 能访问 **192.168.9.100:9000**（MinIO API） |
+| 账号 | 由 MinIO 管理员分配（需对 `biox` 桶有读写权限） |
 
-> 若 B 为 Windows，需自行配置 SMB/NFS 共享，本仓库脚本面向 Linux NFS。
+> MinIO 集群由公司基础设施维护；机器 B 侧只做 **前缀初始化与验证**，不在 9.100 上安装 image_db 应用。
 
 ---
 
@@ -73,111 +71,108 @@ cp .env.storage.example .env
 
 | 变量 | 说明 | 示例 |
 |------|------|------|
-| `DATA_UPLOAD_ROOT` | 宿主机图片目录 | `/data/image_db/upload` |
-| `NFS_EXPORT_PATH` | NFS 导出路径（通常同上） | `/data/image_db/upload` |
-| `MACHINE_A_HOSTS` | 机器 A 的 IP（可多个，空格分隔） | `192.168.1.10` |
+| `MINIO_ENDPOINT` | MinIO VIP + 端口 | `http://192.168.9.100:9000` |
+| `MINIO_ACCESS_KEY` | 访问密钥 | 管理员分配 |
+| `MINIO_SECRET_KEY` | 秘密密钥 | 管理员分配 |
+| `MINIO_BUCKET` | 桶名 | `biox` |
+| `MINIO_PREFIX` | image_db 对象前缀 | `data/image_db` |
+| `MINIO_MC_ALIAS` | mc 别名 | `aratek` |
+| `MACHINE_A_HOSTS` | 机器 A IP（文档/防火墙参考） | `192.168.17.162` |
 
 ---
 
-## 分步部署
+## MinIO 目录规划
 
-### 1. 创建图片目录
+与亚略特 AI 框架 `biox` 桶一致：
 
-```bash
-sudo mkdir -p /data/image_db/upload
-sudo chmod 1777 /data/image_db/upload
-```
+| MinIO 路径 | 用途 |
+|------------|------|
+| `biox/data/image_db/upload/` | image_db 上传图片（对应库表 `image_path`） |
+| `biox/data/image_db/backups/` | 可选，定时备份 tar.gz |
+| `biox/team/{用户}/` | 个人实验数据（与 image_db 无关时可忽略） |
 
-或在 `.env` 中修改 `DATA_UPLOAD_ROOT` 后运行 `./start-storage.sh` 自动创建。
-
-### 2. 配置 NFS 导出
-
-```bash
-./scripts/setup-nfs-export.sh
-```
-
-脚本会写入 `/etc/exports` 并重启 `nfs-server`。
-
-手工配置示例（`/etc/exports`）：
+对象 key 示例：
 
 ```
-/data/image_db/upload  192.168.1.10(rw,sync,no_subtree_check,no_root_squash)
-```
-
-```bash
-sudo exportfs -ra
-sudo systemctl restart nfs-server
-```
-
-### 3. 防火墙（仅放行 A）
-
-```bash
-# UFW 示例（B 上）
-sudo ufw allow from 192.168.1.10 to any port 2049
-```
-
-**不要**对公网开放 NFS。
-
-### 4. 机器 A 挂载验证
-
-在 A 上：
-
-```bash
-sudo mount -t nfs 192.168.1.20:/data/image_db/upload /opt/image_db/upload
-touch /opt/image_db/upload/.nfs_test && rm /opt/image_db/upload/.nfs_test
-```
-
-在 B 上应能看到测试文件曾出现。
-
-**开机自动挂载**（A 的 `/etc/fstab`）：
-
-```
-192.168.1.20:/data/image_db/upload  /opt/image_db/upload  nfs  defaults,_netdev  0  0
+data/image_db/upload/20260706/2/550e8400-e29b-41d4-a716-446655440001.jpg
 ```
 
 ---
 
-## 调整 upload 目录位置
+## 初始化前缀
 
-1. 编辑 B 的 `.env`：`DATA_UPLOAD_ROOT` 与 `NFS_EXPORT_PATH`
-2. 创建新目录并迁移旧数据：`rsync -a 旧路径/ 新路径/`
-3. 重新运行 `./scripts/setup-nfs-export.sh`
-4. 在 A 上重新挂载新 NFS 路径
+```bash
+./start-storage.sh
+# 或
+./scripts/setup-minio-prefix.sh
+```
 
-数据库在 A 上，改 B 的磁盘路径 **无需改库**（库中存的是相对路径）。
+验证读写：
+
+```bash
+mc alias set aratek http://192.168.9.100:9000 USER PASS
+mc ls aratek/biox/data/image_db/
+echo test | mc pipe aratek/biox/data/image_db/upload/.probe
+mc rm aratek/biox/data/image_db/upload/.probe
+```
 
 ---
 
-## 备份
+## 与机器 A 的交接清单
 
-```bash
-tar czf upload_$(date +%F).tar.gz -C /data/image_db upload
-# 或按 DATA_UPLOAD_ROOT 实际路径
-tar czf upload_$(date +%F).tar.gz -C "$(dirname /data/image_db/upload)" "$(basename /data/image_db/upload)"
+部署 A 前，确认 B 侧已完成：
+
+1. MinIO 账号对 `biox/data/image_db/` 有 **读写删** 权限  
+2. **机器 A IP** 可访问 `192.168.9.100:9000`（防火墙/路由）  
+3. 已将以下变量写入 A 的 `.env`（见 machine-a 分支 `.env.app.example`）：
+
+```env
+STORAGE_BACKEND=minio
+MINIO_ENDPOINT=http://192.168.9.100:9000
+MINIO_ACCESS_KEY=...
+MINIO_SECRET_KEY=...
+MINIO_BUCKET=biox
+MINIO_PREFIX=data/image_db
 ```
 
-建议定期备份到独立存储。
+---
+
+## 可选：备份与迁移
+
+从旧 NFS/本地 `upload/` 迁移到 MinIO：
+
+```bash
+mc mirror /data/image_db/upload aratek/biox/data/image_db/upload/
+```
+
+打包备份（与 `scripts/backup_upload.py` 配合）：
+
+```bash
+python scripts/backup_upload.py
+mc cp backups/upload_*.tar.gz aratek/biox/data/image_db/backups/
+```
 
 ---
 
 ## 故障排查
 
-| 现象 | 处理 |
+| 现象 | 检查 |
 |------|------|
-| A 上传失败 | A 是否已挂载 NFS；B 上 `exportfs -v`；目录权限 |
-| A 挂载失败 | B 防火墙 2049；`MACHINE_A_HOSTS` 是否含 A 的 IP |
-| NFS 权限 denied | exports 使用 `no_root_squash`；A 容器以 root 写文件 |
-| 改路径后旧图不可见 | A 是否仍挂旧路径；数据是否已 rsync 到新目录 |
+| mc 连接失败 | `curl http://192.168.9.100:9000/minio/health/live` |
+| Access Denied | 账号策略是否含 `biox/data/image_db/*` |
+| A 上传失败 | A 的 `STORAGE_BACKEND=minio`；容器能否访问 9.100:9000 |
+| 路径不存在 | key 应为 `data/image_db/upload/...`，不是省略 `upload/` |
 
 ---
 
-## 本分支专用文件
+## 本分支相关文件
 
-| 文件 | 用途 |
+| 文件 | 说明 |
 |------|------|
-| `.env.storage.example` | 环境变量模板 |
-| `start-storage.sh` / `start-storage.ps1` | 一键创建目录并配置 NFS |
-| `scripts/setup-nfs-export.sh` | 写入 `/etc/exports` |
+| `.env.storage.example` | MinIO 环境变量模板 |
+| `scripts/setup-minio-prefix.sh` | 初始化 `biox` 桶内前缀 |
+| `start-storage.sh` / `start-storage.ps1` | 一键检查与初始化 |
+| `backend/utils/storage.py` | S3/MinIO 存储后端（A 侧运行时使用） |
 | `README-MACHINE-B.md` | 本文档 |
 
 ---
@@ -185,5 +180,4 @@ tar czf upload_$(date +%F).tar.gz -C "$(dirname /data/image_db/upload)" "$(basen
 ## 相关链接
 
 - 机器 A 部署：[deploy/machine-a](https://github.com/luoshirui-192/image/tree/deploy/machine-a)
-- 单机 all-in-one：`main` 分支 [README.md](README.md)
-- 仓库：https://github.com/luoshirui-192/image.git
+- 单机 Docker 部署：[main 分支 README](https://github.com/luoshirui-192/image/blob/main/README.md)

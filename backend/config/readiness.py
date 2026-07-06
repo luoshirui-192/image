@@ -6,6 +6,8 @@ from pathlib import Path
 from django.conf import settings
 from django.db import connection
 
+from utils.storage import get_image_storage
+
 
 def _upload_root() -> Path:
     return Path(settings.UPLOAD_ROOT).resolve()
@@ -24,6 +26,8 @@ def check_database() -> tuple[bool, str]:
 
 
 def check_upload_writable() -> tuple[bool, str]:
+    if getattr(settings, "STORAGE_BACKEND", "local").lower() == "minio":
+        return get_image_storage().check_writable()
     root = _upload_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -64,6 +68,17 @@ def check_secrets() -> tuple[bool, list[str]]:
             continue
         if any(marker in text for marker in insecure_markers):
             issues.append(f"{name} 仍为默认值，请更换")
+
+    if getattr(settings, "STORAGE_BACKEND", "local").lower() == "minio":
+        for name, value in (
+            ("MINIO_ACCESS_KEY", settings.MINIO_ACCESS_KEY),
+            ("MINIO_SECRET_KEY", settings.MINIO_SECRET_KEY),
+        ):
+            if not str(value or "").strip():
+                issues.append(f"{name} 未设置")
+        if not str(settings.MINIO_ENDPOINT or "").strip():
+            issues.append("MINIO_ENDPOINT 未设置")
+
     return len(issues) == 0, issues
 
 
@@ -83,6 +98,7 @@ def collect_readiness() -> dict:
 
     checks = {
         "debug": settings.DEBUG,
+        "storage_backend": getattr(settings, "STORAGE_BACKEND", "local"),
         "database": {"ok": db_ok, "detail": db_detail},
         "upload_writable": {"ok": upload_ok, "path": upload_detail},
         "thumb_cache_writable": {"ok": thumb_ok, "path": thumb_detail},
