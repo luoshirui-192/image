@@ -167,6 +167,15 @@ MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 THUMB_SIZE = int(os.getenv("THUMB_SIZE", "200"))
 
+# Object storage (MinIO / S3-compatible) — STORAGE_BACKEND=local|minio
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").lower()
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "biox")
+MINIO_PREFIX = os.getenv("MINIO_PREFIX", "data/image_db")
+MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() in {"1", "true", "yes", "on"}
+
 IMAGE_ACCESS_SECRET = os.getenv("IMAGE_ACCESS_SECRET", SECRET_KEY)
 IMAGE_ACCESS_TOKEN_TTL = int(os.getenv("IMAGE_ACCESS_TOKEN_TTL", "3600"))
 

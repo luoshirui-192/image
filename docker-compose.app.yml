@@ -1,5 +1,5 @@
 # 机器 A：MySQL + Web + Backend + Scheduler
-# 图片 upload/ 通过 NFS 挂载机器 B 的存储目录（启动前挂载 ./upload）
+# 图片存储：MinIO S3（STORAGE_BACKEND=minio，见 .env.app.example）
 # 启动：./start-app.sh  或  docker compose -f docker-compose.app.yml up -d --build
 
 name: image-db-app
@@ -17,8 +17,15 @@ x-backend-environment: &backend-environment
   DB_CHARSET: utf8
   ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,backend}
   CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost}
+  STORAGE_BACKEND: ${STORAGE_BACKEND:-minio}
   UPLOAD_ROOT: /app/upload
   THUMB_CACHE_ROOT: /app/backend/thumb_cache
+  MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://192.168.9.100:9000}
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+  MINIO_BUCKET: ${MINIO_BUCKET:-biox}
+  MINIO_PREFIX: ${MINIO_PREFIX:-data/image_db}
+  MINIO_SECURE: ${MINIO_SECURE:-false}
   LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-90}
   DELETED_IMAGE_RETENTION_DAYS: ${DELETED_IMAGE_RETENTION_DAYS:-30}
 
@@ -61,7 +68,6 @@ services:
       <<: *backend-environment
       GUNICORN_BIND: "0.0.0.0:8000"
     volumes:
-      - ./upload:/app/upload
       - thumb_cache:/app/backend/thumb_cache
     expose:
       - "8000"
@@ -79,7 +85,6 @@ services:
       <<: *backend-environment
       MAINTENANCE_INTERVAL_HOURS: ${MAINTENANCE_INTERVAL_HOURS:-24}
     volumes:
-      - ./upload:/app/upload
       - thumb_cache:/app/backend/thumb_cache
 
   web:

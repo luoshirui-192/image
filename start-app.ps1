@@ -17,13 +17,8 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 if (-not (Test-Path .env)) {
     Copy-Item .env.app.example .env
     Write-Host "Created .env from .env.app.example"
-    Write-Host "Edit MYSQL_* passwords, PUBLIC_URL, MACHINE_B_NFS_*, then run again."
+    Write-Host "Edit MYSQL_* passwords, PUBLIC_URL, MINIO_*, then run again."
     exit 0
-}
-
-if (-not (Test-Path upload)) {
-    New-Item -ItemType Directory -Path upload | Out-Null
-    Write-Host "Created upload/. Mount machine B NFS here in production."
 }
 
 python docker/set-env.py
@@ -40,7 +35,7 @@ Write-Host ""
 Write-Host "=========================================="
 Write-Host " Machine A started (MySQL + app layer)"
 Write-Host " Browser: $public"
-Write-Host " upload/ should be NFS from machine B in production"
+Write-Host " Image storage: MinIO (STORAGE_BACKEND=minio in .env)"
 Write-Host " Stop: docker compose -f $ComposeFile down"
 Write-Host " Docs: README-MACHINE-A.md"
 Write-Host "=========================================="

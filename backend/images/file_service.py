@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from io import BytesIO
 from pathlib import Path
 
 from django.conf import settings
@@ -16,9 +17,9 @@ from utils.file_security import (
     check_image_access_allowed,
     create_image_access_token,
     guess_mime,
-    resolve_safe_upload_file,
 )
 from utils.path_builder import normalize_suffix
+from utils.storage import get_image_storage
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +85,27 @@ def ensure_access_allowed(
     )
 
 
+def image_exists(relative_path: str) -> bool:
+    return get_image_storage().exists(relative_path)
+
+
 def get_absolute_image_path(relative_path: str) -> Path:
-    abs_path = resolve_safe_upload_file(settings.UPLOAD_ROOT, relative_path)
-    if not abs_path.is_file():
-        raise ImageNotFoundError("图片文件不存在")
-    return abs_path
+    """Return local path for FileResponse (local backend only)."""
+    storage = get_image_storage()
+    if storage.backend_name != "local":
+        raise ImageNotFoundError("当前存储后端不支持本地路径访问")
+    try:
+        return storage.get_local_path(relative_path)
+    except FileNotFoundError as exc:
+        raise ImageNotFoundError("图片文件不存在") from exc
+
+
+def read_image_bytes(relative_path: str) -> bytes:
+    storage = get_image_storage()
+    try:
+        return storage.read_bytes(relative_path)
+    except FileNotFoundError as exc:
+        raise ImageNotFoundError("图片文件不存在") from exc
 
 
 def thumb_cache_path(relative_path: str) -> Path:
@@ -114,20 +131,25 @@ def _write_thumbnail_atomically(cache_file: Path, image: Image.Image) -> None:
 
 def get_or_create_thumbnail(relative_path: str) -> Path:
     """Generate cached thumbnail on first access; return cache file path."""
-    source = get_absolute_image_path(relative_path)
-    cache_file = thumb_cache_path(relative_path)
+    storage = get_image_storage()
+    src_stat = storage.stat(relative_path)
+    if src_stat is None:
+        raise ImageNotFoundError("图片文件不存在")
 
-    if cache_file.is_file():
-        if cache_file.stat().st_mtime >= source.stat().st_mtime:
-            return cache_file
+    cache_file = thumb_cache_path(relative_path)
+    if cache_file.is_file() and cache_file.stat().st_mtime >= src_stat.mtime:
+        return cache_file
 
     max_size = settings.THUMB_SIZE
     try:
-        with Image.open(source) as img:
+        content = storage.read_bytes(relative_path)
+        with Image.open(BytesIO(content)) as img:
             if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
             _write_thumbnail_atomically(cache_file, img)
+    except ImageNotFoundError:
+        raise
     except Exception as exc:
         logger.exception("thumbnail generation failed for %s", relative_path)
         raise ImageNotFoundError("无法生成缩略图") from exc

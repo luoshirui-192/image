@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 机器 A 一键启动：MySQL + Web + Backend + Scheduler（upload 需挂载机器 B 的 NFS）
+# 机器 A 一键启动：MySQL + Web + Backend + Scheduler（图片存储：MinIO S3）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -14,7 +14,7 @@ fi
 if [ ! -f .env ]; then
   cp .env.app.example .env
   echo "已创建 .env（来自 .env.app.example）"
-  echo "请编辑 MYSQL_* 密码、PUBLIC_URL、MACHINE_B_NFS_* 后重新运行本脚本。"
+  echo "请编辑 MYSQL_* 密码、PUBLIC_URL、MINIO_* 后重新运行本脚本。"
   exit 0
 fi
 
@@ -33,20 +33,19 @@ set -a
 source <(grep -v '^#' .env | grep -v '^$' | sed 's/\r$//')
 set +a
 
-if [ ! -d upload ]; then
-  mkdir -p upload
-  echo "已创建 upload/ 目录。"
-fi
-
-if ! mountpoint -q upload 2>/dev/null; then
-  NFS_HOST="${MACHINE_B_NFS_HOST:-}"
-  NFS_PATH="${MACHINE_B_NFS_PATH:-/data/image_db/upload}"
-  echo "警告: ./upload 当前不是 NFS 挂载点。"
-  if [ -n "$NFS_HOST" ]; then
-    echo "  生产环境请先挂载机器 B："
-    echo "  sudo mount -t nfs ${NFS_HOST}:${NFS_PATH} $(pwd)/upload"
+STORAGE_BACKEND="${STORAGE_BACKEND:-minio}"
+if [ "$STORAGE_BACKEND" = "minio" ]; then
+  if [ -z "${MINIO_ACCESS_KEY:-}" ] || [ -z "${MINIO_SECRET_KEY:-}" ]; then
+    echo "错误: STORAGE_BACKEND=minio 时须设置 MINIO_ACCESS_KEY 与 MINIO_SECRET_KEY"
+    exit 1
   fi
-  echo "  继续启动将使用本地 upload/（仅适合测试）。"
+  ENDPOINT="${MINIO_ENDPOINT:-http://192.168.9.100:9000}"
+  echo "图片存储: MinIO ${ENDPOINT} / ${MINIO_BUCKET:-biox}/${MINIO_PREFIX:-data/image_db}"
+else
+  if [ ! -d upload ]; then
+    mkdir -p upload
+    echo "已创建 upload/ 目录（STORAGE_BACKEND=local）。"
+  fi
 fi
 
 python3 docker/set-env.py
@@ -58,7 +57,7 @@ echo " 机器 A 已启动（MySQL + 应用层）"
 PUBLIC_URL="$(grep '^PUBLIC_URL=' .env | cut -d= -f2- | tr -d '\r')"
 echo " 浏览器访问: ${PUBLIC_URL:-http://localhost}"
 echo " MySQL: 本机 Docker 容器 db（127.0.0.1:${MYSQL_PUBLISH_PORT:-3306}）"
-echo " 图片目录: ./upload（应挂载机器 B 的 NFS）"
+echo " 图片存储: ${STORAGE_BACKEND}（minio 见 MINIO_ENDPOINT）"
 echo " 默认账号: admin / admin123"
 echo " 停止: docker compose -f $COMPOSE_FILE down"
 echo " 详细说明: README-MACHINE-A.md"

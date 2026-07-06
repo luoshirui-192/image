@@ -1,14 +1,12 @@
-"""Physically remove an image: disk files, source maps, and image_info row."""
+"""Physically remove an image: storage objects, source maps, and image_info row."""
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 
-from django.conf import settings
-
 from images.file_service import thumb_cache_path
 from images.models import ImageInfo, ImageSourceMap
-from utils.file_security import PathSecurityError, resolve_safe_upload_file
+from utils.storage import get_image_storage
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +28,7 @@ class PurgeResult:
 def _delete_upload_file(relative_path: str) -> tuple[bool, int]:
     if not relative_path:
         return False, 0
-    try:
-        abs_path = resolve_safe_upload_file(settings.UPLOAD_ROOT, relative_path)
-        if not abs_path.is_file():
-            return False, 0
-        size = abs_path.stat().st_size
-        abs_path.unlink()
-        return True, size
-    except PathSecurityError as exc:
-        logger.warning("skip unsafe path during purge path=%s: %s", relative_path, exc)
-        return False, 0
-    except OSError:
-        logger.warning("failed to delete file during purge path=%s", relative_path, exc_info=True)
-        return False, 0
+    return get_image_storage().delete(relative_path)
 
 
 def _delete_thumb(relative_path: str) -> bool:
@@ -53,7 +39,7 @@ def _delete_thumb(relative_path: str) -> bool:
         if cache_path.is_file():
             cache_path.unlink()
             return True
-    except (PathSecurityError, OSError):
+    except OSError:
         logger.warning("failed to delete thumb during purge path=%s", relative_path, exc_info=True)
     return False
 

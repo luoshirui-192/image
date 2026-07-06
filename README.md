@@ -7,7 +7,7 @@
 **双机部署：**
 
 - **机器 A（数据库 + 服务端）** → 本分支 [`deploy/machine-a`](README-MACHINE-A.md)，见 [README-MACHINE-A.md](README-MACHINE-A.md)
-- **机器 B（图片存储）** → 分支 [`deploy/machine-b`](https://github.com/luoshirui-192/image/tree/deploy/machine-b)，见 [README-MACHINE-B.md](https://github.com/luoshirui-192/image/blob/deploy/machine-b/README-MACHINE-B.md)
+- **机器 B（MinIO 存储）** → 分支 [`deploy/machine-b`](https://github.com/luoshirui-192/image/tree/deploy/machine-b)，见 [README-MACHINE-B.md](https://github.com/luoshirui-192/image/blob/deploy/machine-b/README-MACHINE-B.md)
 
 ---
 

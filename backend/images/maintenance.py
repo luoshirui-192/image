@@ -13,7 +13,7 @@ from django.utils import timezone
 from images.models import ImageCategory, ImageInfo
 from images.purge_service import purge_image_record
 from logs.models import OperateLog
-from utils.file_security import PathSecurityError, resolve_safe_upload_file
+from utils.storage import get_image_storage
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +61,10 @@ def cleanup_deleted_image_files(
         if dry_run:
             relative_path = image.image_path or ""
             if relative_path:
-                try:
-                    abs_path = resolve_safe_upload_file(settings.UPLOAD_ROOT, relative_path)
-                    if abs_path.is_file():
-                        result.files_deleted += 1
-                        result.bytes_freed += abs_path.stat().st_size
-                except (PathSecurityError, OSError) as exc:
-                    result.errors.append(f"id={image.id}: {exc}")
+                st = get_image_storage().stat(relative_path)
+                if st is not None:
+                    result.files_deleted += 1
+                    result.bytes_freed += st.size
             continue
 
         try:
@@ -122,17 +119,17 @@ def compute_storage_stats() -> dict:
             }
         )
 
-    upload_root = Path(settings.UPLOAD_ROOT)
-    if upload_root.name != "upload" and (upload_root / "upload").is_dir():
-        upload_dir = upload_root / "upload"
-    else:
-        upload_dir = upload_root
+    storage = get_image_storage()
+    upload_disk_bytes = storage.estimate_disk_bytes()
+    if upload_disk_bytes is None:
+        upload_disk_bytes = active_qs.aggregate(total=Sum("file_size"))["total"] or 0
 
     return {
         "image_active_count": active_qs.count(),
         "image_deleted_count": deleted_count,
         "image_total_bytes": active_qs.aggregate(total=Sum("file_size"))["total"] or 0,
-        "upload_disk_bytes": _dir_size(upload_dir),
+        "upload_disk_bytes": upload_disk_bytes,
+        "storage_backend": storage.backend_name,
         "thumb_cache_bytes": _dir_size(Path(settings.THUMB_CACHE_ROOT)),
         "by_category": by_category,
         "generated_at": timezone.now().isoformat(sep=" ", timespec="seconds"),
