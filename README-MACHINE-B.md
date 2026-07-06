@@ -1,52 +1,53 @@
-# 机器 B 部署指南（数据层）
+# 机器 B 部署指南（图片存储层）
 
-本分支用于 **双机部署** 中的 **机器 B**：提供 **MySQL 主库** 与 **upload 图片存储**，并通过 **NFS** 供机器 A 挂载。
+本分支用于 **双机部署** 中的 **机器 B**：**仅负责图片文件存储**，通过 **NFS** 供机器 A 读写 `upload/`。
 
 | 机器 | 职责 |
 |------|------|
-| **B（本机）** | MySQL `image_db`、图片目录、NFS 导出 |
-| **A（应用机）** | Docker Web/Backend，连接 B 的库与 NFS |
+| **B（本机）** | 大容量磁盘、`upload/` 目录、NFS 导出 |
+| **A（服务机）** | MySQL + Docker Web/Backend，挂载 B 的 NFS |
 
-机器 B **不需要**对外提供 HTTP 页面，也 **不需要** clone 后跑 `start.sh`（单机版）。
+机器 B **不需要** MySQL、Docker 应用或对外 HTTP。也 **不需要** 跑 `start.sh`（单机版）。
 
-应用层部署见分支 **[deploy/machine-a](https://github.com/luoshirui-192/image/tree/deploy/machine-a)** 与 [README-MACHINE-A.md](https://github.com/luoshirui-192/image/blob/deploy/machine-a/README-MACHINE-A.md)。
+数据库与服务端部署见分支 **[deploy/machine-a](https://github.com/luoshirui-192/image/tree/deploy/machine-a)** 与 [README-MACHINE-A.md](https://github.com/luoshirui-192/image/blob/deploy/machine-a/README-MACHINE-A.md)。
 
 ---
 
 ## 架构
 
 ```
-机器 A                          机器 B（本机）
-┌─────────────┐                ┌──────────────────────┐
-│ web/backend │─── MySQL ─────►│ Docker MySQL :3306   │
-│             │─── NFS 读写 ──►│ /data/.../upload/    │
-└─────────────┘                └──────────────────────┘
-     ▲
-  用户浏览器
+用户浏览器
+     │
+     ▼
+机器 A（服务）                    机器 B（本机，仅存储）
+┌─────────────────────┐          ┌──────────────────┐
+│ web / backend       │          │ /data/.../upload │
+│ MySQL (Docker)      │── NFS ──►│ NFS 导出         │
+└─────────────────────┘          └──────────────────┘
 ```
 
 ---
 
-## 快速开始（Docker MySQL，推荐）
+## 快速开始（Linux，推荐）
 
 ```bash
 git clone -b deploy/machine-b https://github.com/luoshirui-192/image.git
 cd image
 
-cp .env.data.example .env
-# 编辑：MYSQL_* 密码、MACHINE_A_HOSTS（A 的 IP）、DATA_UPLOAD_ROOT
+cp .env.storage.example .env
+# 编辑：DATA_UPLOAD_ROOT、MACHINE_A_HOSTS（A 的 IP）
 
-chmod +x start-data.sh scripts/*.sh
-./start-data.sh
-./scripts/grant-machine-a.sh
-./scripts/setup-nfs-export.sh
+chmod +x start-storage.sh scripts/setup-nfs-export.sh
+./start-storage.sh
 ```
 
-完成后告知机器 A 管理员：
+完成后告知机器 A 管理员 NFS 挂载信息：
 
-- `DB_HOST=<本机 B 的内网 IP>`
-- `MYSQL_PASSWORD=` 与 B 的 `.env` 一致
-- NFS：`mount -t nfs <B_IP>:/data/image_db/upload /opt/image_db/upload`
+```bash
+# 在 A 上执行（IP 与路径按 B 的 .env 填写）
+sudo mkdir -p /opt/image_db/upload
+sudo mount -t nfs 192.168.1.20:/data/image_db/upload /opt/image_db/upload
+```
 
 ---
 
@@ -54,27 +55,24 @@ chmod +x start-data.sh scripts/*.sh
 
 | 项目 | 建议 |
 |------|------|
-| 操作系统 | Linux（Ubuntu 22.04 / Debian 12） |
-| CPU / 内存 | 2 核、4GB+（视数据量增大） |
-| 磁盘 | 系统盘 + **大容量数据盘** 存 MySQL 与 upload |
-| 软件 | Git、Docker、Docker Compose；NFS 用 `nfs-kernel-server` |
-| 网络 | 内网固定 IP；对 **机器 A** 开放 3306、2049 |
+| 操作系统 | **Linux**（Ubuntu 22.04 / Debian 12）；NFS 服务端需 Linux |
+| CPU / 内存 | 1 核、1GB+ 即可（无数据库与应用） |
+| 磁盘 | **大容量数据盘** 专存图片 |
+| 软件 | Git（可选，仅需脚本时）；`nfs-kernel-server` |
+| 网络 | 内网固定 IP；对 **机器 A** 开放 **2049**（NFS） |
+
+> 若 B 为 Windows，需自行配置 SMB/NFS 共享，本仓库脚本面向 Linux NFS。
 
 ---
 
 ## 配置 `.env`
 
 ```bash
-cp .env.data.example .env
+cp .env.storage.example .env
 ```
 
 | 变量 | 说明 | 示例 |
 |------|------|------|
-| `MYSQL_ROOT_PASSWORD` | MySQL root 密码 | 强密码 |
-| `MYSQL_PASSWORD` | 应用用户密码（A 的 `.env` 须一致） | 强密码 |
-| `MYSQL_DATABASE` | 库名 | `image_db` |
-| `MYSQL_USER` | 应用用户 | `image_db` |
-| `MYSQL_PUBLISH_PORT` | 对外 MySQL 端口 | `3306` |
 | `DATA_UPLOAD_ROOT` | 宿主机图片目录 | `/data/image_db/upload` |
 | `NFS_EXPORT_PATH` | NFS 导出路径（通常同上） | `/data/image_db/upload` |
 | `MACHINE_A_HOSTS` | 机器 A 的 IP（可多个，空格分隔） | `192.168.1.10` |
@@ -83,117 +81,82 @@ cp .env.data.example .env
 
 ## 分步部署
 
-### 1. 启动 MySQL
+### 1. 创建图片目录
 
 ```bash
-./start-data.sh
+sudo mkdir -p /data/image_db/upload
+sudo chmod 1777 /data/image_db/upload
 ```
 
-首次启动会自动执行 `sql/` 初始化脚本（含 `blob_migration.sql`），并创建默认账号 **admin / admin123**。
+或在 `.env` 中修改 `DATA_UPLOAD_ROOT` 后运行 `./start-storage.sh` 自动创建。
 
-验证：
-
-```bash
-docker compose -f docker-compose.data.yml ps
-docker compose -f docker-compose.data.yml exec db \
-  mysql -u image_db -p"${MYSQL_PASSWORD}" -e "SELECT COUNT(*) FROM image_db.sys_user;"
-```
-
-### 2. 授权机器 A 连接数据库
-
-```bash
-./scripts/grant-machine-a.sh
-```
-
-为 `.env` 中 `MACHINE_A_HOSTS` 里的每个 IP 创建 `'image_db'@'A_IP'` 并授权。
-
-### 3. 配置 NFS 导出 upload
+### 2. 配置 NFS 导出
 
 ```bash
 ./scripts/setup-nfs-export.sh
 ```
 
-将 `DATA_UPLOAD_ROOT` 导出给机器 A。脚本会写入 `/etc/exports` 并重启 nfs-server。
+脚本会写入 `/etc/exports` 并重启 `nfs-server`。
 
-**机器 A 挂载示例：**
+手工配置示例（`/etc/exports`）：
 
-```bash
-sudo mkdir -p /opt/image_db/upload
-sudo mount -t nfs 192.168.1.20:/data/image_db/upload /opt/image_db/upload
+```
+/data/image_db/upload  192.168.1.10(rw,sync,no_subtree_check,no_root_squash)
 ```
 
-### 4. 防火墙（仅放行 A）
+```bash
+sudo exportfs -ra
+sudo systemctl restart nfs-server
+```
+
+### 3. 防火墙（仅放行 A）
 
 ```bash
 # UFW 示例（B 上）
-sudo ufw allow from 192.168.1.10 to any port 3306
 sudo ufw allow from 192.168.1.10 to any port 2049
 ```
 
-**不要**对公网开放 3306 / NFS。
+**不要**对公网开放 NFS。
 
----
+### 4. 机器 A 挂载验证
 
-## 方式二：系统自带 MySQL（不用 Docker）
-
-若 B 上已有 MySQL 8.0，可不跑 `start-data.sh`，手工初始化：
+在 A 上：
 
 ```bash
-mysql -u root -p < sql/image_db.sql
-mysql -u root -p image_db < sql/optimize_indexes.sql
-mysql -u root -p image_db < sql/fix_mysql57_triggers.sql
-mysql -u root -p image_db < sql/seed_test_data.sql
-mysql -u root -p image_db < sql/blob_migration.sql
+sudo mount -t nfs 192.168.1.20:/data/image_db/upload /opt/image_db/upload
+touch /opt/image_db/upload/.nfs_test && rm /opt/image_db/upload/.nfs_test
 ```
 
-然后手工执行 `grant-machine-a.sh` 中的 SQL（将 `docker compose exec` 改为本机 `mysql`），再配置 NFS。
+在 B 上应能看到测试文件曾出现。
 
-`my.cnf` 需 `bind-address = 0.0.0.0` 或内网 IP，并重启 MySQL。
+**开机自动挂载**（A 的 `/etc/fstab`）：
+
+```
+192.168.1.20:/data/image_db/upload  /opt/image_db/upload  nfs  defaults,_netdev  0  0
+```
 
 ---
 
-## 与机器 A 的密码对齐
+## 调整 upload 目录位置
 
-机器 A（`deploy/machine-a` 分支）的 `.env` 中：
+1. 编辑 B 的 `.env`：`DATA_UPLOAD_ROOT` 与 `NFS_EXPORT_PATH`
+2. 创建新目录并迁移旧数据：`rsync -a 旧路径/ 新路径/`
+3. 重新运行 `./scripts/setup-nfs-export.sh`
+4. 在 A 上重新挂载新 NFS 路径
 
-```env
-DB_HOST=<B 的 IP>
-MYSQL_PASSWORD=<与 B 的 MYSQL_PASSWORD 相同>
-MYSQL_USER=image_db
-MYSQL_DATABASE=image_db
-```
-
-两边密码、库名、用户名必须一致。
+数据库在 A 上，改 B 的磁盘路径 **无需改库**（库中存的是相对路径）。
 
 ---
 
 ## 备份
 
-**数据库：**
-
-```bash
-docker compose -f docker-compose.data.yml exec db \
-  mysqldump -u root -p"${MYSQL_ROOT_PASSWORD}" image_db > backup_$(date +%F).sql
-```
-
-**图片：**
-
 ```bash
 tar czf upload_$(date +%F).tar.gz -C /data/image_db upload
+# 或按 DATA_UPLOAD_ROOT 实际路径
+tar czf upload_$(date +%F).tar.gz -C "$(dirname /data/image_db/upload)" "$(basename /data/image_db/upload)"
 ```
 
 建议定期备份到独立存储。
-
----
-
-## 常用命令
-
-```bash
-docker compose -f docker-compose.data.yml ps
-docker compose -f docker-compose.data.yml logs -f db
-docker compose -f docker-compose.data.yml down        # 停止（数据卷保留）
-docker compose -f docker-compose.data.yml down -v     # 停止并删库（慎用）
-```
 
 ---
 
@@ -201,10 +164,10 @@ docker compose -f docker-compose.data.yml down -v     # 停止并删库（慎用
 
 | 现象 | 处理 |
 |------|------|
-| A 连不上 MySQL | B 防火墙；`grant-machine-a.sh` 是否执行；`telnet B_IP 3306` |
-| A 上传失败 | NFS 是否挂载；B 上 `exportfs -v`；目录权限 |
-| 初始化重复 | 已有 `mysql_data` 卷时不会重跑 sql；需 `down -v` 后重建（会丢数据） |
+| A 上传失败 | A 是否已挂载 NFS；B 上 `exportfs -v`；目录权限 |
+| A 挂载失败 | B 防火墙 2049；`MACHINE_A_HOSTS` 是否含 A 的 IP |
 | NFS 权限 denied | exports 使用 `no_root_squash`；A 容器以 root 写文件 |
+| 改路径后旧图不可见 | A 是否仍挂旧路径；数据是否已 rsync 到新目录 |
 
 ---
 
@@ -212,12 +175,9 @@ docker compose -f docker-compose.data.yml down -v     # 停止并删库（慎用
 
 | 文件 | 用途 |
 |------|------|
-| `docker-compose.data.yml` | 仅 MySQL 容器 |
-| `.env.data.example` | 环境变量模板 |
-| `docker/mysql-init/00-init-data.sh` | 首次建库（含 BLOB 表） |
-| `start-data.sh` / `start-data.ps1` | 启动 MySQL |
-| `scripts/grant-machine-a.sh` | 授权 A 连接 |
-| `scripts/setup-nfs-export.sh` | 配置 NFS |
+| `.env.storage.example` | 环境变量模板 |
+| `start-storage.sh` / `start-storage.ps1` | 一键创建目录并配置 NFS |
+| `scripts/setup-nfs-export.sh` | 写入 `/etc/exports` |
 | `README-MACHINE-B.md` | 本文档 |
 
 ---

@@ -1,16 +1,10 @@
-# Machine B: start MySQL data container only
+# Machine B: configure upload directory + NFS export (no MySQL / no app)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
-$ComposeFile = "docker-compose.data.yml"
-
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    Write-Host "Please install Docker Desktop"
-    exit 1
-}
 
 if (-not (Test-Path .env)) {
-    Copy-Item .env.data.example .env
-    Write-Host "Created .env from .env.data.example — edit and run again."
+    Copy-Item .env.storage.example .env
+    Write-Host "Created .env from .env.storage.example — edit DATA_UPLOAD_ROOT, MACHINE_A_HOSTS, then run again."
     exit 0
 }
 
@@ -25,8 +19,6 @@ if (-not (Test-Path $uploadRoot)) {
     New-Item -ItemType Directory -Path $uploadRoot -Force | Out-Null
 }
 
-docker compose -f $ComposeFile up -d --build
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
 Write-Host ""
-Write-Host "Machine B MySQL started. See README-MACHINE-B.md for grant-machine-a and NFS steps."
+Write-Host "Machine B storage: configure NFS on Linux with scripts/setup-nfs-export.sh"
+Write-Host "See README-MACHINE-B.md (NFS server requires Linux; Windows B needs manual SMB/NFS setup)."
