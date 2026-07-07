@@ -317,8 +317,7 @@ async function removeSource(id) {
 
 async function loadJobHistoryList() {
   try {
-    const params = runOptions.sourceId ? { sourceId: runOptions.sourceId } : {}
-    const res = await listBlobMigrationJobsApi(params)
+    const res = await listBlobMigrationJobsApi()
     jobHistory.value = res.data || []
   } catch {
     jobHistory.value = []
@@ -476,18 +475,17 @@ async function clearJobHistory() {
     ElMessage.info('没有可清除的历史记录')
     return
   }
-  const scopeLabel = runOptions.sourceId ? '当前迁移任务' : '全部'
   try {
     await ElMessageBox.confirm(
-      `确定清除${scopeLabel}已结束的任务历史？进行中的任务会保留，不影响已迁移的图片。`,
+      '确定清除全部已结束的任务历史？进行中的任务会保留，不影响已迁移的图片。',
       '清除历史',
       { type: 'warning' },
     )
-    const res = await clearBlobMigrationJobHistoryApi({ sourceId: runOptions.sourceId })
+    const res = await clearBlobMigrationJobHistoryApi()
     if (activeJob.value && !['pending', 'running'].includes(activeJob.value.status)) {
       activeJob.value = null
     }
-    ElMessage.success(res.message || '已清除历史')
+    ElMessage.success(res.message || '已清除全部历史')
     await loadJobHistory()
   } catch {
     // cancelled
