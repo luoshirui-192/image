@@ -13,7 +13,7 @@ from PIL import Image
 from rest_framework.test import APIClient
 
 from images.blob_migration_job_service import create_migration_job, execute_migration_job, serialize_migration_job
-from images.blob_migration_service import count_migration_candidates, run_blob_migration
+from images.blob_migration_service import count_migration_candidates, create_migration_source, run_blob_migration
 from images.models import BlobMigrationJob, BlobMigrationSource, ImageInfo, ImageSourceMap
 from users.models import SysUser
 
@@ -92,6 +92,14 @@ CREATE TABLE IF NOT EXISTS legacy_photos (
     title VARCHAR(100) NOT NULL DEFAULT '',
     photo BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS legacy_dual_blob (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title VARCHAR(100) NOT NULL DEFAULT '',
+    photo BLOB NOT NULL,
+    thumb BLOB NOT NULL
+);
+CREATE VIEW IF NOT EXISTS legacy_photos_v AS
+    SELECT id, title, photo FROM legacy_photos;
 CREATE TABLE IF NOT EXISTS blob_migration_job (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id INTEGER NOT NULL,
@@ -121,6 +129,7 @@ CREATE TABLE IF NOT EXISTS blob_migration_job_error (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL,
     source_pk VARCHAR(128) NOT NULL DEFAULT '',
+    source_column VARCHAR(64) NOT NULL DEFAULT '',
     filename VARCHAR(255) NOT NULL DEFAULT '',
     error_message VARCHAR(1000) NOT NULL DEFAULT '',
     retried SMALLINT NOT NULL DEFAULT 0,
@@ -129,9 +138,9 @@ CREATE TABLE IF NOT EXISTS blob_migration_job_error (
 """
 
 
-def make_png_bytes() -> bytes:
+def make_png_bytes(color=(10, 20, 30)) -> bytes:
     buf = io.BytesIO()
-    Image.new("RGB", (8, 6), color=(10, 20, 30)).save(buf, format="PNG")
+    Image.new("RGB", (8, 6), color=color).save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -206,6 +215,59 @@ class BlobMigrationTestCase(TestCase):
 
             stats = count_migration_candidates(self.source.id)
             self.assertEqual(stats["pending"], 0)
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_multi_blob_migration_creates_two_maps(self):
+        upload_root = str(self.upload_root)
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM legacy_dual_blob")
+            cursor.execute(
+                "INSERT INTO legacy_dual_blob (title, photo, thumb) VALUES (?, ?, ?)",
+                ["dual.png", make_png_bytes(), make_png_bytes((40, 50, 60))],
+            )
+
+        source = create_migration_source(
+            name="dual blob",
+            source_table="legacy_dual_blob",
+            source_pk_column="id",
+            blob_columns=["photo", "thumb"],
+            category_id=1,
+            db_alias="default",
+        )
+
+        with override_settings(UPLOAD_ROOT=upload_root):
+            result = run_blob_migration(source.id, batch_size=10, dry_run=False)
+            self.assertEqual(result.succeeded, 2)
+            self.assertEqual(ImageSourceMap.objects.filter(source_table="legacy_dual_blob").count(), 2)
+            columns = set(
+                ImageSourceMap.objects.filter(source_table="legacy_dual_blob").values_list(
+                    "source_column", flat=True
+                )
+            )
+            self.assertEqual(columns, {"photo", "thumb"})
+
+            stats = count_migration_candidates(source.id)
+            self.assertEqual(stats["pending"], 0)
+            self.assertEqual(stats["total_with_blob"], 2)
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_view_migration_maps_to_lookup_table(self):
+        upload_root = str(self.upload_root)
+        with override_settings(UPLOAD_ROOT=upload_root):
+            source = create_migration_source(
+                name="view migrate",
+                source_table="legacy_photos_v",
+                source_pk_column="id",
+                blob_column="photo",
+                source_object_type="view",
+                path_lookup_table="legacy_photos",
+                category_id=1,
+                db_alias="default",
+            )
+            result = run_blob_migration(source.id, batch_size=10, dry_run=False)
+            self.assertEqual(result.succeeded, 1)
+            mapping = ImageSourceMap.objects.get(source_table="legacy_photos", source_id="1")
+            self.assertEqual(mapping.source_column, "photo")
 
     @override_settings(UPLOAD_ROOT=None)
     def test_api_discover_and_dry_run(self):

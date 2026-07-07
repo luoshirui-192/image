@@ -249,6 +249,13 @@ def ensure_blob_pr1_schema() -> None:
                     "ALTER TABLE `image_source_map` ADD UNIQUE KEY `uk_source` (`source_table`, `source_id`, `source_column`)"
                 )
 
+            if not _mysql_column_exists(cursor, "blob_migration_job_error", "source_column"):
+                cursor.execute(
+                    "ALTER TABLE `blob_migration_job_error` "
+                    "ADD COLUMN `source_column` varchar(64) NOT NULL DEFAULT '' "
+                    "COMMENT 'BLOB 列名' AFTER `source_pk`"
+                )
+
             cursor.execute(
                 """
                 UPDATE `blob_migration_source`

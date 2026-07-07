@@ -15,6 +15,7 @@ from images.blob_migration_service import (
     validate_identifier,
     validate_where_clause,
 )
+from images.blob_schema_helpers import parse_blob_columns, serialize_blob_columns
 from images.external_db_service import db_alias_session, validate_db_alias_reference
 from images.models import BlobTableView, ImageInfo, ImageSourceMap
 
@@ -128,24 +129,39 @@ def _fetch_remote_columns(conn, table: str) -> list[VirtualColumn]:
     raise BlobTableViewError(f"暂不支持 {conn.vendor} 的表视图")
 
 
+def _view_blob_columns(view: BlobTableView) -> list[str]:
+    cols = parse_blob_columns(view.blob_columns, view.blob_column)
+    if not cols:
+        raise BlobTableViewError("至少需要一个 BLOB 列")
+    return [validate_identifier(col, label="BLOB 列") for col in cols]
+
+
+def _path_lookup_table(view: BlobTableView) -> str:
+    manual = (view.path_lookup_table or "").strip()
+    if manual:
+        return manual
+    return view.source_table
+
+
 def _resolve_display_columns(view: BlobTableView, remote_cols: list[VirtualColumn]) -> list[VirtualColumn]:
-    blob_col = validate_identifier(view.blob_column, label="BLOB 列")
+    blob_cols = _view_blob_columns(view)
     pk_col = validate_identifier(view.source_pk_column, label="主键列")
     col_map = {c.name: c for c in remote_cols}
 
-    if blob_col not in col_map:
-        raise BlobTableViewError(f"源表缺少 BLOB 列: {blob_col}")
+    for blob_col in blob_cols:
+        if blob_col not in col_map:
+            raise BlobTableViewError(f"源对象缺少 BLOB 列: {blob_col}")
     if pk_col not in col_map:
-        raise BlobTableViewError(f"源表缺少主键列: {pk_col}")
+        raise BlobTableViewError(f"源对象缺少主键列: {pk_col}")
 
     requested = _parse_display_columns(view.display_columns)
     if requested:
         for name in requested:
             if name not in col_map:
-                raise BlobTableViewError(f"源表缺少列: {name}")
-        selected = [col_map[name] for name in requested if name != blob_col]
+                raise BlobTableViewError(f"源对象缺少列: {name}")
+        selected = [col_map[name] for name in requested if name not in blob_cols]
     else:
-        selected = [c for c in remote_cols if c.name != blob_col]
+        selected = [c for c in remote_cols if c.name not in blob_cols]
 
     result: list[VirtualColumn] = []
     pk_added = False
@@ -159,13 +175,15 @@ def _resolve_display_columns(view: BlobTableView, remote_cols: list[VirtualColum
     if not pk_added:
         result.insert(0, col_map[pk_col])
 
-    path_col = VirtualColumn(
-        name=blob_col,
-        data_type="path",
-        is_blob=False,
-        is_path_substitute=True,
-    )
-    result.append(path_col)
+    for blob_col in blob_cols:
+        result.append(
+            VirtualColumn(
+                name=blob_col,
+                data_type="path",
+                is_blob=False,
+                is_path_substitute=True,
+            )
+        )
     return result
 
 
@@ -181,6 +199,7 @@ def get_view_schema(view_id: int) -> dict:
         "source_table": view.source_table,
         "source_pk_column": view.source_pk_column,
         "blob_column": view.blob_column,
+        "blob_columns": _view_blob_columns(view),
         "columns": [
             {
                 "name": col.name,
@@ -266,8 +285,9 @@ def _build_path_cell(
     source_table: str,
     source_id: str,
     path_map: dict[str, dict],
+    blob_column: str,
 ) -> dict:
-    meta = path_map.get(source_id)
+    meta = path_map.get(blob_column) or path_map.get("")
     if not meta:
         return {
             "display": "未迁移",
@@ -295,9 +315,9 @@ def _load_path_map(
     source_table: str,
     source_ids: list[str],
     *,
-    blob_column: str | None = None,
+    blob_columns: list[str] | None = None,
     path_lookup_table: str | None = None,
-) -> dict[str, dict]:
+) -> dict[str, dict[str, dict]]:
     if not source_ids:
         return {}
     lookup_table = (path_lookup_table or source_table).strip() or source_table
@@ -305,28 +325,34 @@ def _load_path_map(
         source_table=lookup_table,
         source_id__in=source_ids,
     )
-    if blob_column:
-        mappings = mappings.filter(source_column__in=[blob_column, ""])
+    if blob_columns:
+        legacy_cols = list(blob_columns)
+        if len(legacy_cols) == 1:
+            mappings = mappings.filter(source_column__in=[*legacy_cols, ""])
+        else:
+            mappings = mappings.filter(source_column__in=legacy_cols)
     image_ids = [m.image_info_id for m in mappings]
     images = {
         img.id: img
         for img in ImageInfo.objects.filter(id__in=image_ids)
     }
-    result: dict[str, dict] = {}
+    result: dict[str, dict[str, dict]] = {}
     for mapping in mappings:
+        column_key = mapping.source_column or (blob_columns[0] if blob_columns else "")
         image = images.get(mapping.image_info_id)
         if image is None or image.is_delete:
-            result[mapping.source_id] = {
+            meta = {
                 "image_info_id": mapping.image_info_id,
                 "path": "",
                 "status": PATH_STATUS_DELETED,
             }
         else:
-            result[mapping.source_id] = {
+            meta = {
                 "image_info_id": image.id,
                 "path": image.image_path,
                 "status": PATH_STATUS_MIGRATED,
             }
+        result.setdefault(mapping.source_id, {})[column_key] = meta
     return result
 
 
@@ -343,7 +369,7 @@ def fetch_view_rows(
 
     validate_db_alias(view.db_alias)
     pk = validate_identifier(view.source_pk_column, label="主键列")
-    blob_col = validate_identifier(view.blob_column, label="BLOB 列")
+    blob_cols = _view_blob_columns(view)
     table = _quote_ident(view.source_table)
     where_sql, where_params = _build_where(view)
 
@@ -369,8 +395,8 @@ def fetch_view_rows(
     path_map = _load_path_map(
         view.source_table,
         source_ids,
-        blob_column=blob_col,
-        path_lookup_table=view.path_lookup_table or None,
+        blob_columns=blob_cols,
+        path_lookup_table=_path_lookup_table(view),
     )
 
     rows: list[dict] = []
@@ -379,11 +405,14 @@ def fetch_view_rows(
         source_id = str(raw[pk_index])
         for idx, name in enumerate(col_names):
             item[name] = _serialize_cell(raw[idx])
-        item[blob_col] = _build_path_cell(
-            source_table=view.source_table,
-            source_id=source_id,
-            path_map=path_map,
-        )
+        row_paths = path_map.get(source_id, {})
+        for blob_col in blob_cols:
+            item[blob_col] = _build_path_cell(
+                source_table=view.source_table,
+                source_id=source_id,
+                path_map=row_paths,
+                blob_column=blob_col,
+            )
         rows.append(item)
 
     total = count_view_rows(view_id)
@@ -413,25 +442,45 @@ def create_table_view(
     db_alias: str,
     source_table: str,
     source_pk_column: str,
-    blob_column: str,
+    blob_column: str = "",
+    blob_columns: list[str] | None = None,
+    source_object_type: str | None = None,
+    path_lookup_table: str | None = None,
+    database_name: str | None = None,
     display_columns: list[str] | None = None,
     where_clause: str = "",
     remark: str = "",
 ) -> BlobTableView:
+    from images.blob_view_path_service import BlobViewPathError, resolve_source_metadata
+
     validate_db_alias(db_alias)
     table = validate_identifier(source_table, label="源表名")
     pk = validate_identifier(source_pk_column, label="主键列")
-    blob = validate_identifier(blob_column, label="BLOB 列")
     where = validate_where_clause(where_clause)
     display_json = _serialize_display_columns(display_columns)
 
     with db_alias_session(db_alias) as alias:
         conn = connections[alias]
+        db_name = (database_name or str(conn.settings_dict.get("NAME") or "")).strip()
+        try:
+            meta = resolve_source_metadata(
+                conn,
+                database=db_name,
+                object_name=table,
+                object_type=source_object_type,
+                path_lookup_table=path_lookup_table,
+                blob_columns=blob_columns,
+                blob_column=blob_column or None,
+            )
+        except BlobViewPathError as exc:
+            raise BlobTableViewError(str(exc)) from exc
+
         remote_cols = _fetch_remote_columns(conn, table)
         temp = BlobTableView(
             source_table=table,
             source_pk_column=pk,
-            blob_column=blob,
+            blob_column=meta["blob_column"],
+            blob_columns=serialize_blob_columns(meta["blob_columns"]),
             display_columns=display_json,
             where_clause=where,
         )
@@ -439,11 +488,15 @@ def create_table_view(
 
     now = timezone.now()
     return BlobTableView.objects.create(
-        name=(name or "").strip() or f"{table} 视图",
+        name=(name or "").strip() or f"{table} 浏览",
         db_alias=db_alias,
+        database_name=db_name,
         source_table=table,
+        source_object_type=meta["source_object_type"],
+        path_lookup_table=meta["path_lookup_table"],
         source_pk_column=pk,
-        blob_column=blob,
+        blob_column=meta["blob_column"],
+        blob_columns=serialize_blob_columns(meta["blob_columns"]),
         display_columns=display_json,
         where_clause=where,
         remark=(remark or "").strip(),

@@ -52,6 +52,9 @@ const form = reactive({
   sourceTable: '',
   sourcePkColumn: 'id',
   blobColumn: '',
+  blobColumns: [],
+  sourceObjectType: 'table',
+  pathLookupTable: '',
   nameColumn: '',
   suffixColumn: '',
   categoryId: null,
@@ -85,6 +88,11 @@ const connSaving = ref(false)
 const connTesting = ref(false)
 
 const selectedDb = computed(() => databases.value.find((d) => d.alias === form.dbAlias))
+
+const discoveredColumnsForTable = computed(() => {
+  const row = discoveredTables.value.find((item) => item.table === form.sourceTable)
+  return row?.columns || []
+})
 
 function dbOptionLabel(db) {
   if (db.label) {
@@ -237,11 +245,44 @@ async function discoverTables() {
 
 function applyDiscovery(row, col) {
   form.sourceTable = row.table
-  form.blobColumn = col.column
+  form.sourceObjectType = row.object_type || 'table'
+  if (col) {
+    const columnName = col.column
+    if (!form.blobColumns.includes(columnName)) {
+      form.blobColumns.push(columnName)
+    }
+    form.blobColumn = form.blobColumns[0] || columnName
+  } else if (row.columns?.length) {
+    form.blobColumns = row.columns.map((item) => item.column)
+    form.blobColumn = form.blobColumns[0] || ''
+  }
+}
+
+function applyAllDiscoveryColumns(row) {
+  applyDiscovery(row, null)
+}
+
+function formatSourceColumns(row) {
+  const cols = row.blob_columns?.length ? row.blob_columns : [row.blob_column].filter(Boolean)
+  return cols.join(', ')
+}
+
+function migrationPayloadBase() {
+  return {
+    name: form.name.trim() || undefined,
+    db_alias: form.dbAlias,
+    source_table: form.sourceTable.trim(),
+    source_pk_column: form.sourcePkColumn.trim() || 'id',
+    blob_column: (form.blobColumns[0] || form.blobColumn || '').trim(),
+    blob_columns: form.blobColumns.length ? [...form.blobColumns] : undefined,
+    source_object_type: form.sourceObjectType || 'table',
+    path_lookup_table: form.pathLookupTable.trim() || undefined,
+    where_clause: form.whereClause.trim(),
+  }
 }
 
 async function saveView() {
-  if (!form.sourceTable || !form.blobColumn) {
+  if (!form.sourceTable || (!form.blobColumn && !form.blobColumns.length)) {
     ElMessage.warning('请填写源表与 BLOB 列')
     return
   }
@@ -249,12 +290,8 @@ async function saveView() {
   savingView.value = true
   try {
     const res = await createBlobTableViewApi({
+      ...migrationPayloadBase(),
       name: form.name.trim() || `${form.sourceTable} 浏览`,
-      db_alias: form.dbAlias,
-      source_table: form.sourceTable.trim(),
-      source_pk_column: form.sourcePkColumn.trim() || 'id',
-      blob_column: form.blobColumn.trim(),
-      where_clause: form.whereClause.trim(),
     })
     ElMessage.success('浏览配置已保存')
     const viewId = res.data?.id
@@ -269,7 +306,7 @@ async function saveView() {
 }
 
 async function saveSource() {
-  if (!form.sourceTable || !form.blobColumn) {
+  if (!form.sourceTable || (!form.blobColumn && !form.blobColumns.length)) {
     ElMessage.warning('请填写源表与 BLOB 列')
     return
   }
@@ -281,16 +318,12 @@ async function saveSource() {
   saving.value = true
   try {
     await createBlobMigrationSourceApi({
-      name: form.name.trim() || `${form.sourceTable}.${form.blobColumn}`,
-      db_alias: form.dbAlias,
-      source_table: form.sourceTable.trim(),
-      source_pk_column: form.sourcePkColumn.trim() || 'id',
-      blob_column: form.blobColumn.trim(),
+      ...migrationPayloadBase(),
+      name: form.name.trim() || `${form.sourceTable}.${form.blobColumns[0] || form.blobColumn}`,
       name_column: form.nameColumn.trim(),
       suffix_column: form.suffixColumn.trim(),
       category_id: form.categoryId,
       tags: form.tags.trim(),
-      where_clause: form.whereClause.trim(),
     })
     ElMessage.success('迁移配置已保存')
     await loadSources()
@@ -740,18 +773,28 @@ onUnmounted(() => {
           border
           class="discover-table"
         >
-          <el-table-column prop="table" label="表名" width="200" />
+          <el-table-column prop="table" label="表/视图" width="200" />
           <el-table-column label="BLOB 列">
             <template #default="{ row }">
               <el-tag
                 v-for="col in row.columns"
                 :key="col.column"
                 class="col-tag"
-                type="info"
+                :type="form.blobColumns.includes(col.column) ? 'success' : 'info'"
                 @click="applyDiscovery(row, col)"
               >
                 {{ col.column }} ({{ col.data_type }})
               </el-tag>
+              <el-button
+                v-if="row.columns?.length > 1"
+                link
+                type="primary"
+                size="small"
+                class="ml-4"
+                @click="applyAllDiscoveryColumns(row)"
+              >
+                全选列
+              </el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -778,8 +821,40 @@ onUnmounted(() => {
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="8">
+              <el-form-item label="对象类型">
+                <el-select v-model="form.sourceObjectType" style="width: 100%">
+                  <el-option label="表" value="table" />
+                  <el-option label="数据库视图" value="view" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="8">
               <el-form-item label="BLOB 列" required>
-                <el-input v-model="form.blobColumn" placeholder="image_data" />
+                <el-select
+                  v-model="form.blobColumns"
+                  multiple
+                  collapse-tags
+                  collapse-tags-tooltip
+                  placeholder="选择一个或多个 BLOB 列"
+                  style="width: 100%"
+                  @change="form.blobColumn = form.blobColumns[0] || ''"
+                >
+                  <el-option
+                    v-for="col in discoveredColumnsForTable"
+                    :key="col.column"
+                    :label="`${col.column} (${col.data_type})`"
+                    :value="col.column"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col v-if="form.sourceObjectType === 'view'" :xs="24" :sm="8">
+              <el-form-item label="路径映射表">
+                <el-input
+                  v-model="form.pathLookupTable"
+                  placeholder="留空则自动识别简单视图"
+                  clearable
+                />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="8">
@@ -842,9 +917,11 @@ onUnmounted(() => {
         <el-table :data="sources" size="small" border empty-text="暂无配置">
           <el-table-column prop="id" label="ID" width="60" />
           <el-table-column prop="name" label="名称" min-width="140" />
-          <el-table-column label="源" min-width="180">
+          <el-table-column label="源" min-width="220">
             <template #default="{ row }">
-              {{ row.db_alias }} · {{ row.source_table }}.{{ row.blob_column }}
+              {{ row.db_alias }} · {{ row.source_table }}
+              <span v-if="row.source_object_type === 'view'"> [视图→{{ row.path_lookup_table || '?' }}]</span>
+              · {{ formatSourceColumns(row) }}
             </template>
           </el-table-column>
           <el-table-column label="进度" min-width="160">
@@ -941,6 +1018,7 @@ onUnmounted(() => {
           max-height="240"
         >
           <el-table-column prop="source_id" label="源 ID" width="100" />
+          <el-table-column prop="source_column" label="BLOB 列" width="100" />
           <el-table-column prop="filename" label="文件名" min-width="160" />
           <el-table-column label="结果" width="100">
             <template #default="{ row }">

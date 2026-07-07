@@ -205,6 +205,7 @@ class BlobMigrationJob(models.Model):
 class BlobMigrationJobError(models.Model):
     job_id = models.PositiveBigIntegerField()
     source_pk = models.CharField(max_length=128, default="")
+    source_column = models.CharField(max_length=64, default="")
     filename = models.CharField(max_length=255, default="")
     error_message = models.CharField(max_length=1000, default="")
     retried = models.SmallIntegerField(default=0)

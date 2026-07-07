@@ -51,6 +51,7 @@ def _serialize_run_result(result):
         "items": [
             {
                 "source_id": item.source_id,
+                "source_column": item.source_column,
                 "success": item.success,
                 "skipped": item.skipped,
                 "image_info_id": item.image_info_id,

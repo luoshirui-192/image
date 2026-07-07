@@ -41,3 +41,18 @@ def normalize_object_type(value: str | None, *, default: str = OBJECT_TYPE_TABLE
     if normalized in {OBJECT_TYPE_VIEW, "sql_view", "sql view"}:
         return OBJECT_TYPE_VIEW
     return default
+
+
+def map_storage_table(
+    *,
+    source_table: str,
+    source_object_type: str | None = None,
+    path_lookup_table: str | None = None,
+) -> str:
+    """Table name used in image_source_map (base table for SQL views)."""
+    manual = (path_lookup_table or "").strip()
+    if manual:
+        return manual
+    if normalize_object_type(source_object_type) == OBJECT_TYPE_VIEW:
+        raise ValueError("数据库视图需配置 path_lookup_table")
+    return (source_table or "").strip()

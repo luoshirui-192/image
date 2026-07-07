@@ -212,6 +212,7 @@ def serialize_migration_job(job: BlobMigrationJob, *, include_recent_errors: boo
         payload["recent_errors"] = [
             {
                 "source_pk": err.source_pk,
+                "source_column": err.source_column or "",
                 "filename": err.filename,
                 "error": err.error_message,
                 "retried": bool(err.retried),
@@ -226,11 +227,12 @@ def export_job_errors_csv(job_id: int) -> str:
     _load_job(job_id)
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["source_pk", "filename", "error", "retried", "create_time"])
+    writer.writerow(["source_pk", "source_column", "filename", "error", "retried", "create_time"])
     for err in BlobMigrationJobError.objects.filter(job_id=job_id).order_by("id").iterator():
         writer.writerow(
             [
                 err.source_pk,
+                err.source_column or "",
                 err.filename,
                 err.error_message,
                 err.retried,
