@@ -121,26 +121,24 @@ def cancel_migration_job(job_id: int) -> BlobMigrationJob:
     return job
 
 
-FINISHED_STATUSES = frozenset(
-    {
-        BlobMigrationJob.STATUS_COMPLETED,
-        BlobMigrationJob.STATUS_FAILED,
-        BlobMigrationJob.STATUS_CANCELLED,
-    }
-)
-
-
 def delete_migration_job(job_id: int) -> None:
     job = _load_job(job_id)
     if job.status in ACTIVE_STATUSES:
-        raise JobServiceError("进行中的任务不能删除，请先取消")
+        now = timezone.now()
+        BlobMigrationJob.objects.filter(pk=job_id).update(
+            cancel_requested=1,
+            status=BlobMigrationJob.STATUS_CANCELLED,
+            finished_at=now,
+            message="强制删除",
+            updated_at=now,
+        )
     BlobMigrationJobError.objects.filter(job_id=job_id).delete()
-    job.delete()
+    BlobMigrationJob.objects.filter(pk=job_id).delete()
 
 
 def clear_migration_job_history(*, source_id: int | None = None) -> int:
-    """Delete finished migration jobs and their error rows. Active jobs are kept."""
-    qs = BlobMigrationJob.objects.filter(status__in=FINISHED_STATUSES)
+    """Delete all migration jobs and their error rows (including stuck queue entries)."""
+    qs = BlobMigrationJob.objects.all()
     if source_id is not None:
         qs = qs.filter(source_id=source_id)
     job_ids = list(qs.values_list("id", flat=True))

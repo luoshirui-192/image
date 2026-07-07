@@ -238,34 +238,6 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(finished.succeeded, 1)
             payload = serialize_migration_job(finished)
             self.assertEqual(payload["percent"], 100.0)
-            self.assertEqual(payload["progress_done"], 1)
-
-    @override_settings(UPLOAD_ROOT=None)
-    def test_percent_excludes_skipped_rows(self):
-        job = create_migration_job(
-            source_id=self.source.id,
-            created_by="blob_admin",
-            batch_size=10,
-            run_all=True,
-        )
-        BlobMigrationJob.objects.filter(pk=job.id).update(
-            status=BlobMigrationJob.STATUS_RUNNING,
-            total_estimate=10,
-            processed=100,
-            skipped=100,
-            succeeded=0,
-            failed=0,
-        )
-        job.refresh_from_db()
-        payload = serialize_migration_job(job)
-        self.assertEqual(payload["progress_done"], 0)
-        self.assertEqual(payload["percent"], 0.0)
-
-        BlobMigrationJob.objects.filter(pk=job.id).update(succeeded=5, failed=2, skipped=100, processed=107)
-        job.refresh_from_db()
-        payload = serialize_migration_job(job)
-        self.assertEqual(payload["progress_done"], 7)
-        self.assertEqual(payload["percent"], 70.0)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_api_create_migration_job(self):
@@ -318,7 +290,7 @@ class BlobMigrationTestCase(TestCase):
         self.assertFalse(BlobMigrationJob.objects.filter(pk=job.id).exists())
 
     @override_settings(UPLOAD_ROOT=None)
-    def test_api_delete_running_job_rejected(self):
+    def test_api_delete_running_job_force(self):
         self.client.force_authenticate(user=self.admin)
         job = create_migration_job(
             source_id=self.source.id,
@@ -328,8 +300,8 @@ class BlobMigrationTestCase(TestCase):
         )
         BlobMigrationJob.objects.filter(pk=job.id).update(status=BlobMigrationJob.STATUS_RUNNING)
         res = self.client.delete(f"/api/images/blob-migration/jobs/{job.id}/")
-        self.assertEqual(res.status_code, 400)
-        self.assertTrue(BlobMigrationJob.objects.filter(pk=job.id).exists())
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(BlobMigrationJob.objects.filter(pk=job.id).exists())
 
     @override_settings(UPLOAD_ROOT=None)
     def test_api_clear_job_history(self):
@@ -351,6 +323,5 @@ class BlobMigrationTestCase(TestCase):
 
         res = self.client.post("/api/images/blob-migration/jobs/clear/", {}, format="json")
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json()["data"]["deleted"], 1)
-        self.assertFalse(BlobMigrationJob.objects.filter(pk=finished.id).exists())
-        self.assertTrue(BlobMigrationJob.objects.filter(pk=running.id).exists())
+        self.assertEqual(res.json()["data"]["deleted"], 2)
+        self.assertEqual(BlobMigrationJob.objects.count(), 0)

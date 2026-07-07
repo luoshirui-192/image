@@ -451,12 +451,15 @@ async function cancelActiveJob() {
 
 async function removeJob(job) {
   if (!job?.id) return
-  if (['pending', 'running'].includes(job.status)) {
-    ElMessage.warning('进行中的任务不能删除，请先取消')
-    return
-  }
+  const force = ['pending', 'running'].includes(job.status)
   try {
-    await ElMessageBox.confirm(`确定删除任务 #${job.id} 的历史记录？`, '确认', { type: 'warning' })
+    await ElMessageBox.confirm(
+      force
+        ? '该任务可能仍在队列中，确定强制删除这条记录？'
+        : '确定删除这条任务历史？',
+      force ? '强制删除' : '确认',
+      { type: 'warning' },
+    )
     await deleteBlobMigrationJobApi(job.id)
     if (activeJob.value?.id === job.id) {
       activeJob.value = null
@@ -477,13 +480,15 @@ async function clearJobHistory() {
   }
   try {
     await ElMessageBox.confirm(
-      '确定清除全部已结束的任务历史？进行中的任务会保留，不影响已迁移的图片。',
+      '确定清除全部任务历史？排队中或进行中的任务也会被强制删除，不影响已迁移的图片。',
       '清除历史',
       { type: 'warning' },
     )
     const res = await clearBlobMigrationJobHistoryApi()
-    if (activeJob.value && !['pending', 'running'].includes(activeJob.value.status)) {
+    if (activeJob.value) {
       activeJob.value = null
+      stopJobPolling()
+      running.value = false
     }
     ElMessage.success(res.message || '已清除全部历史')
     await loadJobHistory()
@@ -536,9 +541,7 @@ const jobInProgress = computed(
     !activeJob.value.cancel_requested,
 )
 
-const clearableJobCount = computed(
-  () => jobHistory.value.filter((j) => !['pending', 'running'].includes(j.status)).length,
-)
+const clearableJobCount = computed(() => jobHistory.value.length)
 
 async function executeMigration() {
   if (!runOptions.sourceId) {
@@ -980,14 +983,7 @@ onUnmounted(() => {
               <el-button link type="primary" @click="activeJob = row">查看</el-button>
               <el-button v-if="row.failed > 0" link type="primary" @click="retryFailedJob(row)">重试失败</el-button>
               <el-button v-if="row.failed > 0" link @click="downloadJobErrors(row)">导出</el-button>
-              <el-button
-                v-if="!['pending', 'running'].includes(row.status)"
-                link
-                type="danger"
-                @click="removeJob(row)"
-              >
-                删除
-              </el-button>
+              <el-button link type="danger" @click="removeJob(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
