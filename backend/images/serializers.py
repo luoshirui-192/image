@@ -228,6 +228,31 @@ class BlobTableViewSerializer(serializers.Serializer):
     create_time = serializers.DateTimeField(read_only=True, allow_null=True)
     update_time = serializers.DateTimeField(read_only=True, allow_null=True)
 
+    def to_representation(self, instance):
+        from images.blob_schema_helpers import parse_blob_columns
+        from images.models import BlobTableView
+
+        if isinstance(instance, BlobTableView):
+            return {
+                "id": instance.id,
+                "name": instance.name,
+                "db_alias": instance.db_alias,
+                "database_name": instance.database_name or "",
+                "source_table": instance.source_table,
+                "source_object_type": instance.source_object_type or "table",
+                "path_lookup_table": instance.path_lookup_table or "",
+                "source_pk_column": instance.source_pk_column,
+                "blob_column": instance.blob_column,
+                "blob_columns": parse_blob_columns(instance.blob_columns, instance.blob_column),
+                "display_columns": instance.display_columns,
+                "where_clause": instance.where_clause,
+                "remark": instance.remark,
+                "last_viewed_at": instance.last_viewed_at,
+                "create_time": instance.create_time,
+                "update_time": instance.update_time,
+            }
+        return super().to_representation(instance)
+
 
 class BlobTableViewCreateSerializer(serializers.Serializer):
     name = serializers.CharField(required=False, allow_blank=True, default="", max_length=100)

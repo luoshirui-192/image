@@ -4,7 +4,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Refresh, VideoPlay, View } from '@element-plus/icons-vue'
 import ImageGalleryPanel from '@/components/ImageGalleryPanel.vue'
-import MultiBlobPreviewPanel from '@/components/MultiBlobPreviewPanel.vue'
 import SqlEditor from '@/components/SqlEditor.vue'
 import {
   createBlobTableViewApi,
@@ -58,8 +57,6 @@ const loadingCatalog = ref(false)
 const selectedCatalogObject = ref(null)
 
 const rightTab = ref('browse')
-const previewRow = ref(null)
-const rowPreviewIndex = ref(-1)
 
 const sqlText = ref('')
 const sqlExecuting = ref(false)
@@ -112,13 +109,6 @@ const sqlTableData = computed(() => {
 const sqlPathColumn = computed(() => {
   if (!sqlResult.value) return null
   return findPathColumn(sqlResult.value.columns, sqlResult.value.rows)
-})
-
-const useMultiPreview = computed(() => blobColumnNames().length > 1)
-
-const rowPreviewItems = computed(() => {
-  if (!previewRow.value) return []
-  return buildRowPreviewItems(previewRow.value)
 })
 
 function catalogNodeLabel(data) {
@@ -464,6 +454,9 @@ async function loadRows({ append = false } = {}) {
     offset.value = (append ? offset.value : 0) + rows.length
     total.value = data.total ?? tableRows.value.length
     hasMore.value = Boolean(data.has_more)
+    if (!append) {
+      autoSelectFirstPreview()
+    }
   } catch (err) {
     if (!append) {
       columns.value = []
@@ -519,27 +512,21 @@ function statusLabel(status) {
 function blobColumnNames() {
   const view = activeView.value
   if (!view) return []
-  if (view.blob_columns?.length) return view.blob_columns
+  const raw = view.blob_columns
+  if (Array.isArray(raw) && raw.length) return raw
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed) && parsed.length) return parsed
+    } catch {
+      // ignore invalid JSON
+    }
+  }
   return view.blob_column ? [view.blob_column] : []
 }
 
 function blobColumnName() {
   return blobColumnNames()[0] || ''
-}
-
-function buildRowPreviewItems(row) {
-  return blobColumnNames()
-    .map((col) => {
-      const cell = pathCell(row, col)
-      if (!cell?.image_info_id || cell.status !== 'migrated') return null
-      return {
-        id: cell.image_info_id,
-        path: cell.path,
-        title: cell.path || cell.display,
-        column: col,
-      }
-    })
-    .filter(Boolean)
 }
 
 function getRowImageInfoId(row) {
@@ -559,36 +546,57 @@ function syncTableCurrentRow(row) {
 }
 
 function buildGalleryItems() {
-  const blobCol = blobColumnName()
-  if (!blobCol) return []
-  return tableRows.value
-    .map((row) => {
-      const cell = pathCell(row, blobCol)
-      if (!cell?.image_info_id || cell.status !== 'migrated') return null
-      return {
+  const cols = blobColumnNames()
+  if (!cols.length) return []
+  const items = []
+  for (const row of tableRows.value) {
+    for (const col of cols) {
+      const cell = pathCell(row, col)
+      if (!cell?.image_info_id || cell.status !== 'migrated') continue
+      items.push({
         id: cell.image_info_id,
         path: cell.path,
-        title: cell.path || cell.display,
-      }
-    })
-    .filter(Boolean)
+        title: cols.length > 1 ? `${col}: ${cell.path || cell.display}` : (cell.path || cell.display),
+        column: col,
+      })
+    }
+  }
+  return items
+}
+
+function autoSelectFirstPreview() {
+  const items = buildGalleryItems()
+  galleryItems.value = items
+  if (!items.length) {
+    galleryIndex.value = -1
+    return
+  }
+  if (galleryIndex.value < 0 || !items[galleryIndex.value]) {
+    galleryIndex.value = 0
+    syncTableCurrentRow(findRowByImageId(items[0].id))
+  }
 }
 
 function openRowPreview(row, preferredColumn = null) {
-  const items = buildRowPreviewItems(row)
+  const items = buildGalleryItems()
   if (!items.length) return
-  previewRow.value = row
+  galleryItems.value = items
+  let targetId = null
   if (preferredColumn) {
-    const idx = items.findIndex((item) => item.column === preferredColumn)
-    rowPreviewIndex.value = idx >= 0 ? idx : 0
-  } else {
-    rowPreviewIndex.value = 0
+    const cell = pathCell(row, preferredColumn)
+    targetId = cell?.image_info_id ?? null
   }
-  if (!useMultiPreview.value) {
-    galleryItems.value = buildGalleryItems()
-    const targetId = items[rowPreviewIndex.value]?.id
-    galleryIndex.value = galleryItems.value.findIndex((item) => item.id === targetId)
+  if (!targetId) {
+    for (const col of blobColumnNames()) {
+      const cell = pathCell(row, col)
+      if (cell?.image_info_id && cell.status === 'migrated') {
+        targetId = cell.image_info_id
+        break
+      }
+    }
   }
+  const index = targetId ? items.findIndex((item) => item.id === targetId) : -1
+  galleryIndex.value = index >= 0 ? index : 0
   syncTableCurrentRow(row)
 }
 
@@ -604,9 +612,7 @@ function findRowByImageId(imageId) {
 
 function onTableRowClick(row, _column, event) {
   if (event?.target?.closest?.('button, a, .el-button')) return
-  if (buildRowPreviewItems(row).length) {
-    openRowPreview(row)
-  }
+  openRowPreview(row)
 }
 
 watch(galleryIndex, (index) => {
@@ -622,15 +628,21 @@ watch(galleryIndex, (index) => {
 watch(tableRows, () => {
   const prevId = galleryItems.value[galleryIndex.value]?.id
   galleryItems.value = buildGalleryItems()
-  if (prevId == null) return
+  if (!galleryItems.value.length) {
+    galleryIndex.value = -1
+    return
+  }
+  if (prevId == null) {
+    autoSelectFirstPreview()
+    return
+  }
   const nextIndex = galleryItems.value.findIndex((item) => item.id === prevId)
-  galleryIndex.value = nextIndex
+  galleryIndex.value = nextIndex >= 0 ? nextIndex : 0
 })
 
 watch(activeViewId, () => {
   unbindTableScroll()
-  previewRow.value = null
-  rowPreviewIndex.value = -1
+  galleryIndex.value = -1
   loadRows({ append: false })
 })
 
@@ -777,7 +789,7 @@ onUnmounted(() => {
         <main class="data-panel">
           <el-tabs v-model="rightTab" class="right-tabs">
             <el-tab-pane label="表浏览" name="browse">
-              <template v-if="activeView">
+              <div v-if="activeView" class="browse-pane">
                 <div class="data-head">
                   <div>
                     <h3>{{ activeView.name }}</h3>
@@ -855,21 +867,13 @@ onUnmounted(() => {
                     <div v-else-if="tableRows.length && !hasMore" class="load-more-hint muted">已全部加载</div>
                   </div>
 
-                  <MultiBlobPreviewPanel
-                    v-if="useMultiPreview"
-                    v-model:current-index="rowPreviewIndex"
-                    :items="rowPreviewItems"
-                    class="blob-preview-pane"
-                    @close="previewRow = null; rowPreviewIndex = -1"
-                  />
                   <ImageGalleryPanel
-                    v-else
                     v-model:current-index="galleryIndex"
                     :items="galleryItems"
                     class="blob-preview-pane"
                   />
                 </div>
-              </template>
+              </div>
               <el-empty v-else description="请选择左侧浏览配置，或从目录创建" />
             </el-tab-pane>
 
@@ -1031,14 +1035,31 @@ onUnmounted(() => {
 .right-tabs {
   flex: 1;
   min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+.right-tabs :deep(.el-tabs__header) {
+  flex-shrink: 0;
+  margin-bottom: 8px;
 }
 
 .right-tabs :deep(.el-tabs__content) {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
+}
+
+.right-tabs :deep(.el-tab-pane) {
+  height: 100%;
+}
+
+.browse-pane {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .sql-context-bar {
@@ -1213,7 +1234,9 @@ onUnmounted(() => {
 }
 
 .blob-preview-pane {
-  min-height: 0;
+  min-width: 260px;
+  min-height: 280px;
+  height: 100%;
   max-height: 100%;
 }
 
