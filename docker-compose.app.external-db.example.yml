@@ -1,0 +1,27 @@
+# 外部 MySQL（本机 127.0.0.1，非 Docker db 容器）
+# 用法：
+#   cp docker-compose.app.external-db.example.yml docker-compose.app.override.yml
+#   编辑 DB_* / 密码后：
+#   docker compose -f docker-compose.app.yml -f docker-compose.app.override.yml up -d --build
+#
+# 禁用内置 db 容器；backend 启动脚本会自行等待 MySQL 就绪。
+
+services:
+  db:
+    profiles: ["with-local-mysql"]
+
+  backend:
+    environment:
+      DB_HOST: host.docker.internal
+      DB_PORT: "3306"
+      DB_NAME: ara_fp_analyst
+      DB_USER: fp_user
+      DB_PASSWORD: ${DB_PASSWORD}
+
+  scheduler:
+    environment:
+      DB_HOST: host.docker.internal
+      DB_PORT: "3306"
+      DB_NAME: ara_fp_analyst
+      DB_USER: fp_user
+      DB_PASSWORD: ${DB_PASSWORD}

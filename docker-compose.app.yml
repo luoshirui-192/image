@@ -61,9 +61,6 @@ services:
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
       <<: *backend-environment
       GUNICORN_BIND: "0.0.0.0:8000"
@@ -77,9 +74,6 @@ services:
       context: .
       dockerfile: docker/Dockerfile.backend
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
     entrypoint: ["/bin/bash", "/app/docker/maintenance-loop.sh"]
     environment:
       <<: *backend-environment
