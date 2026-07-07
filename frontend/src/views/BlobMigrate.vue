@@ -44,6 +44,7 @@ const runResult = ref(null)
 const activeJob = ref(null)
 const jobHistory = ref([])
 const pollTimer = ref(null)
+const pollingJobId = ref(null)
 
 const form = reactive({
   name: '',
@@ -320,10 +321,14 @@ async function loadJobHistory() {
     const res = await listBlobMigrationJobsApi(params)
     jobHistory.value = res.data || []
     const active = jobHistory.value.find((j) => j.status === 'pending' || j.status === 'running')
-    if (active) {
-      activeJob.value = active
-      startJobPolling(active.id)
+    if (!active) {
+      return
     }
+    if (pollTimer.value && pollingJobId.value === active.id) {
+      return
+    }
+    activeJob.value = active
+    startJobPolling(active.id)
   } catch {
     jobHistory.value = []
   }
@@ -334,6 +339,13 @@ function stopJobPolling() {
     clearInterval(pollTimer.value)
     pollTimer.value = null
   }
+  pollingJobId.value = null
+}
+
+function migrationProgressDone(job) {
+  if (!job) return 0
+  if (job.progress_done != null) return job.progress_done
+  return (job.succeeded || 0) + (job.failed || 0)
 }
 
 function formatEta(seconds) {
@@ -357,27 +369,36 @@ function jobStatusLabel(status) {
 }
 
 async function refreshActiveJob(jobId) {
-  const res = await getBlobMigrationJobApi(jobId)
-  activeJob.value = res.data
-  if (['completed', 'failed', 'cancelled'].includes(res.data?.status)) {
-    stopJobPolling()
-    running.value = false
-    await Promise.all([loadSources(), loadJobHistory()])
-    if (res.data?.status === 'completed') {
-      ElMessage.success(res.message || '迁移任务已完成')
-    } else if (res.data?.status === 'cancelled') {
-      ElMessage.warning('迁移任务已取消')
-    } else if (res.data?.status === 'failed') {
-      ElMessage.error(res.data?.message || '迁移任务失败')
+  try {
+    const res = await getBlobMigrationJobApi(jobId)
+    if (!res.data) return
+    activeJob.value = { ...activeJob.value, ...res.data }
+    if (['completed', 'failed', 'cancelled'].includes(res.data.status)) {
+      stopJobPolling()
+      running.value = false
+      await Promise.all([loadSources(), loadJobHistory()])
+      if (res.data.status === 'completed') {
+        ElMessage.success(res.message || '迁移任务已完成')
+      } else if (res.data.status === 'cancelled') {
+        ElMessage.warning('迁移任务已取消')
+      } else if (res.data.status === 'failed') {
+        ElMessage.error(res.data.message || '迁移任务失败')
+      }
     }
+  } catch {
+    // keep last known job snapshot while polling retries
   }
 }
 
 function startJobPolling(jobId) {
+  if (pollTimer.value && pollingJobId.value === jobId) {
+    return
+  }
   stopJobPolling()
-  refreshActiveJob(jobId).catch(() => {})
+  pollingJobId.value = jobId
+  refreshActiveJob(jobId)
   pollTimer.value = setInterval(() => {
-    refreshActiveJob(jobId).catch(() => {})
+    refreshActiveJob(jobId)
   }, 2000)
 }
 
@@ -887,10 +908,10 @@ onUnmounted(() => {
             :status="activeJob.status === 'failed' ? 'exception' : activeJob.status === 'completed' ? 'success' : undefined"
             :stroke-width="16"
             striped
-            :striped-flow="jobInProgress"
           />
           <p class="job-stats">
-            已处理 {{ activeJob.processed }} / {{ activeJob.total_estimate }}
+            已迁移 {{ migrationProgressDone(activeJob) }} / {{ activeJob.total_estimate }}
+            · 扫描 {{ activeJob.processed }}
             · 成功 {{ activeJob.succeeded }}
             · 跳过 {{ activeJob.skipped }}
             · 失败 {{ activeJob.failed }}
@@ -946,7 +967,9 @@ onUnmounted(() => {
             <template #default="{ row }">{{ jobStatusLabel(row.status) }}</template>
           </el-table-column>
           <el-table-column label="进度" min-width="160">
-            <template #default="{ row }">{{ row.processed }} / {{ row.total_estimate }} ({{ row.percent }}%)</template>
+            <template #default="{ row }">
+              {{ migrationProgressDone(row) }} / {{ row.total_estimate }} ({{ row.percent }}%)
+            </template>
           </el-table-column>
           <el-table-column label="结果" min-width="180">
             <template #default="{ row }">

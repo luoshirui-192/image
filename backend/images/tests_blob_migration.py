@@ -238,6 +238,34 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(finished.succeeded, 1)
             payload = serialize_migration_job(finished)
             self.assertEqual(payload["percent"], 100.0)
+            self.assertEqual(payload["progress_done"], 1)
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_percent_excludes_skipped_rows(self):
+        job = create_migration_job(
+            source_id=self.source.id,
+            created_by="blob_admin",
+            batch_size=10,
+            run_all=True,
+        )
+        BlobMigrationJob.objects.filter(pk=job.id).update(
+            status=BlobMigrationJob.STATUS_RUNNING,
+            total_estimate=10,
+            processed=100,
+            skipped=100,
+            succeeded=0,
+            failed=0,
+        )
+        job.refresh_from_db()
+        payload = serialize_migration_job(job)
+        self.assertEqual(payload["progress_done"], 0)
+        self.assertEqual(payload["percent"], 0.0)
+
+        BlobMigrationJob.objects.filter(pk=job.id).update(succeeded=5, failed=2, skipped=100, processed=107)
+        job.refresh_from_db()
+        payload = serialize_migration_job(job)
+        self.assertEqual(payload["progress_done"], 7)
+        self.assertEqual(payload["percent"], 70.0)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_api_create_migration_job(self):
