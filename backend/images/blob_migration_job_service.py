@@ -4,8 +4,8 @@ from __future__ import annotations
 import csv
 import io
 import logging
-import subprocess
 import sys
+import threading
 from typing import Any
 
 from django.conf import settings
@@ -112,6 +112,8 @@ def cancel_migration_job(job_id: int) -> BlobMigrationJob:
     now = timezone.now()
     BlobMigrationJob.objects.filter(pk=job.pk).update(
         cancel_requested=1,
+        status=BlobMigrationJob.STATUS_CANCELLED,
+        finished_at=now,
         message="用户请求取消",
         updated_at=now,
     )
@@ -209,6 +211,8 @@ def _warm_thumbnails_after_job(job: BlobMigrationJob) -> None:
 
     warmed = 0
     for image in ImageInfo.objects.filter(is_delete=0).order_by("id").iterator(chunk_size=200):
+        if BlobMigrationJob.objects.filter(pk=job.pk, cancel_requested=1).exists():
+            break
         try:
             get_or_create_thumbnail(image.image_path)
             warmed += 1
@@ -234,6 +238,15 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
         )
         if not job:
             return _load_job(job_id)
+        if job.cancel_requested or job.status == BlobMigrationJob.STATUS_CANCELLED:
+            now = timezone.now()
+            BlobMigrationJob.objects.filter(pk=job_id).update(
+                status=BlobMigrationJob.STATUS_CANCELLED,
+                finished_at=now,
+                updated_at=now,
+                message=job.message or "已取消",
+            )
+            return _load_job(job_id)
         if job.status == BlobMigrationJob.STATUS_PENDING:
             now = timezone.now()
             BlobMigrationJob.objects.filter(pk=job_id).update(
@@ -244,7 +257,7 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
             )
 
     job = _load_job(job_id)
-    if job.status != BlobMigrationJob.STATUS_RUNNING:
+    if job.status != BlobMigrationJob.STATUS_RUNNING or job.cancel_requested:
         return job
 
     try:
@@ -253,7 +266,7 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
         else:
             execute_migration_job_batches(job)
         job.refresh_from_db()
-        if job.cancel_requested:
+        if job.cancel_requested or job.status == BlobMigrationJob.STATUS_CANCELLED:
             BlobMigrationJob.objects.filter(pk=job.pk).update(
                 status=BlobMigrationJob.STATUS_CANCELLED,
                 finished_at=timezone.now(),
@@ -298,25 +311,29 @@ def process_pending_migration_jobs(*, max_jobs: int = 1, job_id: int | None = No
     return started
 
 
-def kick_migration_job_async(job_id: int) -> None:
-    """Spawn a detached worker so jobs start immediately after API create."""
-    cmd = [
-        sys.executable,
-        "manage.py",
-        "process_blob_migration_jobs",
-        "--once",
-        "--job-id",
-        str(job_id),
-    ]
+def _run_migration_worker(job_id: int) -> None:
+    from django.db import close_old_connections
+
+    close_old_connections()
     try:
-        subprocess.Popen(
-            cmd,
-            cwd=str(settings.BASE_DIR),
-            start_new_session=True,
-            close_fds=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        logger.info("kicked migration worker job_id=%s", job_id)
-    except OSError:
-        logger.exception("failed to kick migration worker job_id=%s", job_id)
+        execute_migration_job(job_id)
+    except Exception:
+        logger.exception("migration worker failed job_id=%s", job_id)
+    finally:
+        close_old_connections()
+
+
+def _kick_migration_thread(job_id: int) -> None:
+    thread = threading.Thread(
+        target=_run_migration_worker,
+        args=(job_id,),
+        name=f"blob-migrate-{job_id}",
+        daemon=True,
+    )
+    thread.start()
+    logger.info("kicked migration worker thread job_id=%s", job_id)
+
+
+def kick_migration_job_async(job_id: int) -> None:
+    """Run migration in a background thread inside the backend container."""
+    _kick_migration_thread(job_id)

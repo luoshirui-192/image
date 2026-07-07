@@ -415,7 +415,10 @@ async function cancelActiveJob() {
   try {
     const res = await cancelBlobMigrationJobApi(activeJob.value.id)
     activeJob.value = res.data
-    ElMessage.success('已请求取消')
+    stopJobPolling()
+    running.value = false
+    ElMessage.success('迁移任务已取消')
+    await loadJobHistory()
   } catch (err) {
     ElMessage.error(err.message || '取消失败')
   }
@@ -459,7 +462,10 @@ function downloadJobErrors(job) {
 }
 
 const jobInProgress = computed(
-  () => activeJob.value && ['pending', 'running'].includes(activeJob.value.status),
+  () =>
+    activeJob.value &&
+    ['pending', 'running'].includes(activeJob.value.status) &&
+    !activeJob.value.cancel_requested,
 )
 
 async function executeMigration() {
@@ -813,7 +819,7 @@ onUnmounted(() => {
             <el-button :loading="running && !jobInProgress" @click="executeMigration">
               预检一批
             </el-button>
-            <el-button type="primary" :loading="jobInProgress" :disabled="runOptions.dryRun" @click="startFullMigration">
+            <el-button type="primary" :loading="jobInProgress" :disabled="runOptions.dryRun || jobInProgress" @click="startFullMigration">
               <el-icon><Refresh /></el-icon>
               开始全量迁移
             </el-button>

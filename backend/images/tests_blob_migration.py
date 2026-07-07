@@ -256,3 +256,17 @@ class BlobMigrationTestCase(TestCase):
             detail = self.client.get(f"/api/images/blob-migration/jobs/{job_id}/")
             self.assertEqual(detail.status_code, 200)
             self.assertEqual(detail.json()["data"]["status"], "completed")
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_api_cancel_pending_job(self):
+        self.client.force_authenticate(user=self.admin)
+        job = create_migration_job(
+            source_id=self.source.id,
+            created_by="blob_admin",
+            batch_size=10,
+            run_all=True,
+        )
+        res = self.client.post(f"/api/images/blob-migration/jobs/{job.id}/cancel/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["data"]["status"], "cancelled")
+        self.assertTrue(res.json()["data"]["cancel_requested"])
