@@ -1,11 +1,19 @@
 import request from './request'
 
-export function executeSqlApi(sql) {
-  return request.post('/sql/execute/', { sql }, { timeout: 60000 })
+export function executeSqlApi(sql, context = {}) {
+  const payload = { sql }
+  if (context.dbAlias) payload.db_alias = context.dbAlias
+  if (context.connectionId != null) payload.connection_id = context.connectionId
+  if (context.database) payload.database = context.database
+  return request.post('/sql/execute/', payload, { timeout: 60000 })
 }
 
-export function validateSqlApi(sql) {
-  return request.post('/sql/validate/', { sql })
+export function validateSqlApi(sql, context = {}) {
+  const payload = { sql }
+  if (context.dbAlias) payload.db_alias = context.dbAlias
+  if (context.connectionId != null) payload.connection_id = context.connectionId
+  if (context.database) payload.database = context.database
+  return request.post('/sql/validate/', payload)
 }
 
 export function listSqlTemplatesApi() {

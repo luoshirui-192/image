@@ -1,17 +1,28 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Refresh, View } from '@element-plus/icons-vue'
+import { Delete, Refresh, VideoPlay, View } from '@element-plus/icons-vue'
 import ImageGalleryPanel from '@/components/ImageGalleryPanel.vue'
+import MultiBlobPreviewPanel from '@/components/MultiBlobPreviewPanel.vue'
+import SqlEditor from '@/components/SqlEditor.vue'
 import {
+  createBlobTableViewApi,
   deleteBlobTableViewApi,
   fetchBlobTableViewRowsApi,
+  getBlobCatalogObjectApi,
   listBlobCatalogConnectionsApi,
   listBlobCatalogDatabasesApi,
   listBlobCatalogObjectsApi,
   listBlobTableViewsApi,
 } from '@/api/images'
+import {
+  executeSqlApi,
+  findPathColumn,
+  formatCellValue,
+  rowsToRecords,
+  validateSqlApi,
+} from '@/api/sql'
 import { highlightAndScrollTableRow } from '@/utils/tableScroll'
 
 const route = useRoute()
@@ -45,6 +56,70 @@ const galleryIndex = ref(-1)
 
 const loadingCatalog = ref(false)
 const selectedCatalogObject = ref(null)
+
+const rightTab = ref('browse')
+const previewRow = ref(null)
+const rowPreviewIndex = ref(-1)
+
+const sqlText = ref('')
+const sqlExecuting = ref(false)
+const sqlValidating = ref(false)
+const sqlResult = ref(null)
+const sqlError = ref('')
+
+const createViewDialogVisible = ref(false)
+const createViewSaving = ref(false)
+const createViewForm = reactive({
+  name: '',
+  sourcePkColumn: 'id',
+  blobColumns: [],
+  whereClause: '',
+})
+
+const browseContext = computed(() => {
+  if (activeView.value) {
+    const view = activeView.value
+    return {
+      dbAlias: view.db_alias,
+      database: view.database_name || '',
+      connectionId: null,
+      label: `${view.db_label || view.db_alias} · ${view.source_table}`,
+    }
+  }
+  if (selectedCatalogObject.value) {
+    const obj = selectedCatalogObject.value
+    const conn = obj.connection || {}
+    return {
+      dbAlias: conn.alias,
+      connectionId: conn.connection_id ?? null,
+      database: obj.database || '',
+      label: `${obj.database}.${obj.label}`,
+    }
+  }
+  return {
+    dbAlias: 'default',
+    database: '',
+    connectionId: null,
+    label: '本系统库 (default)',
+  }
+})
+
+const sqlTableData = computed(() => {
+  if (!sqlResult.value) return []
+  return rowsToRecords(sqlResult.value.columns, sqlResult.value.rows)
+})
+
+const sqlPathColumn = computed(() => {
+  if (!sqlResult.value) return null
+  return findPathColumn(sqlResult.value.columns, sqlResult.value.rows)
+})
+
+const useMultiPreview = computed(() => blobColumnNames().length > 1)
+
+const rowPreviewItems = computed(() => {
+  if (!previewRow.value) return []
+  return buildRowPreviewItems(previewRow.value)
+})
 
 function catalogNodeLabel(data) {
   if (data.nodeType === 'connection') return data.label
@@ -130,8 +205,129 @@ async function loadCatalogTree(root, resolve) {
 }
 
 function onCatalogNodeClick(data) {
+  if (data.nodeType === 'database') {
+    selectedCatalogObject.value = null
+    return
+  }
   if (data.nodeType !== 'object') return
   selectedCatalogObject.value = data
+  sqlText.value = `SELECT * FROM \`${data.label}\` LIMIT 80`
+}
+
+function goMigrateWithCatalog() {
+  if (!selectedCatalogObject.value) {
+    router.push('/blob-migrate')
+    return
+  }
+  const obj = selectedCatalogObject.value
+  const conn = obj.connection || {}
+  router.push({
+    path: '/blob-migrate',
+    query: {
+      dbAlias: conn.alias || '',
+      sourceTable: obj.label,
+      database: obj.database || '',
+      objectType: obj.objectType || 'table',
+    },
+  })
+}
+
+async function openCreateViewDialog() {
+  if (!selectedCatalogObject.value) return
+  const obj = selectedCatalogObject.value
+  const conn = obj.connection || {}
+  createViewForm.name = `${obj.label} 浏览`
+  createViewForm.blobColumns = (obj.blobColumns || []).map((item) => item.column)
+  createViewForm.whereClause = ''
+  createViewForm.sourcePkColumn = 'id'
+  try {
+    const res = await getBlobCatalogObjectApi(obj.label, {
+      connectionId: conn.connection_id,
+      dbAlias: conn.alias,
+      database: obj.database,
+    })
+    const detail = res.data || {}
+    const pkCol = detail.columns?.find((col) => col.column_key === 'PRI')?.name
+      || detail.columns?.find((col) => col.name === 'id')?.name
+    if (pkCol) createViewForm.sourcePkColumn = pkCol
+    if (!createViewForm.blobColumns.length && detail.blob_columns?.length) {
+      createViewForm.blobColumns = detail.blob_columns.map((item) => item.column)
+    }
+  } catch {
+    // keep defaults from tree node
+  }
+  createViewDialogVisible.value = true
+}
+
+async function submitCreateView() {
+  if (!selectedCatalogObject.value) return
+  if (!createViewForm.blobColumns.length) {
+    ElMessage.warning('请至少选择一个 BLOB 列')
+    return
+  }
+  const obj = selectedCatalogObject.value
+  const conn = obj.connection || {}
+  createViewSaving.value = true
+  try {
+    const res = await createBlobTableViewApi({
+      name: createViewForm.name.trim() || `${obj.label} 浏览`,
+      db_alias: conn.alias,
+      database_name: obj.database,
+      source_table: obj.label,
+      source_object_type: obj.objectType || 'table',
+      source_pk_column: createViewForm.sourcePkColumn.trim() || 'id',
+      blob_columns: [...createViewForm.blobColumns],
+      where_clause: createViewForm.whereClause.trim(),
+    })
+    ElMessage.success('浏览配置已创建')
+    createViewDialogVisible.value = false
+    await loadViews()
+    if (res.data?.id) {
+      activeViewId.value = res.data.id
+      rightTab.value = 'browse'
+    }
+  } catch (err) {
+    ElMessage.error(err.message || '创建失败')
+  } finally {
+    createViewSaving.value = false
+  }
+}
+
+async function handleSqlValidate() {
+  const sql = sqlText.value.trim()
+  if (!sql) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
+  sqlValidating.value = true
+  sqlError.value = ''
+  try {
+    await validateSqlApi(sql, browseContext.value)
+    ElMessage.success('SQL 校验通过')
+  } catch (err) {
+    sqlError.value = err.message || '校验失败'
+  } finally {
+    sqlValidating.value = false
+  }
+}
+
+async function handleSqlExecute() {
+  const sql = sqlText.value.trim()
+  if (!sql) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
+  sqlExecuting.value = true
+  sqlError.value = ''
+  try {
+    const res = await executeSqlApi(sql, browseContext.value)
+    sqlResult.value = res.data
+  } catch (err) {
+    sqlResult.value = null
+    sqlError.value = err.message || '执行失败'
+  } finally {
+    sqlExecuting.value = false
+  }
 }
 
 function formatCell(row, colName) {
@@ -320,13 +516,38 @@ function statusLabel(status) {
   return '未迁移'
 }
 
+function blobColumnNames() {
+  const view = activeView.value
+  if (!view) return []
+  if (view.blob_columns?.length) return view.blob_columns
+  return view.blob_column ? [view.blob_column] : []
+}
+
 function blobColumnName() {
-  return activeView.value?.blob_column || ''
+  return blobColumnNames()[0] || ''
+}
+
+function buildRowPreviewItems(row) {
+  return blobColumnNames()
+    .map((col) => {
+      const cell = pathCell(row, col)
+      if (!cell?.image_info_id || cell.status !== 'migrated') return null
+      return {
+        id: cell.image_info_id,
+        path: cell.path,
+        title: cell.path || cell.display,
+        column: col,
+      }
+    })
+    .filter(Boolean)
 }
 
 function getRowImageInfoId(row) {
-  const cell = pathCell(row, blobColumnName())
-  return cell?.image_info_id ?? null
+  for (const col of blobColumnNames()) {
+    const cell = pathCell(row, col)
+    if (cell?.image_info_id) return cell.image_info_id
+  }
+  return null
 }
 
 function syncTableCurrentRow(row) {
@@ -353,13 +574,28 @@ function buildGalleryItems() {
     .filter(Boolean)
 }
 
+function openRowPreview(row, preferredColumn = null) {
+  const items = buildRowPreviewItems(row)
+  if (!items.length) return
+  previewRow.value = row
+  if (preferredColumn) {
+    const idx = items.findIndex((item) => item.column === preferredColumn)
+    rowPreviewIndex.value = idx >= 0 ? idx : 0
+  } else {
+    rowPreviewIndex.value = 0
+  }
+  if (!useMultiPreview.value) {
+    galleryItems.value = buildGalleryItems()
+    const targetId = items[rowPreviewIndex.value]?.id
+    galleryIndex.value = galleryItems.value.findIndex((item) => item.id === targetId)
+  }
+  syncTableCurrentRow(row)
+}
+
 function openPreview(pathCellValue, row) {
   if (!pathCellValue?.image_info_id) return
-  galleryItems.value = buildGalleryItems()
-  const index = galleryItems.value.findIndex((item) => item.id === pathCellValue.image_info_id)
-  if (index < 0) return
-  galleryIndex.value = index
-  syncTableCurrentRow(row ?? findRowByImageId(pathCellValue.image_info_id))
+  const col = blobColumnNames().find((name) => pathCell(row, name) === pathCellValue)
+  openRowPreview(row, col || null)
 }
 
 function findRowByImageId(imageId) {
@@ -368,9 +604,8 @@ function findRowByImageId(imageId) {
 
 function onTableRowClick(row, _column, event) {
   if (event?.target?.closest?.('button, a, .el-button')) return
-  const cell = pathCell(row, blobColumnName())
-  if (cell?.image_info_id && cell.status === 'migrated') {
-    openPreview(cell, row)
+  if (buildRowPreviewItems(row).length) {
+    openRowPreview(row)
   }
 }
 
@@ -394,6 +629,8 @@ watch(tableRows, () => {
 
 watch(activeViewId, () => {
   unbindTableScroll()
+  previewRow.value = null
+  rowPreviewIndex.value = -1
   loadRows({ append: false })
 })
 
@@ -418,7 +655,16 @@ watch(
     const id = Number(viewId)
     if (id && !Number.isNaN(id)) {
       activeViewId.value = id
+      rightTab.value = 'browse'
     }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => route.query.mode,
+  (mode) => {
+    if (mode === 'sql') rightTab.value = 'sql'
   },
   { immediate: true },
 )
@@ -451,7 +697,7 @@ onUnmounted(() => {
     <div class="page-card">
       <h2 class="page-title">BLOB 数据浏览</h2>
       <p class="page-desc">
-        左侧按连接与数据库浏览表、数据库视图；已保存的浏览配置可快速打开远程数据，BLOB 列显示为本系统路径。
+        左侧按连接与数据库浏览表、数据库视图；支持保存浏览配置、多 BLOB 并排预览，以及在同一页面执行 SQL 查询。
       </p>
 
       <div class="layout">
@@ -478,6 +724,15 @@ onUnmounted(() => {
             <div>{{ selectedCatalogObject.database }}.{{ selectedCatalogObject.label }}</div>
             <div class="field-hint">
               {{ selectedCatalogObject.objectType === 'view' ? '数据库视图' : '表' }}
+            </div>
+            <div class="catalog-actions">
+              <el-button size="small" type="primary" plain @click="openCreateViewDialog">
+                创建浏览配置
+              </el-button>
+              <el-button size="small" plain @click="rightTab = 'sql'">SQL 查询</el-button>
+              <el-button size="small" link type="primary" @click="goMigrateWithCatalog">
+                去迁移页
+              </el-button>
             </div>
           </div>
 
@@ -520,95 +775,181 @@ onUnmounted(() => {
         </aside>
 
         <main class="data-panel">
-          <template v-if="activeView">
-            <div class="data-head">
-              <div>
-                <h3>{{ activeView.name }}</h3>
-                <p class="field-hint">
-                  {{ activeView.db_label || activeView.db_alias }} /
-                  {{ activeView.source_table }} · PK {{ activeView.source_pk_column }} ·
-                  BLOB → 路径列 {{ activeView.blob_column }}
-                  <span v-if="activeView.where_clause"> · WHERE {{ activeView.where_clause }}</span>
-                </p>
-              </div>
-              <div class="data-head-actions">
-                <span class="row-count">已加载 {{ tableRows.length }} / {{ total }}</span>
-                <el-button :loading="loadingRows" @click="refreshActiveView">刷新</el-button>
-              </div>
-            </div>
+          <el-tabs v-model="rightTab" class="right-tabs">
+            <el-tab-pane label="表浏览" name="browse">
+              <template v-if="activeView">
+                <div class="data-head">
+                  <div>
+                    <h3>{{ activeView.name }}</h3>
+                    <p class="field-hint">
+                      {{ activeView.db_label || activeView.db_alias }} /
+                      {{ activeView.source_table }} · PK {{ activeView.source_pk_column }} ·
+                      BLOB → {{ blobColumnNames().join(', ') }}
+                      <span v-if="activeView.where_clause"> · WHERE {{ activeView.where_clause }}</span>
+                    </p>
+                  </div>
+                  <div class="data-head-actions">
+                    <span class="row-count">已加载 {{ tableRows.length }} / {{ total }}</span>
+                    <el-button :loading="loadingRows" @click="refreshActiveView">刷新</el-button>
+                  </div>
+                </div>
 
-            <div class="table-panel">
-              <div class="table-main">
-              <div
-                ref="tableWrapRef"
-                v-loading="loadingRows && !tableRows.length"
-                class="table-viewport"
+                <div class="table-panel">
+                  <div class="table-main">
+                    <div
+                      ref="tableWrapRef"
+                      v-loading="loadingRows && !tableRows.length"
+                      class="table-viewport"
+                    >
+                      <el-table
+                        v-if="columns.length"
+                        ref="tableRef"
+                        :data="tableRows"
+                        :height="tableHeight"
+                        size="small"
+                        border
+                        stripe
+                        highlight-current-row
+                        :row-key="(row) => getRowImageInfoId(row) ?? JSON.stringify(row)"
+                        class="data-table"
+                        empty-text="无数据"
+                        @row-click="onTableRowClick"
+                      >
+                        <el-table-column
+                          v-for="col in columns"
+                          :key="col.name"
+                          :prop="col.name"
+                          :label="col.is_path_substitute ? `${col.name}（路径）` : col.name"
+                          :min-width="col.is_path_substitute ? 220 : 120"
+                          show-overflow-tooltip
+                        >
+                          <template #default="{ row }">
+                            <template v-if="col.is_path_substitute">
+                              <div class="path-cell">
+                                <el-tag
+                                  :type="statusTagType(pathCell(row, col.name)?.status)"
+                                  size="small"
+                                  class="path-tag"
+                                >
+                                  {{ statusLabel(pathCell(row, col.name)?.status) }}
+                                </el-tag>
+                                <span class="path-text">{{ formatCell(row, col.name) }}</span>
+                                <el-button
+                                  v-if="pathCell(row, col.name)?.image_info_id"
+                                  link
+                                  type="primary"
+                                  :icon="View"
+                                  @click="openPreview(pathCell(row, col.name), row)"
+                                />
+                              </div>
+                            </template>
+                            <template v-else>
+                              {{ formatCell(row, col.name) }}
+                            </template>
+                          </template>
+                        </el-table-column>
+                      </el-table>
+                      <el-empty v-else-if="!loadingRows" description="无数据" />
+                    </div>
+                    <div v-if="loadingMore" class="load-more-hint">加载更多…</div>
+                    <div v-else-if="tableRows.length && !hasMore" class="load-more-hint muted">已全部加载</div>
+                  </div>
+
+                  <MultiBlobPreviewPanel
+                    v-if="useMultiPreview"
+                    v-model:current-index="rowPreviewIndex"
+                    :items="rowPreviewItems"
+                    class="blob-preview-pane"
+                    @close="previewRow = null; rowPreviewIndex = -1"
+                  />
+                  <ImageGalleryPanel
+                    v-else
+                    v-model:current-index="galleryIndex"
+                    :items="galleryItems"
+                    class="blob-preview-pane"
+                  />
+                </div>
+              </template>
+              <el-empty v-else description="请选择左侧浏览配置，或从目录创建" />
+            </el-tab-pane>
+
+            <el-tab-pane label="SQL 查询" name="sql">
+              <div class="sql-context-bar">
+                当前数据源：<code>{{ browseContext.label }}</code>
+                <span v-if="browseContext.database" class="field-hint inline-hint">
+                  （库 {{ browseContext.database }}）
+                </span>
+              </div>
+              <div class="sql-editor-wrap">
+                <SqlEditor v-model="sqlText" @execute="handleSqlExecute" />
+              </div>
+              <div class="sql-toolbar">
+                <el-button :loading="sqlValidating" @click="handleSqlValidate">校验</el-button>
+                <el-button type="primary" :loading="sqlExecuting" :icon="VideoPlay" @click="handleSqlExecute">
+                  执行
+                </el-button>
+                <span v-if="sqlResult" class="sql-meta">
+                  {{ sqlResult.row_count }} 行 · {{ sqlResult.elapsed_ms }}ms
+                  <span v-if="sqlResult.truncated">（已截断）</span>
+                </span>
+              </div>
+              <el-alert v-if="sqlError" :title="sqlError" type="error" show-icon :closable="false" class="sql-error" />
+              <el-table
+                v-if="sqlTableData.length"
+                :data="sqlTableData"
+                size="small"
+                border
+                stripe
+                max-height="420"
+                class="sql-result-table"
               >
-                <el-table
-                  v-if="columns.length"
-                  ref="tableRef"
-                  :data="tableRows"
-                  :height="tableHeight"
-                  size="small"
-                  border
-                  stripe
-                  highlight-current-row
-                  :row-key="(row) => getRowImageInfoId(row) ?? JSON.stringify(row)"
-                  class="data-table"
-                  empty-text="无数据"
-                  @row-click="onTableRowClick"
+                <el-table-column
+                  v-for="col in sqlResult.columns"
+                  :key="col"
+                  :prop="col"
+                  :label="col"
+                  min-width="120"
+                  show-overflow-tooltip
                 >
-                  <el-table-column
-                    v-for="col in columns"
-                    :key="col.name"
-                    :prop="col.name"
-                    :label="col.is_path_substitute ? `${col.name}（路径）` : col.name"
-                    :min-width="col.is_path_substitute ? 220 : 120"
-                    show-overflow-tooltip
-                  >
-                    <template #default="{ row }">
-                      <template v-if="col.is_path_substitute">
-                        <div class="path-cell">
-                          <el-tag
-                            :type="statusTagType(pathCell(row, col.name)?.status)"
-                            size="small"
-                            class="path-tag"
-                          >
-                            {{ statusLabel(pathCell(row, col.name)?.status) }}
-                          </el-tag>
-                          <span class="path-text">{{ formatCell(row, col.name) }}</span>
-                          <el-button
-                            v-if="pathCell(row, col.name)?.image_info_id"
-                            link
-                            type="primary"
-                            :icon="View"
-                            @click="openPreview(pathCell(row, col.name), row)"
-                          />
-                        </div>
-                      </template>
-                      <template v-else>
-                        {{ formatCell(row, col.name) }}
-                      </template>
-                    </template>
-                  </el-table-column>
-                </el-table>
-                <el-empty v-else-if="!loadingRows" description="无数据" />
-              </div>
-              <div v-if="loadingMore" class="load-more-hint">加载更多…</div>
-              <div v-else-if="tableRows.length && !hasMore" class="load-more-hint muted">已全部加载</div>
-              </div>
-
-              <ImageGalleryPanel
-                v-model:current-index="galleryIndex"
-                :items="galleryItems"
-                class="blob-preview-pane"
-              />
-            </div>
-          </template>
-          <el-empty v-else description="请选择左侧浏览配置" />
+                  <template #default="{ row }">
+                    {{ formatCellValue(row[col]) }}
+                  </template>
+                </el-table-column>
+              </el-table>
+              <el-empty v-else-if="!sqlExecuting" description="执行 SELECT 后在此显示结果" />
+            </el-tab-pane>
+          </el-tabs>
         </main>
       </div>
     </div>
+
+    <el-dialog v-model="createViewDialogVisible" title="从目录创建浏览配置" width="480px">
+      <el-form label-width="100px">
+        <el-form-item label="名称">
+          <el-input v-model="createViewForm.name" maxlength="100" />
+        </el-form-item>
+        <el-form-item label="主键列">
+          <el-input v-model="createViewForm.sourcePkColumn" maxlength="64" />
+        </el-form-item>
+        <el-form-item label="BLOB 列" required>
+          <el-select v-model="createViewForm.blobColumns" multiple collapse-tags style="width: 100%">
+            <el-option
+              v-for="col in selectedCatalogObject?.blobColumns || []"
+              :key="col.column"
+              :label="col.column"
+              :value="col.column"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="WHERE">
+          <el-input v-model="createViewForm.whereClause" placeholder="不含 WHERE 关键字" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createViewDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="createViewSaving" @click="submitCreateView">创建</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -678,6 +1019,62 @@ onUnmounted(() => {
 .catalog-selection-title {
   font-weight: 600;
   margin-bottom: 4px;
+}
+
+.catalog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.right-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.right-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.sql-context-bar {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.sql-editor-wrap {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.sql-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sql-meta {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.sql-error {
+  margin-bottom: 8px;
+}
+
+.sql-result-table {
+  width: 100%;
+}
+
+.inline-hint {
+  margin-left: 8px;
 }
 
 .panel-head-spaced {

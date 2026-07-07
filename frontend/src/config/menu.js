@@ -32,15 +32,7 @@ export const MENU_ITEMS = [
     title: 'BLOB 数据浏览',
     icon: 'View',
     adminOnly: false,
-    description: '按库浏览表与数据库视图，BLOB 列显示为本地路径',
-  },
-  {
-    path: 'sql',
-    name: 'sql',
-    title: 'SQL 查询',
-    icon: 'Document',
-    adminOnly: false,
-    description: '自定义 SELECT 查询与图片预览',
+    description: '目录浏览、表数据、SQL 查询与多 BLOB 预览',
   },
   {
     path: 'categories',

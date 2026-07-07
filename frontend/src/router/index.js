@@ -26,17 +26,22 @@ const VIEW_MAP = {
 }
 
 function buildChildRoutes() {
-  return MENU_ITEMS.map((item) => ({
+  const routes = MENU_ITEMS.map((item) => ({
     path: item.path,
     name: item.name,
     component: VIEW_MAP[item.name] || PagePlaceholder,
-      meta: {
+    meta: {
       title: item.title,
       icon: item.icon,
       adminOnly: item.adminOnly,
       description: item.description,
     },
   }))
+  routes.push({
+    path: 'sql',
+    redirect: { name: 'blob-views', query: { mode: 'sql' } },
+  })
+  return routes
 }
 
 const router = createRouter({
