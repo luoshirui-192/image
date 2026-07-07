@@ -115,6 +115,9 @@ def run_smoke(
         ("categories", "/api/images/categories/"),
         ("system_config", "/api/config/"),
         ("logs_stats", "/api/logs/stats/"),
+        ("blob_catalog_connections", "/api/images/blob-catalog/connections/"),
+        ("blob_browse_configs", "/api/images/blob-browse/"),
+        ("blob_migration_sources", "/api/images/blob-migration/sources/"),
     ]
     for name, path in authed_steps:
         results.append(step_authed_get(name, base_url, path, token))

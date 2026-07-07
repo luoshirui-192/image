@@ -62,3 +62,22 @@ class SqlQueryServiceTestCase(TestCase):
         )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["data"]["row_count"], 1)
+
+    def test_api_validate_sql(self):
+        self.client.force_authenticate(user=self.user)
+        res = self.client.post(
+            "/api/sql/validate/",
+            {"sql": "SELECT 1 AS n"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["code"], 0)
+
+    def test_api_execute_rejects_write(self):
+        self.client.force_authenticate(user=self.user)
+        res = self.client.post(
+            "/api/sql/execute/",
+            {"sql": "DELETE FROM image_info"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 400)

@@ -27,8 +27,8 @@ export const MENU_ITEMS = [
     description: '从旧库 BLOB 导出到 upload 并生成路径表',
   },
   {
-    path: 'blob-views',
-    name: 'blob-views',
+    path: 'blob-browse',
+    name: 'blob-browse',
     title: 'BLOB 数据浏览',
     icon: 'View',
     adminOnly: false,
@@ -75,6 +75,9 @@ export function findMenuItemByPath(path) {
 
 export function resolveActiveMenuPath(routePath) {
   const path = routePath.replace(/^\//, '')
+  if (path === 'blob-views' || path.startsWith('blob-views/') || path === 'sql-query' || path === 'sql') {
+    return '/blob-browse'
+  }
   const match = MENU_ITEMS.find((item) => {
     if (item.path === '') {
       return path === ''

@@ -82,6 +82,12 @@ CREATE TABLE IF NOT EXISTS legacy_photos (
     title VARCHAR(100) NOT NULL DEFAULT '',
     photo BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS legacy_dual_blob (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title VARCHAR(100) NOT NULL DEFAULT '',
+    photo BLOB NOT NULL,
+    thumb BLOB NOT NULL DEFAULT X''
+);
 CREATE TABLE IF NOT EXISTS external_db_connection (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name VARCHAR(100) NOT NULL DEFAULT '',
@@ -160,6 +166,7 @@ class BlobTableViewTestCase(TestCase):
         ImageSourceMap.objects.create(
             source_table="legacy_photos",
             source_id="1",
+            source_column="photo",
             image_info_id=self.image.id,
             migrated_at=now,
         )
@@ -219,3 +226,72 @@ class BlobTableViewTestCase(TestCase):
         photo = payload["rows"][0]["photo"]
         self.assertEqual(photo["status"], "deleted")
         self.assertEqual(photo["display"], "已删除")
+
+    def test_multi_blob_columns_substitute_paths(self):
+        now = timezone.now()
+        png = make_png_bytes()
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM legacy_dual_blob")
+            cursor.execute(
+                "INSERT INTO legacy_dual_blob (id, title, photo, thumb) VALUES (1, 'a.png', ?, ?)",
+                [png, png],
+            )
+
+        photo_image = ImageInfo.objects.create(
+            image_name="dual-a.png",
+            image_path="2026/01/dual-a.png",
+            image_width=8,
+            image_height=6,
+            file_size=100,
+            file_suffix=".png",
+            upload_time=now,
+            update_time=now,
+            upload_user="test",
+            is_delete=0,
+        )
+        thumb_image = ImageInfo.objects.create(
+            image_name="dual-thumb.png",
+            image_path="2026/01/dual-thumb.png",
+            image_width=8,
+            image_height=6,
+            file_size=80,
+            file_suffix=".png",
+            upload_time=now,
+            update_time=now,
+            upload_user="test",
+            is_delete=0,
+        )
+        ImageSourceMap.objects.create(
+            source_table="legacy_dual_blob",
+            source_id="1",
+            source_column="photo",
+            image_info_id=photo_image.id,
+            migrated_at=now,
+        )
+        ImageSourceMap.objects.create(
+            source_table="legacy_dual_blob",
+            source_id="1",
+            source_column="thumb",
+            image_info_id=thumb_image.id,
+            migrated_at=now,
+        )
+
+        multi_view = create_table_view(
+            name="multi blob",
+            db_alias="default",
+            source_table="legacy_dual_blob",
+            source_pk_column="id",
+            blob_column="photo",
+            blob_columns=["photo", "thumb"],
+        )
+        payload = fetch_view_rows(multi_view.id, offset=0, limit=1)
+        row = payload["rows"][0]
+        self.assertEqual(row["photo"]["status"], "migrated")
+        self.assertEqual(row["thumb"]["status"], "migrated")
+        self.assertEqual(row["thumb"]["image_info_id"], thumb_image.id)
+
+    def test_api_blob_browse_alias_list(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get("/api/images/blob-browse/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.json()["data"]), 1)

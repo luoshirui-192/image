@@ -67,6 +67,12 @@ urlpatterns = [
     path("blob-migration/table-views/<int:pk>/schema/", BlobTableViewSchemaView.as_view(), name="blob-table-view-schema"),
     path("blob-migration/table-views/<int:pk>/rows/", BlobTableViewRowsView.as_view(), name="blob-table-view-rows"),
     path("blob-migration/table-views/<int:pk>/", BlobTableViewDetailView.as_view(), name="blob-table-view-detail"),
+    # PR4 aliases — same handlers, clearer browse naming
+    path("blob-browse/preview-schema/", BlobTableViewPreviewSchemaView.as_view(), name="blob-browse-preview-schema"),
+    path("blob-browse/", BlobTableViewListCreateView.as_view(), name="blob-browse-list"),
+    path("blob-browse/<int:pk>/schema/", BlobTableViewSchemaView.as_view(), name="blob-browse-schema"),
+    path("blob-browse/<int:pk>/rows/", BlobTableViewRowsView.as_view(), name="blob-browse-rows"),
+    path("blob-browse/<int:pk>/", BlobTableViewDetailView.as_view(), name="blob-browse-detail"),
     path("blob-catalog/connections/", BlobCatalogConnectionsView.as_view(), name="blob-catalog-connections"),
     path("blob-catalog/databases/", BlobCatalogDatabasesView.as_view(), name="blob-catalog-databases"),
     path("blob-catalog/objects/", BlobCatalogObjectsView.as_view(), name="blob-catalog-objects"),

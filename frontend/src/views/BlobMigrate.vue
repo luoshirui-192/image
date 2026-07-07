@@ -296,7 +296,7 @@ async function saveView() {
     ElMessage.success('浏览配置已保存')
     const viewId = res.data?.id
     if (viewId) {
-      router.push({ path: '/blob-views', query: { viewId: String(viewId) } })
+      router.push({ path: '/blob-browse', query: { viewId: String(viewId) } })
     }
   } catch (err) {
     ElMessage.error(err.message || '保存浏览配置失败')

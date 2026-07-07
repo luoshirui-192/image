@@ -9,7 +9,6 @@ const PagePlaceholder = () => import('@/views/PagePlaceholder.vue')
 const UploadView = () => import('@/views/Upload.vue')
 const BlobMigrateView = () => import('@/views/BlobMigrate.vue')
 const BlobTableViewsView = () => import('@/views/BlobTableViews.vue')
-const SqlQueryView = () => import('@/views/SqlQuery.vue')
 const CategoryManageView = () => import('@/views/CategoryManage.vue')
 const LogsView = () => import('@/views/Logs.vue')
 const SettingsView = () => import('@/views/Settings.vue')
@@ -18,8 +17,7 @@ const VIEW_MAP = {
   home: HomeView,
   upload: UploadView,
   'blob-migrate': BlobMigrateView,
-  'blob-views': BlobTableViewsView,
-  sql: SqlQueryView,
+  'blob-browse': BlobTableViewsView,
   categories: CategoryManageView,
   logs: LogsView,
   settings: SettingsView,
@@ -37,10 +35,20 @@ function buildChildRoutes() {
       description: item.description,
     },
   }))
-  routes.push({
-    path: 'sql',
-    redirect: { name: 'blob-views', query: { mode: 'sql' } },
-  })
+  routes.push(
+    {
+      path: 'blob-views',
+      redirect: (to) => ({ name: 'blob-browse', query: to.query, hash: to.hash }),
+    },
+    {
+      path: 'sql-query',
+      redirect: { name: 'blob-browse', query: { mode: 'sql' } },
+    },
+    {
+      path: 'sql',
+      redirect: { name: 'blob-browse', query: { mode: 'sql' } },
+    },
+  )
   return routes
 }
 

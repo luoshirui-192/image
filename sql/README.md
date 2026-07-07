@@ -8,6 +8,8 @@
 | [optimize_indexes.sql](optimize_indexes.sql) | 增量索引优化 + update_time 触发器 |
 | [seed_test_data.sql](seed_test_data.sql) | 种子数据（用户、分类、示例图片、日志） |
 | [fix_django_migrate.sql](fix_django_migrate.sql) | migrate 失败 errno 150 时清理 Django 内置表 |
+| [blob_migration.sql](blob_migration.sql) | BLOB 迁移/浏览配置表结构参考（生产由 `schema_ensure` 自动升级） |
+| [blob_migration_jobs.sql](blob_migration_jobs.sql) | BLOB 后台迁移任务表结构参考 |
 
 ## 推荐执行顺序
 

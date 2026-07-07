@@ -158,7 +158,7 @@ docker compose -f docker-compose.app.yml down
 
 ## 功能说明
 
-- 上传、SQL 查询、BLOB 迁移、BLOB 表视图、分类管理
+- 上传、**BLOB 数据浏览**（含 SQL 查询）、BLOB 迁移、分类管理
 - 连接**外部旧库**迁 BLOB：由 **A 的 backend 容器**发起连接，旧库需允许 **A 的 IP** 访问
 - 元数据写入 **A 的 MySQL**；图片文件写入 **MinIO** `biox/data/image_db/upload/...`
 - 数据库 `image_path` 仍为 `upload/{date}/{category}/{uuid}.ext` 相对路径
@@ -204,6 +204,31 @@ mc mirror aratek/biox/data/image_db/upload/ ./backup_upload/
 
 ---
 
+## BLOB 数据浏览与迁移
+
+1. **外部库连接**：在「BLOB 迁移」页配置 MySQL 连接（迁移目标库为 `external_db_connection.db_name`）。
+2. **迁移**：选择表或数据库视图，勾选全部 BLOB 列后执行后台迁移任务。
+3. **浏览**：在「BLOB 数据浏览」左侧目录树选择连接 → 库 → 表/数据库视图；可保存为浏览配置。
+4. **SQL**：同一页面的「SQL 查询」Tab 针对当前选中的连接与库执行 `SELECT`。
+5. **Schema 升级**：backend 启动时自动执行 `schema_ensure`（PR1 起增加 `source_column`、`blob_columns` 等字段）。
+
+旧路由 `/blob-views`、`/sql` 会自动跳转到 `/blob-browse`。
+
+### 部署后验证
+
+```bash
+# 健康检查
+curl -s http://127.0.0.1/api/health/ | python3 -m json.tool
+
+# 冒烟测试（含 BLOB 目录与浏览配置 API）
+python3 scripts/smoke_test.py --base-url http://127.0.0.1
+
+# 单元测试（开发机 / CI）
+cd backend && DB_ENGINE=sqlite python manage.py test images sqlquery -v 1
+```
+
+---
+
 ## 故障排查
 
 | 现象 | 处理 |
@@ -224,6 +249,7 @@ mc mirror aratek/biox/data/image_db/upload/ ./backup_upload/
 | `.env.app.example` | 环境变量模板 |
 | `backend/utils/storage.py` | local / minio 存储后端 |
 | `start-app.sh` / `start-app.ps1` | 一键启动 |
+| `docker-compose.app.external-db.example.yml` | 使用宿主机 MySQL 时的 compose 覆盖示例 |
 | `README-MACHINE-A.md` | 本文档 |
 
 ---
