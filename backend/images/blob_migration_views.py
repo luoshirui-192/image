@@ -10,6 +10,7 @@ from images.blob_migration_job_service import (
     JobServiceError,
     cancel_migration_job,
     create_migration_job,
+    delete_migration_job,
     export_job_errors_csv,
     kick_migration_job_async,
     list_migration_jobs,
@@ -238,7 +239,7 @@ class BlobMigrationJobListCreateView(APIView):
 
 @extend_schema(tags=["blob-migration"])
 class BlobMigrationJobDetailView(APIView):
-    """GET /api/images/blob-migration/jobs/{id}/ — job progress."""
+    """GET/DELETE /api/images/blob-migration/jobs/{id}/ — job progress or delete."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
 
@@ -248,6 +249,14 @@ class BlobMigrationJobDetailView(APIView):
         except BlobMigrationJob.DoesNotExist:
             return error_response("任务不存在", code=4044, status=404)
         return success_response(serialize_migration_job(job))
+
+    def delete(self, request, pk: int):
+        try:
+            delete_migration_job(pk)
+        except JobServiceError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        write_operate_log(request, "blob_migration_job_delete", detail=f"job_id={pk}")
+        return success_response(None, message="任务记录已删除")
 
 
 @extend_schema(tags=["blob-migration"])

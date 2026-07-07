@@ -121,6 +121,14 @@ def cancel_migration_job(job_id: int) -> BlobMigrationJob:
     return job
 
 
+def delete_migration_job(job_id: int) -> None:
+    job = _load_job(job_id)
+    if job.status in ACTIVE_STATUSES:
+        raise JobServiceError("进行中的任务不能删除，请先取消")
+    BlobMigrationJobError.objects.filter(job_id=job_id).delete()
+    job.delete()
+
+
 def list_migration_jobs(*, source_id: int | None = None, limit: int = 50) -> list[BlobMigrationJob]:
     qs = BlobMigrationJob.objects.all().order_by("-id")
     if source_id:

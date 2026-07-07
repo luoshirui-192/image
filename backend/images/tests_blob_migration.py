@@ -8,6 +8,7 @@ from pathlib import Path
 from django.contrib.auth.hashers import make_password
 from django.db import connection
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from PIL import Image
 from rest_framework.test import APIClient
 
@@ -270,3 +271,34 @@ class BlobMigrationTestCase(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["data"]["status"], "cancelled")
         self.assertTrue(res.json()["data"]["cancel_requested"])
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_api_delete_finished_job(self):
+        self.client.force_authenticate(user=self.admin)
+        job = create_migration_job(
+            source_id=self.source.id,
+            created_by="blob_admin",
+            batch_size=10,
+            run_all=True,
+        )
+        BlobMigrationJob.objects.filter(pk=job.id).update(
+            status=BlobMigrationJob.STATUS_COMPLETED,
+            finished_at=timezone.now(),
+        )
+        res = self.client.delete(f"/api/images/blob-migration/jobs/{job.id}/")
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(BlobMigrationJob.objects.filter(pk=job.id).exists())
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_api_delete_running_job_rejected(self):
+        self.client.force_authenticate(user=self.admin)
+        job = create_migration_job(
+            source_id=self.source.id,
+            created_by="blob_admin",
+            batch_size=10,
+            run_all=True,
+        )
+        BlobMigrationJob.objects.filter(pk=job.id).update(status=BlobMigrationJob.STATUS_RUNNING)
+        res = self.client.delete(f"/api/images/blob-migration/jobs/{job.id}/")
+        self.assertEqual(res.status_code, 400)
+        self.assertTrue(BlobMigrationJob.objects.filter(pk=job.id).exists())

@@ -143,6 +143,10 @@ export function getBlobMigrationJobApi(jobId) {
   return request.get(`/images/blob-migration/jobs/${jobId}/`)
 }
 
+export function deleteBlobMigrationJobApi(jobId) {
+  return request.delete(`/images/blob-migration/jobs/${jobId}/`)
+}
+
 export function cancelBlobMigrationJobApi(jobId) {
   return request.post(`/images/blob-migration/jobs/${jobId}/cancel/`)
 }

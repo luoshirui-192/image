@@ -11,6 +11,7 @@ import {
   createExternalDbConnectionApi,
   createBlobMigrationJobApi,
   cancelBlobMigrationJobApi,
+  deleteBlobMigrationJobApi,
   deleteBlobMigrationSourceApi,
   deleteExternalDbConnectionApi,
   discoverBlobTablesApi,
@@ -421,6 +422,27 @@ async function cancelActiveJob() {
     await loadJobHistory()
   } catch (err) {
     ElMessage.error(err.message || '取消失败')
+  }
+}
+
+async function removeJob(job) {
+  if (!job?.id) return
+  if (['pending', 'running'].includes(job.status)) {
+    ElMessage.warning('进行中的任务不能删除，请先取消')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(`确定删除任务 #${job.id} 的历史记录？`, '确认', { type: 'warning' })
+    await deleteBlobMigrationJobApi(job.id)
+    if (activeJob.value?.id === job.id) {
+      activeJob.value = null
+      stopJobPolling()
+      running.value = false
+    }
+    ElMessage.success('已删除')
+    await loadJobHistory()
+  } catch {
+    // cancelled
   }
 }
 
@@ -881,7 +903,9 @@ onUnmounted(() => {
         <h4 v-if="jobHistory.length" class="subsection-title">任务历史</h4>
         <el-table v-if="jobHistory.length" :data="jobHistory" size="small" border max-height="280">
           <el-table-column prop="id" label="ID" width="70" />
-          <el-table-column prop="status" label="状态" width="100" />
+          <el-table-column prop="status" label="状态" width="100">
+            <template #default="{ row }">{{ jobStatusLabel(row.status) }}</template>
+          </el-table-column>
           <el-table-column label="进度" min-width="160">
             <template #default="{ row }">{{ row.processed }} / {{ row.total_estimate }} ({{ row.percent }}%)</template>
           </el-table-column>
@@ -891,11 +915,19 @@ onUnmounted(() => {
             </template>
           </el-table-column>
           <el-table-column prop="create_time" label="创建时间" min-width="160" />
-          <el-table-column label="操作" width="200">
+          <el-table-column label="操作" width="240">
             <template #default="{ row }">
               <el-button link type="primary" @click="activeJob = row">查看</el-button>
               <el-button v-if="row.failed > 0" link type="primary" @click="retryFailedJob(row)">重试失败</el-button>
               <el-button v-if="row.failed > 0" link @click="downloadJobErrors(row)">导出</el-button>
+              <el-button
+                v-if="!['pending', 'running'].includes(row.status)"
+                link
+                type="danger"
+                @click="removeJob(row)"
+              >
+                删除
+              </el-button>
             </template>
           </el-table-column>
         </el-table>
