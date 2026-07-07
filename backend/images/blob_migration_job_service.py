@@ -4,6 +4,8 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import subprocess
+import sys
 from typing import Any
 
 from django.conf import settings
@@ -221,19 +223,29 @@ def _warm_thumbnails_after_job(job: BlobMigrationJob) -> None:
 
 
 def execute_migration_job(job_id: int) -> BlobMigrationJob:
-    job = _load_job(job_id)
-    if job.status not in {BlobMigrationJob.STATUS_PENDING, BlobMigrationJob.STATUS_RUNNING}:
-        return job
-
-    now = timezone.now()
-    if job.status == BlobMigrationJob.STATUS_PENDING:
-        BlobMigrationJob.objects.filter(pk=job.pk).update(
-            status=BlobMigrationJob.STATUS_RUNNING,
-            started_at=now,
-            updated_at=now,
-            message="迁移进行中",
+    with transaction.atomic():
+        job = (
+            BlobMigrationJob.objects.select_for_update()
+            .filter(
+                pk=job_id,
+                status__in={BlobMigrationJob.STATUS_PENDING, BlobMigrationJob.STATUS_RUNNING},
+            )
+            .first()
         )
-        job.refresh_from_db()
+        if not job:
+            return _load_job(job_id)
+        if job.status == BlobMigrationJob.STATUS_PENDING:
+            now = timezone.now()
+            BlobMigrationJob.objects.filter(pk=job_id).update(
+                status=BlobMigrationJob.STATUS_RUNNING,
+                started_at=now,
+                updated_at=now,
+                message="迁移进行中",
+            )
+
+    job = _load_job(job_id)
+    if job.status != BlobMigrationJob.STATUS_RUNNING:
+        return job
 
     try:
         if job.retry_failed_only:
@@ -269,19 +281,42 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
     return _load_job(job_id)
 
 
-def process_pending_migration_jobs(*, max_jobs: int = 1) -> int:
-    """Claim and run up to max_jobs pending jobs. Returns count started."""
+def process_pending_migration_jobs(*, max_jobs: int = 1, job_id: int | None = None) -> int:
+    """Claim and run pending jobs. Returns count started."""
+    if job_id is not None:
+        job = _load_job(job_id)
+        if job.status not in ACTIVE_STATUSES:
+            return 0
+        execute_migration_job(job_id)
+        return 1
+
     started = 0
     pending = BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_PENDING).order_by("id")
     for job in pending[: max(1, max_jobs)]:
-        with transaction.atomic():
-            locked = (
-                BlobMigrationJob.objects.select_for_update()
-                .filter(pk=job.pk, status=BlobMigrationJob.STATUS_PENDING)
-                .first()
-            )
-            if not locked:
-                continue
-        execute_migration_job(locked.id)
+        execute_migration_job(job.id)
         started += 1
     return started
+
+
+def kick_migration_job_async(job_id: int) -> None:
+    """Spawn a detached worker so jobs start immediately after API create."""
+    cmd = [
+        sys.executable,
+        "manage.py",
+        "process_blob_migration_jobs",
+        "--once",
+        "--job-id",
+        str(job_id),
+    ]
+    try:
+        subprocess.Popen(
+            cmd,
+            cwd=str(settings.BASE_DIR),
+            start_new_session=True,
+            close_fds=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("kicked migration worker job_id=%s", job_id)
+    except OSError:
+        logger.exception("failed to kick migration worker job_id=%s", job_id)

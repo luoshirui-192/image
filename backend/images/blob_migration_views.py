@@ -11,6 +11,7 @@ from images.blob_migration_job_service import (
     cancel_migration_job,
     create_migration_job,
     export_job_errors_csv,
+    kick_migration_job_async,
     list_migration_jobs,
     serialize_migration_job,
 )
@@ -227,9 +228,10 @@ class BlobMigrationJobListCreateView(APIView):
             "blob_migration_job",
             detail=f"job_id={job.id} source_id={job.source_id} run_all={job.run_all}",
         )
+        kick_migration_job_async(job.id)
         return success_response(
             serialize_migration_job(job),
-            message="迁移任务已创建，scheduler 将自动执行",
+            message="迁移任务已创建，正在后台执行",
             status=201,
         )
 
@@ -296,7 +298,8 @@ class BlobMigrationJobRetryView(APIView):
             "blob_migration_job_retry",
             detail=f"job_id={job.id} parent={parent.id}",
         )
-        return success_response(serialize_migration_job(job), message="重试任务已创建", status=201)
+        kick_migration_job_async(job.id)
+        return success_response(serialize_migration_job(job), message="重试任务已创建，正在后台执行", status=201)
 
 
 @extend_schema(tags=["blob-migration"])

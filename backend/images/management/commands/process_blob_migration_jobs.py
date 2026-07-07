@@ -21,9 +21,18 @@ class Command(BaseCommand):
             default=1,
             help="Maximum jobs to start per invocation (default: 1)",
         )
+        parser.add_argument(
+            "--job-id",
+            type=int,
+            default=None,
+            help="Run a specific job id instead of the oldest pending job",
+        )
 
     def handle(self, *args, **options):
-        count = process_pending_migration_jobs(max_jobs=max(1, options["max_jobs"]))
+        count = process_pending_migration_jobs(
+            max_jobs=max(1, options["max_jobs"]),
+            job_id=options.get("job_id"),
+        )
         if count:
             self.stdout.write(self.style.SUCCESS(f"Processed {count} migration job(s)"))
         elif options["once"]:

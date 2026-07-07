@@ -343,6 +343,17 @@ function formatEta(seconds) {
   return rm ? `约 ${h} 小时 ${rm} 分` : `约 ${h} 小时`
 }
 
+function jobStatusLabel(status) {
+  const labels = {
+    pending: '排队中',
+    running: '进行中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+  }
+  return labels[status] || status
+}
+
 async function refreshActiveJob(jobId) {
   const res = await getBlobMigrationJobApi(jobId)
   activeJob.value = res.data
@@ -362,6 +373,7 @@ async function refreshActiveJob(jobId) {
 
 function startJobPolling(jobId) {
   stopJobPolling()
+  refreshActiveJob(jobId).catch(() => {})
   pollTimer.value = setInterval(() => {
     refreshActiveJob(jobId).catch(() => {})
   }, 2000)
@@ -811,7 +823,7 @@ onUnmounted(() => {
 
         <div v-if="activeJob" class="job-progress-panel">
           <div class="job-progress-head">
-            <span>任务 #{{ activeJob.id }} · {{ activeJob.status }}</span>
+            <span>任务 #{{ activeJob.id }} · {{ jobStatusLabel(activeJob.status) }}</span>
             <span v-if="activeJob.eta_seconds != null" class="job-eta">剩余 {{ formatEta(activeJob.eta_seconds) }}</span>
           </div>
           <el-progress
