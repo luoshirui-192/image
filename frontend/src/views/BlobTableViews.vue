@@ -49,6 +49,9 @@ let resizeObserver = null
 const PAGE_SIZE = 80
 const SCROLL_LOAD_DISTANCE = 120
 
+const browseReady = ref(false)
+let rowsLoadSeq = 0
+
 const activeView = computed(() => views.value.find((v) => v.id === activeViewId.value) || null)
 
 const galleryItems = ref([])
@@ -457,6 +460,8 @@ async function loadRows({ append = false } = {}) {
     return
   }
 
+  const seq = ++rowsLoadSeq
+
   if (append) {
     if (!hasMore.value || loadingMore.value || loadingRows.value) return
     loadingMore.value = true
@@ -471,6 +476,8 @@ async function loadRows({ append = false } = {}) {
       offset: append ? offset.value : 0,
       limit: PAGE_SIZE,
     })
+    if (seq !== rowsLoadSeq) return
+
     const data = res.data || {}
     columns.value = data.columns || []
     const rows = data.rows || []
@@ -486,12 +493,14 @@ async function loadRows({ append = false } = {}) {
       autoSelectFirstPreview()
     }
   } catch (err) {
+    if (seq !== rowsLoadSeq) return
     if (!append) {
       columns.value = []
       tableRows.value = []
     }
     ElMessage.error(err.message || '加载数据失败')
   } finally {
+    if (seq !== rowsLoadSeq) return
     loadingRows.value = false
     loadingMore.value = false
     setupTableViewport()
@@ -668,10 +677,18 @@ watch(tableRows, () => {
   galleryIndex.value = nextIndex >= 0 ? nextIndex : 0
 })
 
-watch(activeViewId, () => {
+watch(activeViewId, (id, oldId) => {
+  if (!browseReady.value || id === oldId) return
   unbindTableScroll()
   galleryIndex.value = -1
-  loadRows({ append: false })
+  if (!id) {
+    columns.value = []
+    tableRows.value = []
+    total.value = 0
+    hasMore.value = false
+    return
+  }
+  void loadRows({ append: false })
 })
 
 watch(
@@ -718,14 +735,15 @@ watch(rightTab, (tab) => {
 onMounted(async () => {
   window.addEventListener('resize', syncTableHeight)
 
-  await Promise.all([loadViews()])
-  await nextTick()
-  if (route.query.viewId) {
-    const id = Number(route.query.viewId)
-    if (id && !Number.isNaN(id)) {
-      activeViewId.value = id
-    }
+  browseReady.value = false
+  await loadViews()
+
+  const routeViewId = Number(route.query.viewId)
+  if (routeViewId && !Number.isNaN(routeViewId) && views.value.some((v) => v.id === routeViewId)) {
+    activeViewId.value = routeViewId
   }
+
+  browseReady.value = true
   if (activeViewId.value) {
     await loadRows({ append: false })
   }
