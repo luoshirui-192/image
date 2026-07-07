@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Refresh, VideoPlay, View } from '@element-plus/icons-vue'
 import ImageGalleryPanel from '@/components/ImageGalleryPanel.vue'
+import ImagePreview from '@/components/ImagePreview.vue'
 import SqlEditor from '@/components/SqlEditor.vue'
 import {
   createBlobTableViewApi,
@@ -335,18 +336,45 @@ function pathCell(row, colName) {
   return null
 }
 
-function syncTableHeight() {
-  const reservedTop = 56 + 16 + 16 + 20 + 12 + 72 + 28
-  const fallbackHeight = Math.max(560, window.innerHeight - reservedTop)
+const showPreviewColumn = computed(() => blobColumnNames().length > 0)
 
-  if (tableWrapRef.value) {
-    const fromContainer = Math.floor(tableWrapRef.value.clientHeight)
-    if (fromContainer > 240) {
-      tableHeight.value = fromContainer
+const previewColumnWidth = computed(() => {
+  const count = blobColumnNames().length
+  if (count <= 1) return 76
+  return Math.min(76 + count * 60, 280)
+})
+
+function rowPreviewCells(row) {
+  return blobColumnNames()
+    .map((col) => {
+      const cell = pathCell(row, col)
+      if (!cell?.image_info_id || cell.status !== 'migrated') return null
+      return {
+        column: col,
+        cell,
+        title: cell.path || cell.display || col,
+      }
+    })
+    .filter(Boolean)
+}
+
+function syncTableHeight() {
+  const wrap = tableWrapRef.value
+  const main = wrap?.parentElement
+  if (wrap && main) {
+    let available = wrap.clientHeight
+    if (available <= 0) {
+      const hint = main.querySelector('.load-more-hint')
+      available = main.clientHeight - (hint?.offsetHeight ?? 0)
+    }
+    if (available > 200) {
+      tableHeight.value = Math.floor(available)
       return
     }
   }
-  tableHeight.value = fallbackHeight
+
+  const reservedTop = 56 + 16 + 16 + 20 + 12 + 40 + 72 + 48 + 36
+  tableHeight.value = Math.max(420, window.innerHeight - reservedTop)
 }
 
 function setupTableViewport() {
@@ -681,6 +709,12 @@ watch(
   { immediate: true },
 )
 
+watch(rightTab, (tab) => {
+  if (tab === 'browse') {
+    setupTableViewport()
+  }
+})
+
 onMounted(async () => {
   window.addEventListener('resize', syncTableHeight)
 
@@ -827,6 +861,40 @@ onUnmounted(() => {
                         empty-text="无数据"
                         @row-click="onTableRowClick"
                       >
+                        <el-table-column
+                          v-if="showPreviewColumn"
+                          label="预览"
+                          :width="previewColumnWidth"
+                          fixed="left"
+                          align="center"
+                          class-name="preview-col"
+                        >
+                          <template #default="{ row }">
+                            <div v-if="rowPreviewCells(row).length" class="row-thumb-strip">
+                              <button
+                                v-for="item in rowPreviewCells(row)"
+                                :key="item.column"
+                                type="button"
+                                class="row-thumb-btn"
+                                :title="item.title"
+                                @click.stop="openPreview(item.cell, row)"
+                              >
+                                <ImagePreview
+                                  :image-id="item.cell.image_info_id"
+                                  :image-path="item.cell.path"
+                                  :size="52"
+                                />
+                                <span
+                                  v-if="rowPreviewCells(row).length > 1"
+                                  class="row-thumb-label"
+                                >
+                                  {{ item.column }}
+                                </span>
+                              </button>
+                            </div>
+                            <span v-else class="no-preview">—</span>
+                          </template>
+                        </el-table-column>
                         <el-table-column
                           v-for="col in columns"
                           :key="col.name"
@@ -1053,13 +1121,18 @@ onUnmounted(() => {
 
 .right-tabs :deep(.el-tab-pane) {
   height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .browse-pane {
+  flex: 1;
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .sql-context-bar {
@@ -1242,7 +1315,7 @@ onUnmounted(() => {
 
 .table-viewport {
   flex: 1;
-  min-height: calc(100vh - var(--header-height) - 240px);
+  min-height: 240px;
   overflow: hidden;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
@@ -1259,7 +1332,54 @@ onUnmounted(() => {
 }
 
 .data-table :deep(.el-scrollbar__bar.is-vertical) {
+  width: 10px;
   right: 0;
+}
+
+.data-table :deep(.el-scrollbar__bar.is-horizontal) {
+  height: 10px;
+}
+
+.row-thumb-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  padding: 2px 0 4px;
+  scrollbar-width: thin;
+}
+
+.row-thumb-strip::-webkit-scrollbar {
+  height: 6px;
+}
+
+.row-thumb-strip::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: var(--el-border-color);
+}
+
+.row-thumb-btn {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.row-thumb-label {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--el-text-color-secondary);
+  max-width: 52px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.no-preview {
+  color: var(--el-text-color-placeholder);
 }
 
 .path-cell {
