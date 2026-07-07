@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { ArrowLeft, ArrowRight, Close } from '@element-plus/icons-vue'
 import { fetchImageBlob } from '@/api/images'
 
@@ -18,12 +18,16 @@ const props = defineProps({
 const emit = defineEmits(['update:currentIndex'])
 
 const panelRef = ref(null)
+const thumbStripRef = ref(null)
 const loading = ref(false)
 const src = ref('')
+const thumbUrls = ref({})
 
 let objectUrl = ''
+let thumbObjectUrls = []
 let abortController = null
 let wheelLocked = false
+let thumbLoadGeneration = 0
 
 const active = computed(() => props.currentIndex >= 0 && props.items.length > 0)
 const total = computed(() => props.items.length)
@@ -44,6 +48,14 @@ const panelTitle = computed(() => {
   return name
 })
 
+function thumbItemKey(item, index) {
+  return `${index}:${item.id ?? ''}:${item.column ?? ''}:${item.path ?? ''}`
+}
+
+function thumbLabel(item, index) {
+  return item.column || item.title || `图片 ${index + 1}`
+}
+
 function revokeUrl() {
   if (objectUrl) {
     URL.revokeObjectURL(objectUrl)
@@ -52,11 +64,50 @@ function revokeUrl() {
   src.value = ''
 }
 
+function revokeThumbUrls() {
+  thumbObjectUrls.forEach((url) => URL.revokeObjectURL(url))
+  thumbObjectUrls = []
+  thumbUrls.value = {}
+}
+
 function abortPending() {
   if (abortController) {
     abortController.abort()
     abortController = null
   }
+}
+
+async function refreshThumbs() {
+  const gen = ++thumbLoadGeneration
+  revokeThumbUrls()
+  if (!props.items.length) return
+
+  const next = {}
+  for (let index = 0; index < props.items.length; index += 1) {
+    const item = props.items[index]
+    if (!item?.path && item?.id == null) continue
+    try {
+      const blob = await fetchImageBlob(item.path, { id: item.id, thumb: true })
+      if (gen !== thumbLoadGeneration) return
+      const url = URL.createObjectURL(blob)
+      thumbObjectUrls.push(url)
+      next[index] = url
+    } catch {
+      if (gen !== thumbLoadGeneration) return
+      next[index] = ''
+    }
+  }
+  if (gen !== thumbLoadGeneration) return
+  thumbUrls.value = next
+}
+
+function scrollActiveThumbIntoView() {
+  nextTick(() => {
+    const strip = thumbStripRef.value
+    if (!strip) return
+    const activeEl = strip.querySelector('.thumb-item.active')
+    activeEl?.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'smooth' })
+  })
 }
 
 async function loadCurrent() {
@@ -141,6 +192,21 @@ function onWheel(event) {
 }
 
 watch(
+  () => props.items,
+  () => {
+    refreshThumbs()
+  },
+  { deep: true, immediate: true },
+)
+
+watch(
+  () => props.currentIndex,
+  () => {
+    scrollActiveThumbIntoView()
+  },
+)
+
+watch(
   () => [props.currentIndex, props.items],
   () => {
     if (active.value) {
@@ -156,6 +222,7 @@ watch(
 onUnmounted(() => {
   abortPending()
   revokeUrl()
+  revokeThumbUrls()
 })
 </script>
 
@@ -207,8 +274,32 @@ onUnmounted(() => {
       <el-empty v-else description="点击缩略图或数据行预览" :image-size="72" />
     </div>
 
+    <div
+      v-if="total > 1"
+      ref="thumbStripRef"
+      class="thumb-strip"
+      aria-label="横向浏览缩略图"
+    >
+      <button
+        v-for="(item, index) in items"
+        :key="thumbItemKey(item, index)"
+        type="button"
+        :class="['thumb-item', { active: index === currentIndex }]"
+        :title="item.title || item.path || `图片 ${index + 1}`"
+        @click="setIndex(index)"
+      >
+        <img
+          v-if="thumbUrls[index]"
+          :src="thumbUrls[index]"
+          :alt="thumbLabel(item, index)"
+        />
+        <div v-else class="thumb-placeholder">…</div>
+        <span class="thumb-label">{{ thumbLabel(item, index) }}</span>
+      </button>
+    </div>
+
     <p v-if="active && total > 1" class="panel-hint">
-      聚焦预览框后，可用 ↑↓ 或滚轮切换
+      底部横向滑动浏览，或用 ↑↓ / 滚轮切换
     </p>
   </aside>
 </template>
@@ -245,7 +336,7 @@ onUnmounted(() => {
 
 .panel-body {
   flex: 1;
-  min-height: 220px;
+  min-height: 180px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -260,7 +351,7 @@ onUnmounted(() => {
 
 .image-wrap {
   flex: 1;
-  min-height: 180px;
+  min-height: 140px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -274,6 +365,67 @@ onUnmounted(() => {
 
 .nav-btn {
   flex-shrink: 0;
+}
+
+.thumb-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 12px 8px;
+  flex-shrink: 0;
+  scrollbar-width: thin;
+}
+
+.thumb-strip::-webkit-scrollbar {
+  height: 8px;
+}
+
+.thumb-strip::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: var(--el-border-color);
+}
+
+.thumb-item {
+  flex: 0 0 72px;
+  border: 2px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-fill-color-blank);
+  padding: 4px;
+  cursor: pointer;
+}
+
+.thumb-item.active {
+  border-color: var(--el-color-primary);
+}
+
+.thumb-item img,
+.thumb-placeholder {
+  width: 100%;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--el-fill-color-light);
+  display: block;
+}
+
+.thumb-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--el-text-color-placeholder);
+  font-size: 14px;
+}
+
+.thumb-label {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--el-text-color-secondary);
 }
 
 .panel-hint {
