@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Connection, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import {
@@ -8,13 +9,19 @@ import {
   createBlobTableViewApi,
   createCategoryApi,
   createExternalDbConnectionApi,
+  createBlobMigrationJobApi,
+  cancelBlobMigrationJobApi,
   deleteBlobMigrationSourceApi,
   deleteExternalDbConnectionApi,
   discoverBlobTablesApi,
+  exportBlobMigrationJobErrorsUrl,
+  getBlobMigrationJobApi,
   listBlobMigrationDatabasesApi,
+  listBlobMigrationJobsApi,
   listBlobMigrationSourcesApi,
   listCategoriesApi,
   listExternalDbConnectionsApi,
+  retryBlobMigrationJobApi,
   runBlobMigrationApi,
   testExternalDbConnectionApi,
   testSavedExternalDbConnectionApi,
@@ -32,6 +39,9 @@ const saving = ref(false)
 const savingView = ref(false)
 const running = ref(false)
 const runResult = ref(null)
+const activeJob = ref(null)
+const jobHistory = ref([])
+const pollTimer = ref(null)
 
 const form = reactive({
   name: '',
@@ -51,6 +61,7 @@ const runOptions = reactive({
   batchSize: 50,
   dryRun: true,
   skipExisting: true,
+  warmThumbsAfter: true,
 })
 
 const categoryDialogVisible = ref(false)
@@ -301,6 +312,144 @@ async function removeSource(id) {
   }
 }
 
+async function loadJobHistory() {
+  try {
+    const params = runOptions.sourceId ? { sourceId: runOptions.sourceId } : {}
+    const res = await listBlobMigrationJobsApi(params)
+    jobHistory.value = res.data || []
+    const active = jobHistory.value.find((j) => j.status === 'pending' || j.status === 'running')
+    if (active) {
+      activeJob.value = active
+      startJobPolling(active.id)
+    }
+  } catch {
+    jobHistory.value = []
+  }
+}
+
+function stopJobPolling() {
+  if (pollTimer.value) {
+    clearInterval(pollTimer.value)
+    pollTimer.value = null
+  }
+}
+
+function formatEta(seconds) {
+  if (seconds == null || seconds <= 0) return '—'
+  const m = Math.ceil(seconds / 60)
+  if (m < 60) return `约 ${m} 分钟`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return rm ? `约 ${h} 小时 ${rm} 分` : `约 ${h} 小时`
+}
+
+async function refreshActiveJob(jobId) {
+  const res = await getBlobMigrationJobApi(jobId)
+  activeJob.value = res.data
+  if (['completed', 'failed', 'cancelled'].includes(res.data?.status)) {
+    stopJobPolling()
+    running.value = false
+    await Promise.all([loadSources(), loadJobHistory()])
+    if (res.data?.status === 'completed') {
+      ElMessage.success(res.message || '迁移任务已完成')
+    } else if (res.data?.status === 'cancelled') {
+      ElMessage.warning('迁移任务已取消')
+    } else if (res.data?.status === 'failed') {
+      ElMessage.error(res.data?.message || '迁移任务失败')
+    }
+  }
+}
+
+function startJobPolling(jobId) {
+  stopJobPolling()
+  pollTimer.value = setInterval(() => {
+    refreshActiveJob(jobId).catch(() => {})
+  }, 2000)
+}
+
+async function startFullMigration() {
+  if (!runOptions.sourceId) {
+    ElMessage.warning('请选择迁移任务')
+    return
+  }
+  if (runOptions.dryRun) {
+    ElMessage.info('全量迁移请取消「仅预检」；预检请用「预检一批」')
+    return
+  }
+
+  running.value = true
+  runResult.value = null
+  try {
+    const res = await createBlobMigrationJobApi({
+      sourceId: runOptions.sourceId,
+      batchSize: runOptions.batchSize,
+      dryRun: false,
+      skipExisting: runOptions.skipExisting,
+      runAll: true,
+      warmThumbsAfter: runOptions.warmThumbsAfter,
+    })
+    activeJob.value = res.data
+    ElMessage.success(res.message || '全量迁移任务已创建')
+    startJobPolling(res.data.id)
+    await loadJobHistory()
+  } catch (err) {
+    running.value = false
+    ElMessage.error(err.message || '创建任务失败')
+  }
+}
+
+async function cancelActiveJob() {
+  if (!activeJob.value?.id) return
+  try {
+    const res = await cancelBlobMigrationJobApi(activeJob.value.id)
+    activeJob.value = res.data
+    ElMessage.success('已请求取消')
+  } catch (err) {
+    ElMessage.error(err.message || '取消失败')
+  }
+}
+
+async function retryFailedJob(job) {
+  if (!job?.id) return
+  try {
+    const res = await retryBlobMigrationJobApi({
+      parentJobId: job.id,
+      batchSize: runOptions.batchSize,
+      warmThumbsAfter: runOptions.warmThumbsAfter,
+    })
+    activeJob.value = res.data
+    running.value = true
+    ElMessage.success('重试任务已创建')
+    startJobPolling(res.data.id)
+    await loadJobHistory()
+  } catch (err) {
+    ElMessage.error(err.message || '创建重试任务失败')
+  }
+}
+
+function downloadJobErrors(job) {
+  if (!job?.id) return
+  const auth = useAuthStore()
+  const url = exportBlobMigrationJobErrorsUrl(job.id)
+  fetch(url, { headers: { Authorization: `Bearer ${auth.accessToken}` } })
+    .then((res) => {
+      if (!res.ok) throw new Error('导出失败')
+      return res.blob()
+    })
+    .then((blob) => {
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = `blob_migration_job_${job.id}_errors.csv`
+      link.click()
+      URL.revokeObjectURL(link.href)
+    })
+    .catch((err) => ElMessage.error(err.message || '导出失败'))
+}
+
+const jobInProgress = computed(
+  () => activeJob.value && ['pending', 'running'].includes(activeJob.value.status),
+)
+
 async function executeMigration() {
   if (!runOptions.sourceId) {
     ElMessage.warning('请选择迁移任务')
@@ -359,7 +508,11 @@ async function submitCreateCategory() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadConnections(), loadDatabases(), loadCategories(), loadSources()])
+  await Promise.all([loadConnections(), loadDatabases(), loadCategories(), loadSources(), loadJobHistory()])
+})
+
+onUnmounted(() => {
+  stopJobPolling()
 })
 </script>
 
@@ -642,12 +795,49 @@ onMounted(async () => {
             <el-checkbox v-model="runOptions.skipExisting">跳过已迁移</el-checkbox>
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" :loading="running" @click="executeMigration">
-              <el-icon><Refresh /></el-icon>
-              {{ runOptions.dryRun ? '预检' : '开始迁移' }}
+            <el-checkbox v-model="runOptions.warmThumbsAfter">完成后预热缩略图</el-checkbox>
+          </el-form-item>
+          <el-form-item>
+            <el-button :loading="running && !jobInProgress" @click="executeMigration">
+              预检一批
             </el-button>
+            <el-button type="primary" :loading="jobInProgress" :disabled="runOptions.dryRun" @click="startFullMigration">
+              <el-icon><Refresh /></el-icon>
+              开始全量迁移
+            </el-button>
+            <el-button v-if="jobInProgress" type="warning" plain @click="cancelActiveJob">取消</el-button>
           </el-form-item>
         </el-form>
+
+        <div v-if="activeJob" class="job-progress-panel">
+          <div class="job-progress-head">
+            <span>任务 #{{ activeJob.id }} · {{ activeJob.status }}</span>
+            <span v-if="activeJob.eta_seconds != null" class="job-eta">剩余 {{ formatEta(activeJob.eta_seconds) }}</span>
+          </div>
+          <el-progress
+            :percentage="Math.min(100, activeJob.percent || 0)"
+            :status="activeJob.status === 'failed' ? 'exception' : activeJob.status === 'completed' ? 'success' : undefined"
+            :stroke-width="16"
+            striped
+            :striped-flow="jobInProgress"
+          />
+          <p class="job-stats">
+            已处理 {{ activeJob.processed }} / {{ activeJob.total_estimate }}
+            · 成功 {{ activeJob.succeeded }}
+            · 跳过 {{ activeJob.skipped }}
+            · 失败 {{ activeJob.failed }}
+          </p>
+          <p v-if="activeJob.message" class="job-message">{{ activeJob.message }}</p>
+          <div v-if="activeJob.recent_errors?.length" class="job-errors">
+            <div v-for="(err, idx) in activeJob.recent_errors" :key="idx" class="job-error-line">
+              {{ err.source_pk }}: {{ err.error }}
+            </div>
+          </div>
+          <div v-if="activeJob.failed > 0 && !jobInProgress" class="job-actions">
+            <el-button size="small" @click="retryFailedJob(activeJob)">重试失败项</el-button>
+            <el-button size="small" @click="downloadJobErrors(activeJob)">导出失败 CSV</el-button>
+          </div>
+        </div>
 
         <el-table
           v-if="runResult?.items?.length"
@@ -655,7 +845,7 @@ onMounted(async () => {
           size="small"
           border
           class="result-table"
-          max-height="320"
+          max-height="240"
         >
           <el-table-column prop="source_id" label="源 ID" width="100" />
           <el-table-column prop="filename" label="文件名" min-width="160" />
@@ -668,6 +858,28 @@ onMounted(async () => {
           </el-table-column>
           <el-table-column prop="image_info_id" label="image_info" width="100" />
           <el-table-column prop="error" label="说明" min-width="160" show-overflow-tooltip />
+        </el-table>
+
+        <h4 v-if="jobHistory.length" class="subsection-title">任务历史</h4>
+        <el-table v-if="jobHistory.length" :data="jobHistory" size="small" border max-height="280">
+          <el-table-column prop="id" label="ID" width="70" />
+          <el-table-column prop="status" label="状态" width="100" />
+          <el-table-column label="进度" min-width="160">
+            <template #default="{ row }">{{ row.processed }} / {{ row.total_estimate }} ({{ row.percent }}%)</template>
+          </el-table-column>
+          <el-table-column label="结果" min-width="180">
+            <template #default="{ row }">
+              成功 {{ row.succeeded }} · 跳过 {{ row.skipped }} · 失败 {{ row.failed }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="create_time" label="创建时间" min-width="160" />
+          <el-table-column label="操作" width="200">
+            <template #default="{ row }">
+              <el-button link type="primary" @click="activeJob = row">查看</el-button>
+              <el-button v-if="row.failed > 0" link type="primary" @click="retryFailedJob(row)">重试失败</el-button>
+              <el-button v-if="row.failed > 0" link @click="downloadJobErrors(row)">导出</el-button>
+            </template>
+          </el-table-column>
         </el-table>
       </section>
     </div>
@@ -741,6 +953,57 @@ onMounted(async () => {
 .discover-table,
 .result-table {
   margin-top: 12px;
+}
+
+.job-progress-panel {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-blank);
+}
+
+.job-progress-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.job-eta {
+  color: var(--el-text-color-secondary);
+  font-weight: normal;
+}
+
+.job-stats,
+.job-message {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+}
+
+.job-errors {
+  margin-top: 8px;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+
+.job-error-line {
+  padding: 2px 0;
+}
+
+.job-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.subsection-title {
+  margin: 20px 0 8px;
+  font-size: 14px;
 }
 
 .col-tag {

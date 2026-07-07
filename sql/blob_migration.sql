@@ -84,4 +84,47 @@ CREATE TABLE IF NOT EXISTS `blob_table_view` (
   KEY `idx_db_table`(`db_alias`, `source_table`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8 COLLATE = utf8_general_ci COMMENT = '远程 BLOB 表虚拟视图配置' ROW_FORMAT = COMPACT;
 
+CREATE TABLE IF NOT EXISTS `blob_migration_job` (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `source_id` int(10) UNSIGNED NOT NULL,
+  `status` varchar(20) NOT NULL DEFAULT 'pending',
+  `dry_run` tinyint(4) NOT NULL DEFAULT 0,
+  `skip_existing` tinyint(4) NOT NULL DEFAULT 1,
+  `run_all` tinyint(4) NOT NULL DEFAULT 1,
+  `retry_failed_only` tinyint(4) NOT NULL DEFAULT 0,
+  `parent_job_id` bigint(20) UNSIGNED NULL DEFAULT NULL,
+  `batch_size` int(10) UNSIGNED NOT NULL DEFAULT 50,
+  `warm_thumbs_after` tinyint(4) NOT NULL DEFAULT 0,
+  `cancel_requested` tinyint(4) NOT NULL DEFAULT 0,
+  `total_estimate` int(10) UNSIGNED NOT NULL DEFAULT 0,
+  `processed` int(10) UNSIGNED NOT NULL DEFAULT 0,
+  `succeeded` int(10) UNSIGNED NOT NULL DEFAULT 0,
+  `failed` int(10) UNSIGNED NOT NULL DEFAULT 0,
+  `skipped` int(10) UNSIGNED NOT NULL DEFAULT 0,
+  `last_pk_cursor` varchar(128) NOT NULL DEFAULT '',
+  `message` varchar(500) NOT NULL DEFAULT '',
+  `created_by` varchar(100) NOT NULL DEFAULT '',
+  `started_at` datetime NULL DEFAULT NULL,
+  `finished_at` datetime NULL DEFAULT NULL,
+  `updated_at` datetime NULL DEFAULT NULL,
+  `create_time` datetime NULL DEFAULT NULL,
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `idx_source_status`(`source_id`, `status`) USING BTREE,
+  KEY `idx_status`(`status`) USING BTREE,
+  KEY `idx_create_time`(`create_time`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8 COLLATE = utf8_general_ci COMMENT = 'BLOB 迁移后台任务' ROW_FORMAT = COMPACT;
+
+CREATE TABLE IF NOT EXISTS `blob_migration_job_error` (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `job_id` bigint(20) UNSIGNED NOT NULL,
+  `source_pk` varchar(128) NOT NULL DEFAULT '',
+  `filename` varchar(255) NOT NULL DEFAULT '',
+  `error_message` varchar(1000) NOT NULL DEFAULT '',
+  `retried` tinyint(4) NOT NULL DEFAULT 0,
+  `create_time` datetime NULL DEFAULT NULL,
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `idx_job`(`job_id`) USING BTREE,
+  KEY `idx_job_retried`(`job_id`, `retried`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8 COLLATE = utf8_general_ci COMMENT = 'BLOB 迁移失败明细' ROW_FORMAT = COMPACT;
+
 SET FOREIGN_KEY_CHECKS = 1;

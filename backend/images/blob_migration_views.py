@@ -1,10 +1,19 @@
 """Admin API for BLOB → upload/ migration."""
 from __future__ import annotations
 
+from django.http import HttpResponse
 from drf_spectacular.utils import extend_schema
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
+from images.blob_migration_job_service import (
+    JobServiceError,
+    cancel_migration_job,
+    create_migration_job,
+    export_job_errors_csv,
+    list_migration_jobs,
+    serialize_migration_job,
+)
 from images.blob_migration_service import (
     BlobMigrationError,
     count_migration_candidates,
@@ -12,9 +21,11 @@ from images.blob_migration_service import (
     discover_blob_tables,
     run_blob_migration,
 )
-from images.models import BlobMigrationSource
+from images.models import BlobMigrationJob, BlobMigrationSource
 from images.serializers import (
     BlobMigrationDiscoverSerializer,
+    BlobMigrationJobCreateSerializer,
+    BlobMigrationJobRetrySerializer,
     BlobMigrationRunSerializer,
     BlobMigrationSourceSerializer,
 )
@@ -174,6 +185,134 @@ class BlobMigrationRunView(APIView):
                 f"成功 {result.succeeded}，跳过 {result.skipped}，失败 {result.failed}"
             ),
         )
+
+
+@extend_schema(tags=["blob-migration"], request=BlobMigrationJobCreateSerializer)
+class BlobMigrationJobListCreateView(APIView):
+    """GET/POST /api/images/blob-migration/jobs/ — list or create background migration jobs."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request):
+        source_id = request.query_params.get("source_id")
+        parsed_source = None
+        if source_id not in (None, ""):
+            try:
+                parsed_source = int(source_id)
+            except (TypeError, ValueError):
+                return error_response("source_id 无效", code=4001, status=400)
+        jobs = list_migration_jobs(source_id=parsed_source, limit=50)
+        return success_response([serialize_migration_job(job) for job in jobs])
+
+    def post(self, request):
+        serializer = BlobMigrationJobCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(_format_errors(serializer.errors), code=4001, status=400)
+        data = serializer.validated_data
+        try:
+            job = create_migration_job(
+                source_id=data["source_id"],
+                created_by=request.user.username,
+                batch_size=data.get("batch_size", 50),
+                dry_run=data.get("dry_run", False),
+                skip_existing=data.get("skip_existing", True),
+                run_all=data.get("run_all", True),
+                warm_thumbs_after=data.get("warm_thumbs_after", False),
+            )
+        except JobServiceError as exc:
+            return error_response(str(exc), code=4001, status=400)
+
+        write_operate_log(
+            request,
+            "blob_migration_job",
+            detail=f"job_id={job.id} source_id={job.source_id} run_all={job.run_all}",
+        )
+        return success_response(
+            serialize_migration_job(job),
+            message="迁移任务已创建，scheduler 将自动执行",
+            status=201,
+        )
+
+
+@extend_schema(tags=["blob-migration"])
+class BlobMigrationJobDetailView(APIView):
+    """GET /api/images/blob-migration/jobs/{id}/ — job progress."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request, pk: int):
+        try:
+            job = BlobMigrationJob.objects.get(pk=pk)
+        except BlobMigrationJob.DoesNotExist:
+            return error_response("任务不存在", code=4044, status=404)
+        return success_response(serialize_migration_job(job))
+
+
+@extend_schema(tags=["blob-migration"])
+class BlobMigrationJobCancelView(APIView):
+    """POST /api/images/blob-migration/jobs/{id}/cancel/"""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def post(self, request, pk: int):
+        try:
+            job = cancel_migration_job(pk)
+        except JobServiceError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        write_operate_log(request, "blob_migration_job_cancel", detail=f"job_id={job.id}")
+        return success_response(serialize_migration_job(job), message="已请求取消")
+
+
+@extend_schema(tags=["blob-migration"], request=BlobMigrationJobRetrySerializer)
+class BlobMigrationJobRetryView(APIView):
+    """POST /api/images/blob-migration/jobs/retry/ — retry failed rows from a prior job."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def post(self, request):
+        serializer = BlobMigrationJobRetrySerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(_format_errors(serializer.errors), code=4001, status=400)
+        data = serializer.validated_data
+        parent = BlobMigrationJob.objects.filter(pk=data["parent_job_id"]).first()
+        if parent is None:
+            return error_response("来源任务不存在", code=4044, status=404)
+        try:
+            job = create_migration_job(
+                source_id=parent.source_id,
+                created_by=request.user.username,
+                batch_size=data.get("batch_size", 50),
+                dry_run=data.get("dry_run", False),
+                skip_existing=False,
+                run_all=True,
+                warm_thumbs_after=data.get("warm_thumbs_after", False),
+                retry_failed_only=True,
+                parent_job_id=parent.id,
+            )
+        except JobServiceError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        write_operate_log(
+            request,
+            "blob_migration_job_retry",
+            detail=f"job_id={job.id} parent={parent.id}",
+        )
+        return success_response(serialize_migration_job(job), message="重试任务已创建", status=201)
+
+
+@extend_schema(tags=["blob-migration"])
+class BlobMigrationJobErrorsExportView(APIView):
+    """GET /api/images/blob-migration/jobs/{id}/errors/export/ — CSV download."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request, pk: int):
+        try:
+            csv_text = export_job_errors_csv(pk)
+        except JobServiceError as exc:
+            return error_response(str(exc), code=4044, status=404)
+        response = HttpResponse(csv_text, content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="blob_migration_job_{pk}_errors.csv"'
+        return response
 
 
 def _format_errors(errors: dict) -> str:

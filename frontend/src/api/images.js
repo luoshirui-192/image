@@ -116,6 +116,51 @@ export function runBlobMigrationApi({ sourceId, batchSize = 50, dryRun = false, 
   }, { timeout: 600000, skipGlobalError: true })
 }
 
+export function listBlobMigrationJobsApi({ sourceId } = {}) {
+  const params = sourceId != null ? { source_id: sourceId } : undefined
+  return request.get('/images/blob-migration/jobs/', { params })
+}
+
+export function createBlobMigrationJobApi({
+  sourceId,
+  batchSize = 50,
+  dryRun = false,
+  skipExisting = true,
+  runAll = true,
+  warmThumbsAfter = false,
+}) {
+  return request.post('/images/blob-migration/jobs/', {
+    source_id: sourceId,
+    batch_size: batchSize,
+    dry_run: dryRun,
+    skip_existing: skipExisting,
+    run_all: runAll,
+    warm_thumbs_after: warmThumbsAfter,
+  })
+}
+
+export function getBlobMigrationJobApi(jobId) {
+  return request.get(`/images/blob-migration/jobs/${jobId}/`)
+}
+
+export function cancelBlobMigrationJobApi(jobId) {
+  return request.post(`/images/blob-migration/jobs/${jobId}/cancel/`)
+}
+
+export function retryBlobMigrationJobApi({ parentJobId, batchSize = 50, dryRun = false, warmThumbsAfter = false }) {
+  return request.post('/images/blob-migration/jobs/retry/', {
+    parent_job_id: parentJobId,
+    batch_size: batchSize,
+    dry_run: dryRun,
+    warm_thumbs_after: warmThumbsAfter,
+  })
+}
+
+export function exportBlobMigrationJobErrorsUrl(jobId) {
+  const base = import.meta.env.VITE_API_BASE_URL || '/api'
+  return `${base}/images/blob-migration/jobs/${jobId}/errors/export/`
+}
+
 export function listExternalDbConnectionsApi() {
   return request.get('/images/blob-migration/connections/')
 }

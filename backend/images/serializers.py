@@ -114,6 +114,22 @@ class BlobMigrationRunSerializer(serializers.Serializer):
     skip_existing = serializers.BooleanField(required=False, default=True)
 
 
+class BlobMigrationJobCreateSerializer(serializers.Serializer):
+    source_id = serializers.IntegerField(min_value=1)
+    batch_size = serializers.IntegerField(required=False, default=50, min_value=1, max_value=500)
+    dry_run = serializers.BooleanField(required=False, default=False)
+    skip_existing = serializers.BooleanField(required=False, default=True)
+    run_all = serializers.BooleanField(required=False, default=True)
+    warm_thumbs_after = serializers.BooleanField(required=False, default=False)
+
+
+class BlobMigrationJobRetrySerializer(serializers.Serializer):
+    parent_job_id = serializers.IntegerField(min_value=1)
+    batch_size = serializers.IntegerField(required=False, default=50, min_value=1, max_value=500)
+    dry_run = serializers.BooleanField(required=False, default=False)
+    warm_thumbs_after = serializers.BooleanField(required=False, default=False)
+
+
 class ExternalDbConnectionSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True)
     name = serializers.CharField(max_length=100, trim_whitespace=True)

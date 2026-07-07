@@ -151,3 +151,60 @@ class ExternalDbConnection(models.Model):
 
     def __str__(self) -> str:
         return self.name or f"{self.username}@{self.host}/{self.db_name}"
+
+
+class BlobMigrationJob(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_CANCELLED = "cancelled"
+
+    source_id = models.PositiveIntegerField()
+    status = models.CharField(max_length=20, default=STATUS_PENDING)
+    dry_run = models.SmallIntegerField(default=0)
+    skip_existing = models.SmallIntegerField(default=1)
+    run_all = models.SmallIntegerField(default=1)
+    retry_failed_only = models.SmallIntegerField(default=0)
+    parent_job_id = models.PositiveBigIntegerField(null=True, blank=True)
+    batch_size = models.PositiveIntegerField(default=50)
+    warm_thumbs_after = models.SmallIntegerField(default=0)
+    cancel_requested = models.SmallIntegerField(default=0)
+    total_estimate = models.PositiveIntegerField(default=0)
+    processed = models.PositiveIntegerField(default=0)
+    succeeded = models.PositiveIntegerField(default=0)
+    failed = models.PositiveIntegerField(default=0)
+    skipped = models.PositiveIntegerField(default=0)
+    last_pk_cursor = models.CharField(max_length=128, default="")
+    message = models.CharField(max_length=500, default="")
+    created_by = models.CharField(max_length=100, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+    create_time = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = "blob_migration_job"
+        verbose_name = "BLOB 迁移任务"
+        verbose_name_plural = "BLOB 迁移任务"
+        ordering = ["-id"]
+
+    def __str__(self) -> str:
+        return f"job#{self.id} source={self.source_id} {self.status}"
+
+
+class BlobMigrationJobError(models.Model):
+    job_id = models.PositiveBigIntegerField()
+    source_pk = models.CharField(max_length=128, default="")
+    filename = models.CharField(max_length=255, default="")
+    error_message = models.CharField(max_length=1000, default="")
+    retried = models.SmallIntegerField(default=0)
+    create_time = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = "blob_migration_job_error"
+        verbose_name = "BLOB 迁移失败记录"
+        verbose_name_plural = "BLOB 迁移失败记录"
+        ordering = ["-id"]

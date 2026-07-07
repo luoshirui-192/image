@@ -11,8 +11,9 @@ from django.test import TestCase, override_settings
 from PIL import Image
 from rest_framework.test import APIClient
 
+from images.blob_migration_job_service import create_migration_job, execute_migration_job, serialize_migration_job
 from images.blob_migration_service import count_migration_candidates, run_blob_migration
-from images.models import BlobMigrationSource, ImageInfo, ImageSourceMap
+from images.models import BlobMigrationJob, BlobMigrationSource, ImageInfo, ImageSourceMap
 from users.models import SysUser
 
 SQLITE_TABLES = """
@@ -86,6 +87,40 @@ CREATE TABLE IF NOT EXISTS legacy_photos (
     title VARCHAR(100) NOT NULL DEFAULT '',
     photo BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS blob_migration_job (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    dry_run SMALLINT NOT NULL DEFAULT 0,
+    skip_existing SMALLINT NOT NULL DEFAULT 1,
+    run_all SMALLINT NOT NULL DEFAULT 1,
+    retry_failed_only SMALLINT NOT NULL DEFAULT 0,
+    parent_job_id INTEGER NULL,
+    batch_size INTEGER NOT NULL DEFAULT 50,
+    warm_thumbs_after SMALLINT NOT NULL DEFAULT 0,
+    cancel_requested SMALLINT NOT NULL DEFAULT 0,
+    total_estimate INTEGER NOT NULL DEFAULT 0,
+    processed INTEGER NOT NULL DEFAULT 0,
+    succeeded INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    last_pk_cursor VARCHAR(128) NOT NULL DEFAULT '',
+    message VARCHAR(500) NOT NULL DEFAULT '',
+    created_by VARCHAR(100) NOT NULL DEFAULT '',
+    started_at DATETIME NULL,
+    finished_at DATETIME NULL,
+    updated_at DATETIME NULL,
+    create_time DATETIME NULL
+);
+CREATE TABLE IF NOT EXISTS blob_migration_job_error (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    source_pk VARCHAR(128) NOT NULL DEFAULT '',
+    filename VARCHAR(255) NOT NULL DEFAULT '',
+    error_message VARCHAR(1000) NOT NULL DEFAULT '',
+    retried SMALLINT NOT NULL DEFAULT 0,
+    create_time DATETIME NULL
+);
 """
 
 
@@ -120,6 +155,8 @@ class BlobMigrationTestCase(TestCase):
         )
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM legacy_photos")
+            cursor.execute("DELETE FROM blob_migration_job_error")
+            cursor.execute("DELETE FROM blob_migration_job")
             cursor.execute("DELETE FROM image_source_map")
             cursor.execute("DELETE FROM blob_migration_source")
             cursor.execute("DELETE FROM image_info")
@@ -184,3 +221,38 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.json()["data"]["succeeded"], 1)
             self.assertEqual(ImageInfo.objects.count(), 0)
+
+    @override_settings(UPLOAD_ROOT=None, BLOB_MIGRATION_UPLOAD_WORKERS=1)
+    def test_migration_job_runs_to_completion(self):
+        upload_root = str(self.upload_root)
+        with override_settings(UPLOAD_ROOT=upload_root):
+            job = create_migration_job(
+                source_id=self.source.id,
+                created_by="blob_admin",
+                batch_size=10,
+                run_all=True,
+            )
+            finished = execute_migration_job(job.id)
+            self.assertEqual(finished.status, BlobMigrationJob.STATUS_COMPLETED)
+            self.assertEqual(finished.succeeded, 1)
+            payload = serialize_migration_job(finished)
+            self.assertEqual(payload["percent"], 100.0)
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_api_create_migration_job(self):
+        upload_root = str(self.upload_root)
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post(
+            "/api/images/blob-migration/jobs/",
+            {"source_id": self.source.id, "batch_size": 10, "run_all": True},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["data"]["status"], "pending")
+
+        with override_settings(UPLOAD_ROOT=upload_root, BLOB_MIGRATION_UPLOAD_WORKERS=1):
+            job_id = res.json()["data"]["id"]
+            execute_migration_job(job_id)
+            detail = self.client.get(f"/api/images/blob-migration/jobs/{job_id}/")
+            self.assertEqual(detail.status_code, 200)
+            self.assertEqual(detail.json()["data"]["status"], "completed")
