@@ -54,6 +54,23 @@ class MinioImageStorageTests(SimpleTestCase):
         rel = build_relative_path(category_id=3, suffix="jpg")
         self.assertEqual(storage._object_key(rel), f"data/image_db/{rel}")
 
+    @mock.patch("minio.Minio")
+    def test_check_writable_ok_when_probe_delete_denied(self, minio_cls):
+        client = mock.Mock()
+        minio_cls.return_value = client
+        storage = MinioImageStorage(
+            endpoint="http://192.168.9.9:9000",
+            access_key="key",
+            secret_key="secret",
+            bucket="biox",
+            prefix="data/image_db",
+        )
+        client.remove_object.side_effect = RuntimeError("Access Denied")
+        ok, detail = storage.check_writable()
+        self.assertTrue(ok)
+        self.assertIn("biox", detail)
+        client.put_object.assert_called_once()
+
 
 class GetImageStorageFactoryTests(SimpleTestCase):
     def tearDown(self):

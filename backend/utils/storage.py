@@ -232,6 +232,7 @@ class MinioImageStorage:
     def check_writable(self) -> tuple[bool, str]:
         probe_key = self._probe_key()
         payload = b"ok"
+        detail = f"minio://{self.bucket}/{self.prefix or ''}"
         try:
             self.client.put_object(
                 self.bucket,
@@ -239,11 +240,19 @@ class MinioImageStorage:
                 BytesIO(payload),
                 length=len(payload),
             )
-            self.client.remove_object(self.bucket, probe_key)
-            detail = f"minio://{self.bucket}/{self.prefix or ''}"
-            return True, detail
         except Exception as exc:
             return False, str(exc)
+        try:
+            self.client.remove_object(self.bucket, probe_key)
+        except Exception as exc:
+            # PutObject succeeded — storage is writable for uploads even if probe cleanup is denied.
+            logger.warning(
+                "minio probe write ok but cleanup failed bucket=%s key=%s: %s",
+                self.bucket,
+                probe_key,
+                exc,
+            )
+        return True, detail
 
     def estimate_disk_bytes(self) -> int | None:
         return None
@@ -283,6 +292,7 @@ def _build_storage_key() -> tuple:
             backend,
             settings.MINIO_ENDPOINT,
             settings.MINIO_ACCESS_KEY,
+            settings.MINIO_SECRET_KEY,
             settings.MINIO_BUCKET,
             settings.MINIO_PREFIX,
             settings.MINIO_SECURE,
