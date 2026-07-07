@@ -158,36 +158,30 @@ def list_migration_jobs(*, source_id: int | None = None, limit: int = 50) -> lis
     return list(qs[: max(1, min(limit, 200))])
 
 
-def _migration_progress_done(job: BlobMigrationJob) -> int:
-    """Rows actually migrated or failed; skipped scans do not count toward progress."""
+def _job_progress_count(job: BlobMigrationJob) -> int:
+    """Rows actually handled (success + fail); skipped rows do not count toward progress."""
     return int(job.succeeded or 0) + int(job.failed or 0)
 
 
 def _compute_eta_seconds(job: BlobMigrationJob) -> int | None:
-    progress_done = _migration_progress_done(job)
-    if job.status != BlobMigrationJob.STATUS_RUNNING or not job.started_at or progress_done <= 0:
+    progress_count = _job_progress_count(job)
+    if job.status != BlobMigrationJob.STATUS_RUNNING or not job.started_at or progress_count <= 0:
         return None
     elapsed = (timezone.now() - job.started_at).total_seconds()
     if elapsed <= 0:
         return None
-    rate = progress_done / elapsed
+    rate = progress_count / elapsed
     if rate <= 0:
         return None
-    remaining = max(0, int(job.total_estimate or 0) - progress_done)
+    total = max(int(job.total_estimate or 0), progress_count)
+    remaining = max(0, total - progress_count)
     return int(remaining / rate) if remaining else 0
 
 
 def serialize_migration_job(job: BlobMigrationJob, *, include_recent_errors: bool = True) -> dict[str, Any]:
-    progress_done = _migration_progress_done(job)
-    total = int(job.total_estimate or 0)
-    if total <= 0 and progress_done > 0:
-        total = progress_done
-    if total > 0:
-        percent = min(100.0, round(100.0 * progress_done / total, 2))
-    elif job.status == BlobMigrationJob.STATUS_COMPLETED:
-        percent = 100.0
-    else:
-        percent = 0.0
+    progress_count = _job_progress_count(job)
+    total = max(int(job.total_estimate or 0), progress_count)
+    percent = round(100.0 * progress_count / total, 2) if total else 0.0
     payload: dict[str, Any] = {
         "id": job.id,
         "source_id": job.source_id,
@@ -201,7 +195,7 @@ def serialize_migration_job(job: BlobMigrationJob, *, include_recent_errors: boo
         "warm_thumbs_after": bool(job.warm_thumbs_after),
         "cancel_requested": bool(job.cancel_requested),
         "total_estimate": job.total_estimate,
-        "progress_done": progress_done,
+        "progress_count": progress_count,
         "processed": job.processed,
         "succeeded": job.succeeded,
         "failed": job.failed,

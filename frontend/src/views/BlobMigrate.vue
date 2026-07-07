@@ -315,22 +315,22 @@ async function removeSource(id) {
   }
 }
 
-async function loadJobHistory() {
+async function loadJobHistoryList() {
   try {
     const params = runOptions.sourceId ? { sourceId: runOptions.sourceId } : {}
     const res = await listBlobMigrationJobsApi(params)
     jobHistory.value = res.data || []
-    const active = jobHistory.value.find((j) => j.status === 'pending' || j.status === 'running')
-    if (!active) {
-      return
-    }
-    if (pollTimer.value && pollingJobId.value === active.id) {
-      return
-    }
-    activeJob.value = active
-    startJobPolling(active.id)
   } catch {
     jobHistory.value = []
+  }
+}
+
+async function loadJobHistory() {
+  await loadJobHistoryList()
+  const active = jobHistory.value.find((j) => j.status === 'pending' || j.status === 'running')
+  if (active && pollingJobId.value !== active.id) {
+    activeJob.value = active
+    startJobPolling(active.id)
   }
 }
 
@@ -340,12 +340,6 @@ function stopJobPolling() {
     pollTimer.value = null
   }
   pollingJobId.value = null
-}
-
-function migrationProgressDone(job) {
-  if (!job) return 0
-  if (job.progress_done != null) return job.progress_done
-  return (job.succeeded || 0) + (job.failed || 0)
 }
 
 function formatEta(seconds) {
@@ -368,37 +362,46 @@ function jobStatusLabel(status) {
   return labels[status] || status
 }
 
+function jobProgressCount(job) {
+  if (!job) return 0
+  return job.progress_count ?? (job.succeeded || 0) + (job.failed || 0)
+}
+
+function formatJobProgress(job) {
+  const done = jobProgressCount(job)
+  const total = job?.total_estimate || 0
+  const percent = job?.percent ?? (total ? Math.round((100 * done) / total) : 0)
+  return `${done} / ${total} (${percent}%)`
+}
+
 async function refreshActiveJob(jobId) {
   try {
     const res = await getBlobMigrationJobApi(jobId)
-    if (!res.data) return
-    activeJob.value = { ...activeJob.value, ...res.data }
-    if (['completed', 'failed', 'cancelled'].includes(res.data.status)) {
+    activeJob.value = res.data
+    if (['completed', 'failed', 'cancelled'].includes(res.data?.status)) {
       stopJobPolling()
       running.value = false
-      await Promise.all([loadSources(), loadJobHistory()])
-      if (res.data.status === 'completed') {
+      await Promise.all([loadSources(), loadJobHistoryList()])
+      if (res.data?.status === 'completed') {
         ElMessage.success(res.message || '迁移任务已完成')
-      } else if (res.data.status === 'cancelled') {
+      } else if (res.data?.status === 'cancelled') {
         ElMessage.warning('迁移任务已取消')
-      } else if (res.data.status === 'failed') {
-        ElMessage.error(res.data.message || '迁移任务失败')
+      } else if (res.data?.status === 'failed') {
+        ElMessage.error(res.data?.message || '迁移任务失败')
       }
     }
   } catch {
-    // keep last known job snapshot while polling retries
+    // keep last known job state on transient poll errors
   }
 }
 
 function startJobPolling(jobId) {
-  if (pollTimer.value && pollingJobId.value === jobId) {
-    return
-  }
+  if (pollingJobId.value === jobId && pollTimer.value) return
   stopJobPolling()
   pollingJobId.value = jobId
-  refreshActiveJob(jobId)
+  refreshActiveJob(jobId).catch(() => {})
   pollTimer.value = setInterval(() => {
-    refreshActiveJob(jobId)
+    refreshActiveJob(jobId).catch(() => {})
   }, 2000)
 }
 
@@ -900,18 +903,18 @@ onUnmounted(() => {
 
         <div v-if="activeJob" class="job-progress-panel">
           <div class="job-progress-head">
-            <span>任务 #{{ activeJob.id }} · {{ jobStatusLabel(activeJob.status) }}</span>
+            <span>{{ jobStatusLabel(activeJob.status) }}</span>
             <span v-if="activeJob.eta_seconds != null" class="job-eta">剩余 {{ formatEta(activeJob.eta_seconds) }}</span>
           </div>
           <el-progress
-            :percentage="Math.min(100, activeJob.percent || 0)"
+            :percentage="Math.min(100, Math.round(activeJob.percent || 0))"
             :status="activeJob.status === 'failed' ? 'exception' : activeJob.status === 'completed' ? 'success' : undefined"
             :stroke-width="16"
             striped
+            :striped-flow="jobInProgress && activeJob.status === 'running'"
           />
           <p class="job-stats">
-            已迁移 {{ migrationProgressDone(activeJob) }} / {{ activeJob.total_estimate }}
-            · 扫描 {{ activeJob.processed }}
+            已迁移 {{ jobProgressCount(activeJob) }} / {{ activeJob.total_estimate }}
             · 成功 {{ activeJob.succeeded }}
             · 跳过 {{ activeJob.skipped }}
             · 失败 {{ activeJob.failed }}
@@ -962,14 +965,11 @@ onUnmounted(() => {
           </el-button>
         </div>
         <el-table v-if="jobHistory.length" :data="jobHistory" size="small" border max-height="280">
-          <el-table-column prop="id" label="ID" width="70" />
           <el-table-column prop="status" label="状态" width="100">
             <template #default="{ row }">{{ jobStatusLabel(row.status) }}</template>
           </el-table-column>
           <el-table-column label="进度" min-width="160">
-            <template #default="{ row }">
-              {{ migrationProgressDone(row) }} / {{ row.total_estimate }} ({{ row.percent }}%)
-            </template>
+            <template #default="{ row }">{{ formatJobProgress(row) }}</template>
           </el-table-column>
           <el-table-column label="结果" min-width="180">
             <template #default="{ row }">
