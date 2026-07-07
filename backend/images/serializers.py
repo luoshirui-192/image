@@ -130,6 +130,10 @@ class BlobMigrationJobRetrySerializer(serializers.Serializer):
     warm_thumbs_after = serializers.BooleanField(required=False, default=False)
 
 
+class BlobMigrationJobClearSerializer(serializers.Serializer):
+    source_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+
+
 class ExternalDbConnectionSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True)
     name = serializers.CharField(max_length=100, trim_whitespace=True)

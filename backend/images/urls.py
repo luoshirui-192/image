@@ -12,6 +12,7 @@ from images.views import CategoryDetailView, CategoryListCreateView, ImageUpload
 from images.blob_migration_views import (
     BlobMigrationDiscoverView,
     BlobMigrationJobCancelView,
+    BlobMigrationJobClearView,
     BlobMigrationJobDetailView,
     BlobMigrationJobErrorsExportView,
     BlobMigrationJobListCreateView,
@@ -47,6 +48,7 @@ urlpatterns = [
     path("blob-migration/run/", BlobMigrationRunView.as_view(), name="blob-migration-run"),
     path("blob-migration/jobs/", BlobMigrationJobListCreateView.as_view(), name="blob-migration-jobs"),
     path("blob-migration/jobs/retry/", BlobMigrationJobRetryView.as_view(), name="blob-migration-jobs-retry"),
+    path("blob-migration/jobs/clear/", BlobMigrationJobClearView.as_view(), name="blob-migration-jobs-clear"),
     path("blob-migration/jobs/<int:pk>/", BlobMigrationJobDetailView.as_view(), name="blob-migration-job-detail"),
     path("blob-migration/jobs/<int:pk>/cancel/", BlobMigrationJobCancelView.as_view(), name="blob-migration-job-cancel"),
     path(

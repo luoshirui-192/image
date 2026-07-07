@@ -147,6 +147,14 @@ export function deleteBlobMigrationJobApi(jobId) {
   return request.delete(`/images/blob-migration/jobs/${jobId}/`)
 }
 
+export function clearBlobMigrationJobHistoryApi({ sourceId } = {}) {
+  const payload = {}
+  if (sourceId != null) {
+    payload.source_id = sourceId
+  }
+  return request.post('/images/blob-migration/jobs/clear/', payload)
+}
+
 export function cancelBlobMigrationJobApi(jobId) {
   return request.post(`/images/blob-migration/jobs/${jobId}/cancel/`)
 }

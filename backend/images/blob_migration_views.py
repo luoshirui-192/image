@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from images.blob_migration_job_service import (
     JobServiceError,
     cancel_migration_job,
+    clear_migration_job_history,
     create_migration_job,
     delete_migration_job,
     export_job_errors_csv,
@@ -27,6 +28,7 @@ from images.models import BlobMigrationJob, BlobMigrationSource
 from images.serializers import (
     BlobMigrationDiscoverSerializer,
     BlobMigrationJobCreateSerializer,
+    BlobMigrationJobClearSerializer,
     BlobMigrationJobRetrySerializer,
     BlobMigrationRunSerializer,
     BlobMigrationSourceSerializer,
@@ -257,6 +259,26 @@ class BlobMigrationJobDetailView(APIView):
             return error_response(str(exc), code=4001, status=400)
         write_operate_log(request, "blob_migration_job_delete", detail=f"job_id={pk}")
         return success_response(None, message="任务记录已删除")
+
+
+@extend_schema(tags=["blob-migration"], request=BlobMigrationJobClearSerializer)
+class BlobMigrationJobClearView(APIView):
+    """POST /api/images/blob-migration/jobs/clear/ — delete finished job history."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def post(self, request):
+        serializer = BlobMigrationJobClearSerializer(data=request.data or {})
+        if not serializer.is_valid():
+            return error_response(_format_errors(serializer.errors), code=4001, status=400)
+        source_id = serializer.validated_data.get("source_id")
+        deleted = clear_migration_job_history(source_id=source_id)
+        scope = f"source_id={source_id}" if source_id else "all"
+        write_operate_log(request, "blob_migration_job_clear", detail=f"{scope} deleted={deleted}")
+        return success_response(
+            {"deleted": deleted},
+            message=f"已清除 {deleted} 条历史记录" if deleted else "没有可清除的历史记录",
+        )
 
 
 @extend_schema(tags=["blob-migration"])

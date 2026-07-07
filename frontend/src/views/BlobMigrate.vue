@@ -11,6 +11,7 @@ import {
   createExternalDbConnectionApi,
   createBlobMigrationJobApi,
   cancelBlobMigrationJobApi,
+  clearBlobMigrationJobHistoryApi,
   deleteBlobMigrationJobApi,
   deleteBlobMigrationSourceApi,
   deleteExternalDbConnectionApi,
@@ -446,6 +447,29 @@ async function removeJob(job) {
   }
 }
 
+async function clearJobHistory() {
+  if (clearableJobCount.value <= 0) {
+    ElMessage.info('没有可清除的历史记录')
+    return
+  }
+  const scopeLabel = runOptions.sourceId ? '当前迁移任务' : '全部'
+  try {
+    await ElMessageBox.confirm(
+      `确定清除${scopeLabel}已结束的任务历史？进行中的任务会保留，不影响已迁移的图片。`,
+      '清除历史',
+      { type: 'warning' },
+    )
+    const res = await clearBlobMigrationJobHistoryApi({ sourceId: runOptions.sourceId })
+    if (activeJob.value && !['pending', 'running'].includes(activeJob.value.status)) {
+      activeJob.value = null
+    }
+    ElMessage.success(res.message || '已清除历史')
+    await loadJobHistory()
+  } catch {
+    // cancelled
+  }
+}
+
 async function retryFailedJob(job) {
   if (!job?.id) return
   try {
@@ -488,6 +512,10 @@ const jobInProgress = computed(
     activeJob.value &&
     ['pending', 'running'].includes(activeJob.value.status) &&
     !activeJob.value.cancel_requested,
+)
+
+const clearableJobCount = computed(
+  () => jobHistory.value.filter((j) => !['pending', 'running'].includes(j.status)).length,
 )
 
 async function executeMigration() {
@@ -900,7 +928,18 @@ onUnmounted(() => {
           <el-table-column prop="error" label="说明" min-width="160" show-overflow-tooltip />
         </el-table>
 
-        <h4 v-if="jobHistory.length" class="subsection-title">任务历史</h4>
+        <div v-if="jobHistory.length" class="job-history-head">
+          <h4 class="subsection-title">任务历史</h4>
+          <el-button
+            size="small"
+            type="danger"
+            plain
+            :disabled="clearableJobCount <= 0"
+            @click="clearJobHistory"
+          >
+            清除历史
+          </el-button>
+        </div>
         <el-table v-if="jobHistory.length" :data="jobHistory" size="small" border max-height="280">
           <el-table-column prop="id" label="ID" width="70" />
           <el-table-column prop="status" label="状态" width="100">
@@ -1054,6 +1093,17 @@ onUnmounted(() => {
 .subsection-title {
   margin: 20px 0 8px;
   font-size: 14px;
+}
+
+.job-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.job-history-head .subsection-title {
+  margin: 20px 0 8px;
 }
 
 .col-tag {
