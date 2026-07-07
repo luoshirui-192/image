@@ -38,9 +38,13 @@ CREATE TABLE IF NOT EXISTS blob_table_view (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name VARCHAR(100) NOT NULL DEFAULT '',
     db_alias VARCHAR(32) NOT NULL DEFAULT 'default',
+    database_name VARCHAR(64) NOT NULL DEFAULT '',
     source_table VARCHAR(64) NOT NULL,
+    source_object_type VARCHAR(20) NOT NULL DEFAULT 'table',
+    path_lookup_table VARCHAR(64) NOT NULL DEFAULT '',
     source_pk_column VARCHAR(64) NOT NULL DEFAULT 'id',
     blob_column VARCHAR(64) NOT NULL,
+    blob_columns TEXT NOT NULL DEFAULT '',
     display_columns TEXT NOT NULL DEFAULT '',
     where_clause VARCHAR(500) NOT NULL DEFAULT '',
     remark VARCHAR(500) NOT NULL DEFAULT '',
@@ -68,9 +72,10 @@ CREATE TABLE IF NOT EXISTS image_source_map (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_table VARCHAR(64) NOT NULL,
     source_id VARCHAR(64) NOT NULL,
+    source_column VARCHAR(64) NOT NULL DEFAULT '',
     image_info_id INTEGER NOT NULL,
     migrated_at DATETIME NOT NULL,
-    UNIQUE(source_table, source_id)
+    UNIQUE(source_table, source_id, source_column)
 );
 CREATE TABLE IF NOT EXISTS legacy_photos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

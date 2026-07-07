@@ -59,6 +59,9 @@ class BlobMigrationSource(models.Model):
     source_table = models.CharField(max_length=64)
     source_pk_column = models.CharField(max_length=64, default="id")
     blob_column = models.CharField(max_length=64)
+    blob_columns = models.TextField(default="")
+    source_object_type = models.CharField(max_length=20, default="table")
+    path_lookup_table = models.CharField(max_length=64, default="")
     name_column = models.CharField(max_length=64, default="")
     suffix_column = models.CharField(max_length=64, default="")
     category_id = models.PositiveIntegerField()
@@ -84,6 +87,7 @@ class BlobMigrationSource(models.Model):
 class ImageSourceMap(models.Model):
     source_table = models.CharField(max_length=64)
     source_id = models.CharField(max_length=64)
+    source_column = models.CharField(max_length=64, default="")
     image_info_id = models.PositiveBigIntegerField()
     migrated_at = models.DateTimeField()
 
@@ -94,7 +98,7 @@ class ImageSourceMap(models.Model):
         verbose_name_plural = "图像源映射"
         ordering = ["-id"]
         indexes = [
-            models.Index(fields=["source_table", "source_id"], name="uk_source"),
+            models.Index(fields=["source_table", "source_id", "source_column"], name="uk_source"),
             models.Index(fields=["image_info_id"], name="idx_image_info"),
         ]
 
@@ -105,9 +109,13 @@ class ImageSourceMap(models.Model):
 class BlobTableView(models.Model):
     name = models.CharField(max_length=100, default="")
     db_alias = models.CharField(max_length=32, default="default")
+    database_name = models.CharField(max_length=64, default="")
     source_table = models.CharField(max_length=64)
+    source_object_type = models.CharField(max_length=20, default="table")
+    path_lookup_table = models.CharField(max_length=64, default="")
     source_pk_column = models.CharField(max_length=64, default="id")
     blob_column = models.CharField(max_length=64)
+    blob_columns = models.TextField(default="")
     display_columns = models.TextField(default="")
     where_clause = models.CharField(max_length=500, default="")
     remark = models.CharField(max_length=500, default="")
@@ -118,8 +126,8 @@ class BlobTableView(models.Model):
     class Meta:
         managed = False
         db_table = "blob_table_view"
-        verbose_name = "BLOB 表视图"
-        verbose_name_plural = "BLOB 表视图"
+        verbose_name = "BLOB 浏览配置"
+        verbose_name_plural = "BLOB 浏览配置"
         ordering = ["-id"]
 
     def __str__(self) -> str:

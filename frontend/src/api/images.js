@@ -197,6 +197,32 @@ export function testSavedExternalDbConnectionApi(id, data = {}) {
   return request.post(`/images/blob-migration/connections/${id}/test/`, data, { skipGlobalError: true })
 }
 
+export function listBlobCatalogConnectionsApi() {
+  return request.get('/images/blob-catalog/connections/')
+}
+
+export function listBlobCatalogDatabasesApi({ connectionId, dbAlias } = {}) {
+  const params = {}
+  if (connectionId != null) params.connection_id = connectionId
+  if (dbAlias) params.db_alias = dbAlias
+  return request.get('/images/blob-catalog/databases/', { params })
+}
+
+export function listBlobCatalogObjectsApi({ connectionId, dbAlias, database, objectType } = {}) {
+  const params = { database }
+  if (connectionId != null) params.connection_id = connectionId
+  if (dbAlias) params.db_alias = dbAlias
+  if (objectType) params.object_type = objectType
+  return request.get('/images/blob-catalog/objects/', { params })
+}
+
+export function getBlobCatalogObjectApi(name, { connectionId, dbAlias, database } = {}) {
+  const params = { database }
+  if (connectionId != null) params.connection_id = connectionId
+  if (dbAlias) params.db_alias = dbAlias
+  return request.get(`/images/blob-catalog/objects/${encodeURIComponent(name)}/`, { params })
+}
+
 export function listBlobTableViewsApi() {
   return request.get('/images/blob-migration/table-views/')
 }

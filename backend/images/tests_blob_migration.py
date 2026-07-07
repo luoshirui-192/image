@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS blob_migration_source (
     source_table VARCHAR(64) NOT NULL,
     source_pk_column VARCHAR(64) NOT NULL DEFAULT 'id',
     blob_column VARCHAR(64) NOT NULL,
+    blob_columns TEXT NOT NULL DEFAULT '',
+    source_object_type VARCHAR(20) NOT NULL DEFAULT 'table',
+    path_lookup_table VARCHAR(64) NOT NULL DEFAULT '',
     name_column VARCHAR(64) NOT NULL DEFAULT '',
     suffix_column VARCHAR(64) NOT NULL DEFAULT '',
     category_id INTEGER NOT NULL,
@@ -79,9 +82,10 @@ CREATE TABLE IF NOT EXISTS image_source_map (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_table VARCHAR(64) NOT NULL,
     source_id VARCHAR(64) NOT NULL,
+    source_column VARCHAR(64) NOT NULL DEFAULT '',
     image_info_id INTEGER NOT NULL,
     migrated_at DATETIME NOT NULL,
-    UNIQUE(source_table, source_id)
+    UNIQUE(source_table, source_id, source_column)
 );
 CREATE TABLE IF NOT EXISTS legacy_photos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

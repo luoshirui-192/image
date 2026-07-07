@@ -7,6 +7,9 @@ import ImageGalleryPanel from '@/components/ImageGalleryPanel.vue'
 import {
   deleteBlobTableViewApi,
   fetchBlobTableViewRowsApi,
+  listBlobCatalogConnectionsApi,
+  listBlobCatalogDatabasesApi,
+  listBlobCatalogObjectsApi,
   listBlobTableViewsApi,
 } from '@/api/images'
 import { highlightAndScrollTableRow } from '@/utils/tableScroll'
@@ -39,6 +42,97 @@ const activeView = computed(() => views.value.find((v) => v.id === activeViewId.
 
 const galleryItems = ref([])
 const galleryIndex = ref(-1)
+
+const loadingCatalog = ref(false)
+const selectedCatalogObject = ref(null)
+
+function catalogNodeLabel(data) {
+  if (data.nodeType === 'connection') return data.label
+  if (data.nodeType === 'database') {
+    return data.isMigrationTarget ? `${data.label}（迁移库）` : data.label
+  }
+  if (data.nodeType === 'object') {
+    const typeLabel = data.objectType === 'view' ? '数据库视图' : '表'
+    const blobs = (data.blobColumns || []).map((item) => item.column).join(', ')
+    return `${data.label} [${typeLabel}]${blobs ? ` · ${blobs}` : ''}`
+  }
+  return data.label
+}
+
+async function loadCatalogTree(root, resolve) {
+  loadingCatalog.value = true
+  try {
+    if (root.level === 0) {
+      const res = await listBlobCatalogConnectionsApi()
+      const items = res.data || []
+      resolve(
+        items.map((conn) => ({
+          id: `conn:${conn.alias}`,
+          label: conn.label || conn.alias,
+          nodeType: 'connection',
+          connection: conn,
+          leaf: false,
+        })),
+      )
+      return
+    }
+
+    const data = root.data
+    if (data.nodeType === 'connection') {
+      const conn = data.connection
+      const params = conn.connection_id != null
+        ? { connectionId: conn.connection_id }
+        : { dbAlias: conn.alias }
+      const res = await listBlobCatalogDatabasesApi(params)
+      resolve(
+        (res.data?.databases || []).map((db) => ({
+          id: `db:${conn.alias}:${db.name}`,
+          label: db.name,
+          nodeType: 'database',
+          connection: conn,
+          database: db.name,
+          isMigrationTarget: db.is_migration_target,
+          leaf: false,
+        })),
+      )
+      return
+    }
+
+    if (data.nodeType === 'database') {
+      const conn = data.connection
+      const params = {
+        database: data.database,
+        ...(conn.connection_id != null ? { connectionId: conn.connection_id } : { dbAlias: conn.alias }),
+      }
+      const res = await listBlobCatalogObjectsApi(params)
+      resolve(
+        (res.data?.objects || []).map((obj) => ({
+          id: `obj:${conn.alias}:${data.database}:${obj.name}`,
+          label: obj.name,
+          nodeType: 'object',
+          connection: conn,
+          database: data.database,
+          objectType: obj.object_type,
+          blobColumns: obj.blob_columns || [],
+          leaf: true,
+        })),
+      )
+      return
+    }
+
+    resolve([])
+  } catch (err) {
+    ElMessage.error(err.message || '加载目录失败')
+    resolve([])
+  } finally {
+    loadingCatalog.value = false
+  }
+}
+
+function onCatalogNodeClick(data) {
+  if (data.nodeType !== 'object') return
+  selectedCatalogObject.value = data
+}
 
 function formatCell(row, colName) {
   const value = row[colName]
@@ -133,7 +227,7 @@ async function loadViews() {
     }
   } catch (err) {
     views.value = []
-    ElMessage.error(err.message || '加载视图列表失败')
+    ElMessage.error(err.message || '加载浏览配置失败')
   } finally {
     loadingViews.value = false
   }
@@ -202,7 +296,7 @@ async function loadMore() {
 
 async function removeView(row) {
   try {
-    await ElMessageBox.confirm(`确定删除视图「${row.name}」？`, '确认', { type: 'warning' })
+    await ElMessageBox.confirm(`确定删除浏览配置「${row.name}」？`, '确认', { type: 'warning' })
     await deleteBlobTableViewApi(row.id)
     ElMessage.success('已删除')
     if (activeViewId.value === row.id) {
@@ -332,7 +426,7 @@ watch(
 onMounted(async () => {
   window.addEventListener('resize', syncTableHeight)
 
-  await loadViews()
+  await Promise.all([loadViews()])
   await nextTick()
   if (route.query.viewId) {
     const id = Number(route.query.viewId)
@@ -355,21 +449,46 @@ onUnmounted(() => {
 <template>
   <div class="blob-views-page">
     <div class="page-card">
-      <h2 class="page-title">BLOB 表视图</h2>
+      <h2 class="page-title">BLOB 数据浏览</h2>
       <p class="page-desc">
-        读取远程旧表数据，BLOB 列显示为本系统路径（来自 BLOB 迁移映射）。不创建物理表，仅保存查询配置。
+        左侧按连接与数据库浏览表、数据库视图；已保存的浏览配置可快速打开远程数据，BLOB 列显示为本系统路径。
       </p>
 
       <div class="layout">
         <aside class="view-list-panel">
           <div class="panel-head">
-            <span>已保存视图</span>
+            <span>数据库目录</span>
+          </div>
+          <el-tree
+            lazy
+            :load="loadCatalogTree"
+            node-key="id"
+            :props="{ label: 'label', isLeaf: 'leaf' }"
+            highlight-current
+            class="catalog-tree"
+            @node-click="onCatalogNodeClick"
+          >
+            <template #default="{ data }">
+              <span class="catalog-node">{{ catalogNodeLabel(data) }}</span>
+            </template>
+          </el-tree>
+
+          <div v-if="selectedCatalogObject" class="catalog-selection">
+            <div class="catalog-selection-title">已选对象</div>
+            <div>{{ selectedCatalogObject.database }}.{{ selectedCatalogObject.label }}</div>
+            <div class="field-hint">
+              {{ selectedCatalogObject.objectType === 'view' ? '数据库视图' : '表' }}
+            </div>
+          </div>
+
+          <div class="panel-head panel-head-spaced">
+            <span>已保存浏览配置</span>
             <el-button link type="primary" :loading="loadingViews" @click="loadViews">
               <el-icon><Refresh /></el-icon>
             </el-button>
           </div>
           <el-skeleton v-if="loadingViews && !views.length" :rows="4" animated />
-          <el-empty v-else-if="!views.length" description="暂无视图，可在 BLOB 迁移页保存" />
+          <el-empty v-else-if="!views.length" description="暂无浏览配置，可在 BLOB 迁移页保存" />
           <ul v-else class="view-list">
             <li
               v-for="item in views"
@@ -486,7 +605,7 @@ onUnmounted(() => {
               />
             </div>
           </template>
-          <el-empty v-else description="请选择左侧视图" />
+          <el-empty v-else description="请选择左侧浏览配置" />
         </main>
       </div>
     </div>
@@ -531,10 +650,40 @@ onUnmounted(() => {
 
 .layout {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 320px 1fr;
   gap: 16px;
   flex: 1;
   min-height: 0;
+}
+
+.catalog-tree {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  padding: 4px 0;
+}
+
+.catalog-node {
+  font-size: 13px;
+}
+
+.catalog-selection {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+  font-size: 12px;
+}
+
+.catalog-selection-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.panel-head-spaced {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 
 .view-list-panel {

@@ -186,3 +186,105 @@ def ensure_migration_tables() -> None:
                 cursor.execute(ddl)
     except Exception:
         logger.warning("ensure migration tables failed", exc_info=True)
+    ensure_blob_pr1_schema()
+
+
+def _mysql_column_exists(cursor, table: str, column: str) -> bool:
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+          AND COLUMN_NAME = %s
+        """,
+        [table, column],
+    )
+    return bool(cursor.fetchone()[0])
+
+
+def _mysql_index_exists(cursor, table: str, index_name: str) -> bool:
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+          AND INDEX_NAME = %s
+        """,
+        [table, index_name],
+    )
+    return bool(cursor.fetchone()[0])
+
+
+def ensure_blob_pr1_schema() -> None:
+    """PR1 columns: source_column, blob_columns, object metadata for browse/migrate."""
+    from django.db import connection
+
+    if connection.vendor != "mysql":
+        return
+
+    alters = [
+        ("image_source_map", "source_column", "varchar(64) NOT NULL DEFAULT '' COMMENT 'BLOB 列名' AFTER `source_id`"),
+        ("blob_migration_source", "blob_columns", "text NOT NULL COMMENT 'JSON BLOB 列数组' AFTER `blob_column`"),
+        ("blob_migration_source", "source_object_type", "varchar(20) NOT NULL DEFAULT 'table' AFTER `blob_columns`"),
+        ("blob_migration_source", "path_lookup_table", "varchar(64) NOT NULL DEFAULT '' AFTER `source_object_type`"),
+        ("blob_table_view", "database_name", "varchar(64) NOT NULL DEFAULT '' AFTER `db_alias`"),
+        ("blob_table_view", "blob_columns", "text NOT NULL COMMENT 'JSON BLOB 列数组' AFTER `blob_column`"),
+        ("blob_table_view", "source_object_type", "varchar(20) NOT NULL DEFAULT 'table' AFTER `source_table`"),
+        ("blob_table_view", "path_lookup_table", "varchar(64) NOT NULL DEFAULT '' AFTER `source_object_type`"),
+    ]
+
+    try:
+        with connection.cursor() as cursor:
+            for table, column, ddl in alters:
+                if not _mysql_column_exists(cursor, table, column):
+                    cursor.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {ddl}")
+                    logger.info("added %s.%s", table, column)
+
+            if _mysql_index_exists(cursor, "image_source_map", "uk_source"):
+                cursor.execute("ALTER TABLE `image_source_map` DROP INDEX `uk_source`")
+            if not _mysql_index_exists(cursor, "image_source_map", "uk_source"):
+                cursor.execute(
+                    "ALTER TABLE `image_source_map` ADD UNIQUE KEY `uk_source` (`source_table`, `source_id`, `source_column`)"
+                )
+
+            cursor.execute(
+                """
+                UPDATE `blob_migration_source`
+                SET `blob_columns` = JSON_ARRAY(`blob_column`)
+                WHERE (`blob_columns` IS NULL OR `blob_columns` = '')
+                  AND `blob_column` <> ''
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE `blob_table_view`
+                SET `blob_columns` = JSON_ARRAY(`blob_column`)
+                WHERE (`blob_columns` IS NULL OR `blob_columns` = '')
+                  AND `blob_column` <> ''
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE `image_source_map` m
+                INNER JOIN (
+                    SELECT source_table, MIN(blob_column) AS blob_column
+                    FROM blob_migration_source
+                    GROUP BY source_table
+                ) s ON s.source_table = m.source_table
+                SET m.source_column = s.blob_column
+                WHERE m.source_column = ''
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE `blob_table_view` v
+                INNER JOIN `external_db_connection` c
+                    ON v.db_alias = CONCAT('external_', c.id)
+                SET v.database_name = c.db_name
+                WHERE v.database_name = ''
+                """
+            )
+    except Exception:
+        logger.warning("ensure blob pr1 schema failed", exc_info=True)

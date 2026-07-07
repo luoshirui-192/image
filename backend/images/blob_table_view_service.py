@@ -291,13 +291,22 @@ def _build_path_cell(
     }
 
 
-def _load_path_map(source_table: str, source_ids: list[str]) -> dict[str, dict]:
+def _load_path_map(
+    source_table: str,
+    source_ids: list[str],
+    *,
+    blob_column: str | None = None,
+    path_lookup_table: str | None = None,
+) -> dict[str, dict]:
     if not source_ids:
         return {}
+    lookup_table = (path_lookup_table or source_table).strip() or source_table
     mappings = ImageSourceMap.objects.filter(
-        source_table=source_table,
+        source_table=lookup_table,
         source_id__in=source_ids,
     )
+    if blob_column:
+        mappings = mappings.filter(source_column__in=[blob_column, ""])
     image_ids = [m.image_info_id for m in mappings]
     images = {
         img.id: img
@@ -357,7 +366,12 @@ def fetch_view_rows(
 
     pk_index = col_names.index(pk) if pk in col_names else 0
     source_ids = [str(row[pk_index]) for row in raw_rows]
-    path_map = _load_path_map(view.source_table, source_ids)
+    path_map = _load_path_map(
+        view.source_table,
+        source_ids,
+        blob_column=blob_col,
+        path_lookup_table=view.path_lookup_table or None,
+    )
 
     rows: list[dict] = []
     for raw in raw_rows:

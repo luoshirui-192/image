@@ -160,11 +160,12 @@ def _format_mysql_error(exc: Exception, *, host: str, port: int) -> str:
     return message
 
 
-def build_database_settings(record: ExternalDbConnection, *, password: str | None = None) -> dict:
+def build_database_settings(record: ExternalDbConnection, *, password: str | None = None, database: str | None = None) -> dict:
     pwd = password if password is not None else decrypt_password(record.password_encrypted)
+    db_name = (database or record.db_name or "").strip() or record.db_name
     return {
         "ENGINE": "config.db_backend",
-        "NAME": record.db_name,
+        "NAME": db_name,
         "USER": record.username,
         "PASSWORD": pwd,
         "HOST": record.host,
@@ -238,14 +239,14 @@ def test_connection_settings(settings_dict: dict) -> str:
     return "连接成功"
 
 
-def register_external_connection(connection_id: int) -> str:
+def register_external_connection(connection_id: int, *, database: str | None = None) -> str:
     alias = external_alias(connection_id)
     try:
         record = ExternalDbConnection.objects.get(pk=connection_id, enabled=1)
     except ExternalDbConnection.DoesNotExist as exc:
         raise ExternalDbError(f"外部库连接不存在或已禁用: id={connection_id}") from exc
 
-    connections.databases[alias] = build_database_settings(record)
+    connections.databases[alias] = build_database_settings(record, database=database)
     connections[alias].ensure_connection()
     return alias
 
@@ -261,8 +262,8 @@ def unregister_external_connection(connection_id: int) -> None:
 
 
 @contextmanager
-def open_external_connection(connection_id: int):
-    alias = register_external_connection(connection_id)
+def open_external_connection(connection_id: int, *, database: str | None = None):
+    alias = register_external_connection(connection_id, database=database)
     try:
         yield alias
     finally:
@@ -283,17 +284,37 @@ def validate_db_alias_reference(alias: str) -> str:
 
 
 @contextmanager
-def db_alias_session(alias: str):
-    """Open external connection for the duration of a migration/discover operation."""
+def db_alias_session(alias: str, *, database: str | None = None):
+    """Open external connection for the duration of a migration/discover/catalog operation."""
     value = validate_db_alias_reference(alias)
     ext_id = parse_external_alias(value)
+    original_settings = None
     if ext_id is not None:
-        register_external_connection(ext_id)
+        register_external_connection(ext_id, database=database)
+    elif database:
+        current_name = str(connections.databases.get(value, {}).get("NAME") or "")
+        if database != current_name:
+            original_settings = connections.databases.get(value)
+            if original_settings is None:
+                raise ExternalDbError(f"数据库别名不存在: {value}")
+            patched = dict(original_settings)
+            patched["NAME"] = database
+            connections.databases[value] = patched
+            try:
+                connections[value].close()
+            except Exception:
+                logger.warning("close db alias before database switch failed alias=%s", value, exc_info=True)
     try:
         yield value
     finally:
         if ext_id is not None:
             unregister_external_connection(ext_id)
+        elif original_settings is not None:
+            try:
+                connections[value].close()
+            except Exception:
+                logger.warning("close db alias after database switch failed alias=%s", value, exc_info=True)
+            connections.databases[value] = original_settings
 
 
 def resolve_db_alias(alias: str) -> str:

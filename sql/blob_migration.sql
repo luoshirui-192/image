@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS `blob_migration_source` (
   `source_table` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT '源表名',
   `source_pk_column` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT 'id' COMMENT '源表主键列',
   `blob_column` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT 'BLOB 列名',
+  `blob_columns` text CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT 'JSON BLOB 列数组',
+  `source_object_type` varchar(20) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT 'table',
+  `path_lookup_table` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT '',
   `name_column` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT '' COMMENT '文件名列（可选）',
   `suffix_column` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT '' COMMENT '后缀列（可选）',
   `category_id` int(10) UNSIGNED NOT NULL COMMENT '写入 image_info 的分类',
@@ -36,10 +39,11 @@ CREATE TABLE IF NOT EXISTS `image_source_map` (
   `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
   `source_table` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL,
   `source_id` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT '源表主键字符串',
+  `source_column` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT '' COMMENT 'BLOB 列名',
   `image_info_id` bigint(20) UNSIGNED NOT NULL,
   `migrated_at` datetime NOT NULL,
   PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE KEY `uk_source`(`source_table`, `source_id`) USING BTREE,
+  UNIQUE KEY `uk_source`(`source_table`, `source_id`, `source_column`) USING BTREE,
   KEY `idx_image_info`(`image_info_id`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8 COLLATE = utf8_general_ci COMMENT = '旧表与路径表映射' ROW_FORMAT = COMPACT;
 
@@ -69,11 +73,15 @@ CREATE TABLE IF NOT EXISTS `external_db_connection` (
 -- 远程 BLOB 表虚拟视图（不建物理表，仅保存查询配置）
 CREATE TABLE IF NOT EXISTS `blob_table_view` (
   `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT,
-  `name` varchar(100) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT '' COMMENT '视图名称',
+  `name` varchar(100) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT '' COMMENT '浏览配置名称',
   `db_alias` varchar(32) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT 'default' COMMENT 'Django 数据库别名',
-  `source_table` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT '远程源表',
+  `database_name` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT '' COMMENT '浏览所在库名',
+  `source_table` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT '远程源表或数据库视图',
+  `source_object_type` varchar(20) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT 'table',
+  `path_lookup_table` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT '',
   `source_pk_column` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT 'id',
-  `blob_column` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT '被路径替代的 BLOB 列',
+  `blob_column` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT '主 BLOB 列（兼容）',
+  `blob_columns` text CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT 'JSON BLOB 列数组',
   `display_columns` text CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT 'JSON 列名数组，空则自动',
   `where_clause` varchar(500) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT '',
   `remark` varchar(500) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT '',

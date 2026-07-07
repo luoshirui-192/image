@@ -9,6 +9,12 @@ from images.serve_views import (
     ImageThumbView,
 )
 from images.views import CategoryDetailView, CategoryListCreateView, ImageUploadView
+from images.blob_catalog_views import (
+    BlobCatalogConnectionsView,
+    BlobCatalogDatabasesView,
+    BlobCatalogObjectDetailView,
+    BlobCatalogObjectsView,
+)
 from images.blob_migration_views import (
     BlobMigrationDiscoverView,
     BlobMigrationJobCancelView,
@@ -61,6 +67,10 @@ urlpatterns = [
     path("blob-migration/table-views/<int:pk>/schema/", BlobTableViewSchemaView.as_view(), name="blob-table-view-schema"),
     path("blob-migration/table-views/<int:pk>/rows/", BlobTableViewRowsView.as_view(), name="blob-table-view-rows"),
     path("blob-migration/table-views/<int:pk>/", BlobTableViewDetailView.as_view(), name="blob-table-view-detail"),
+    path("blob-catalog/connections/", BlobCatalogConnectionsView.as_view(), name="blob-catalog-connections"),
+    path("blob-catalog/databases/", BlobCatalogDatabasesView.as_view(), name="blob-catalog-databases"),
+    path("blob-catalog/objects/", BlobCatalogObjectsView.as_view(), name="blob-catalog-objects"),
+    path("blob-catalog/objects/<str:name>/", BlobCatalogObjectDetailView.as_view(), name="blob-catalog-object-detail"),
     path("upload/", ImageUploadView.as_view(), name="images-upload"),
     path("file/", ImageFileView.as_view(), name="images-file"),
     path("thumb/", ImageThumbView.as_view(), name="images-thumb"),

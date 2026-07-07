@@ -325,8 +325,11 @@ def _fetch_source_row_by_pk(source: BlobMigrationSource, pk_value: str) -> dict 
     return dict(zip(columns, raw))
 
 
-def _is_already_migrated(source_table: str, source_id_str: str) -> bool:
-    return ImageSourceMap.objects.filter(source_table=source_table, source_id=source_id_str).exists()
+def _is_already_migrated(source_table: str, source_id_str: str, blob_column: str) -> bool:
+    qs = ImageSourceMap.objects.filter(source_table=source_table, source_id=source_id_str)
+    if qs.filter(source_column=blob_column).exists():
+        return True
+    return qs.filter(source_column="").exists()
 
 
 def _migrate_row(
@@ -340,7 +343,7 @@ def _migrate_row(
     pk_col = source.source_pk_column
     source_id_str = str(row[pk_col])
 
-    if skip_existing and _is_already_migrated(source.source_table, source_id_str):
+    if skip_existing and _is_already_migrated(source.source_table, source_id_str, source.blob_column):
         return MigrationItemResult(source_id=source_id_str, success=True, skipped=True)
 
     try:
@@ -372,6 +375,7 @@ def _migrate_row(
         ImageSourceMap.objects.create(
             source_table=source.source_table,
             source_id=source_id_str,
+            source_column=source.blob_column,
             image_info_id=image.id,
             migrated_at=timezone.now(),
         )
@@ -394,6 +398,7 @@ def _migrate_row(
         ImageSourceMap.objects.create(
             source_table=source.source_table,
             source_id=source_id_str,
+            source_column=source.blob_column,
             image_info_id=existing.id,
             migrated_at=timezone.now(),
         )

@@ -29,10 +29,10 @@ export const MENU_ITEMS = [
   {
     path: 'blob-views',
     name: 'blob-views',
-    title: 'BLOB 表视图',
+    title: 'BLOB 数据浏览',
     icon: 'View',
     adminOnly: false,
-    description: '浏览远程旧表，BLOB 列显示为本地路径',
+    description: '按库浏览表与数据库视图，BLOB 列显示为本地路径',
   },
   {
     path: 'sql',
