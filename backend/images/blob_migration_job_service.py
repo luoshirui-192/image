@@ -245,11 +245,19 @@ def export_job_errors_csv(job_id: int) -> str:
 def _warm_thumbnails_after_job(job: BlobMigrationJob) -> None:
     if not job.warm_thumbs_after or job.dry_run:
         return
+    from images.blob_migration_service import _load_source, _storage_table
     from images.file_service import ImageNotFoundError, get_or_create_thumbnail
-    from images.models import ImageInfo
+    from images.models import ImageInfo, ImageSourceMap
 
+    source = _load_source(job.source_id)
+    storage_table = _storage_table(source)
+    map_qs = ImageSourceMap.objects.filter(source_table=storage_table)
+    if job.started_at:
+        map_qs = map_qs.filter(migrated_at__gte=job.started_at)
+
+    image_ids = list(map_qs.values_list("image_info_id", flat=True).distinct())
     warmed = 0
-    for image in ImageInfo.objects.filter(is_delete=0).order_by("id").iterator(chunk_size=200):
+    for image in ImageInfo.objects.filter(pk__in=image_ids, is_delete=0).iterator(chunk_size=200):
         if BlobMigrationJob.objects.filter(pk=job.pk, cancel_requested=1).exists():
             break
         try:

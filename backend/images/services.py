@@ -248,6 +248,53 @@ def save_image_bytes(
     return record
 
 
+def save_image_bytes_for_migration(
+    *,
+    filename: str,
+    content: bytes,
+    upload_user: str,
+    category_id: int | None = None,
+    tags: str = "",
+    declared_mime: str | None = None,
+) -> ImageInfo:
+    """Fast upload path for BLOB migration — skips duplicate lookup and optional dimension read."""
+    validated = validate_upload_file(
+        filename,
+        content,
+        max_bytes=settings.MAX_UPLOAD_SIZE_BYTES,
+        declared_mime=declared_mime,
+    )
+    skip_dimensions = getattr(settings, "BLOB_MIGRATION_SKIP_DIMENSIONS", True)
+    if skip_dimensions:
+        width, height = 0, 0
+    else:
+        width, height = _read_image_dimensions(content)
+
+    cat_id = _resolve_category_id(category_id)
+    content_hash = compute_content_hash(content)
+
+    now = fetch_db_now()
+    relative_path = build_relative_path(cat_id, validated.suffix, when=now)
+    get_image_storage().write_bytes(relative_path, content)
+
+    record = ImageInfo.objects.create(
+        image_name=Path(filename).name,
+        image_path=relative_path,
+        image_width=width,
+        image_height=height,
+        file_size=validated.size,
+        file_suffix=validated.suffix,
+        file_hash=content_hash,
+        upload_time=now,
+        update_time=now,
+        upload_user=upload_user,
+        is_delete=0,
+        category_id=cat_id,
+        tags=(tags or "").strip()[:500],
+    )
+    return record
+
+
 def save_uploaded_file(
     uploaded_file,
     *,

@@ -270,6 +270,17 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(mapping.source_column, "photo")
 
     @override_settings(UPLOAD_ROOT=None)
+    def test_skip_existing_on_rerun(self):
+        upload_root = str(self.upload_root)
+        with override_settings(UPLOAD_ROOT=upload_root):
+            first = run_blob_migration(self.source.id, batch_size=10, dry_run=False)
+            self.assertEqual(first.succeeded, 1)
+            second = run_blob_migration(self.source.id, batch_size=10, dry_run=False, skip_existing=True)
+            self.assertEqual(second.skipped, 1)
+            self.assertEqual(second.succeeded, 0)
+            self.assertEqual(ImageInfo.objects.filter(is_delete=0).count(), 1)
+
+    @override_settings(UPLOAD_ROOT=None)
     def test_api_discover_and_dry_run(self):
         upload_root = str(self.upload_root)
         self.client.force_authenticate(user=self.admin)

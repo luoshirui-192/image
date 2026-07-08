@@ -66,7 +66,7 @@ const form = reactive({
 
 const runOptions = reactive({
   sourceId: null,
-  batchSize: 50,
+  batchSize: 100,
   dryRun: true,
   skipExisting: true,
   warmThumbsAfter: true,

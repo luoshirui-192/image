@@ -191,10 +191,13 @@ DELETED_IMAGE_RETENTION_DAYS = int(os.getenv("DELETED_IMAGE_RETENTION_DAYS", "30
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "90"))
 
 # BLOB migration jobs (background worker)
-BLOB_MIGRATION_BATCH_SIZE = int(os.getenv("BLOB_MIGRATION_BATCH_SIZE", "50"))
+BLOB_MIGRATION_BATCH_SIZE = int(os.getenv("BLOB_MIGRATION_BATCH_SIZE", "100"))
 BLOB_MIGRATION_BATCH_MAX = int(os.getenv("BLOB_MIGRATION_BATCH_MAX", "500"))
-BLOB_MIGRATION_UPLOAD_WORKERS = int(os.getenv("BLOB_MIGRATION_UPLOAD_WORKERS", "2"))
+BLOB_MIGRATION_UPLOAD_WORKERS = int(os.getenv("BLOB_MIGRATION_UPLOAD_WORKERS", "4"))
 BLOB_MIGRATION_POLL_SECONDS = int(os.getenv("BLOB_MIGRATION_POLL_SECONDS", "30"))
+BLOB_MIGRATION_SKIP_DIMENSIONS = os.getenv("BLOB_MIGRATION_SKIP_DIMENSIONS", "true").lower() in {
+    "1", "true", "yes", "on",
+}
 
 # ---------------------------------------------------------------------------
 # CORS
