@@ -93,7 +93,7 @@ onMounted(async () => {
           </template>
           <template v-else>
             <p>上传的图片保存在<strong>服务器</strong>，不会留在您的电脑里。</p>
-            <p>使用「数据库模拟」可查看表数据、执行 SQL、预览与下载图片；「分类管理」维护上传分类。</p>
+            <p>使用「数据库模拟」可查看表数据、执行 SQL、预览与下载图片；上传与迁移时可选择或新建分类。</p>
           </template>
         </el-card>
       </el-col>

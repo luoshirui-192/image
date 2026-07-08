@@ -10,11 +10,22 @@ const route = useRoute()
 const breadcrumbs = computed(() => {
   const items = [{ title: APP_NAME, path: '/' }]
   const current = findMenuItemByPath(route.path)
+
   if (current && current.name !== 'home') {
     items.push({ title: current.title, path: current.path ? `/${current.path}` : '/' })
+  } else if (route.meta?.title && route.name !== 'home') {
+    if (route.query.from) {
+      const fromPath = String(route.query.from).replace(/^\//, '')
+      const parent = findMenuItemByPath(fromPath)
+      if (parent) {
+        items.push({ title: parent.title, path: parent.path ? `/${parent.path}` : '/' })
+      }
+    }
+    items.push({ title: route.meta.title, path: route.path })
   } else if (route.name === 'home' || route.path === '/') {
     items.push({ title: '首页', path: '/' })
   }
+
   return items
 })
 </script>

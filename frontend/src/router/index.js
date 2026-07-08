@@ -18,7 +18,6 @@ const VIEW_MAP = {
   upload: UploadView,
   'blob-migrate': BlobMigrateView,
   'blob-browse': BlobTableViewsView,
-  categories: CategoryManageView,
   logs: LogsView,
   settings: SettingsView,
 }
@@ -36,6 +35,15 @@ function buildChildRoutes() {
     },
   }))
   routes.push(
+    {
+      path: 'categories',
+      name: 'categories',
+      component: CategoryManageView,
+      meta: {
+        title: '分类管理',
+        hiddenInMenu: true,
+      },
+    },
     {
       path: 'blob-views',
       redirect: (to) => ({ name: 'blob-browse', query: to.query, hash: to.hash }),

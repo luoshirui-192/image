@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, UploadFilled } from '@element-plus/icons-vue'
 import ImagePreview from '@/components/ImagePreview.vue'
@@ -12,6 +13,7 @@ import {
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
+const router = useRouter()
 
 const ACCEPT_TYPES = '.jpg,.jpeg,.png,.gif,.webp,.bmp'
 const MAX_SIZE_MB = 20
@@ -94,6 +96,10 @@ function openCreateCategory() {
   newCategoryForm.category_name = ''
   newCategoryForm.sort = 0
   categoryDialogVisible.value = true
+}
+
+function goManageCategories() {
+  router.push({ name: 'categories', query: { from: 'upload' } })
 }
 
 async function submitCreateCategory() {
@@ -226,6 +232,7 @@ onBeforeUnmount(() => {
                   <el-icon><Plus /></el-icon>
                   新建
                 </el-button>
+                <el-button link type="primary" @click="goManageCategories">管理</el-button>
               </div>
               <div v-if="categories.length === 0" class="field-hint warn">
                 暂无分类，请先点击「新建」创建分类后再上传。

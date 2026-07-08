@@ -1,7 +1,8 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { ArrowLeft, Plus } from '@element-plus/icons-vue'
 import {
   createCategoryApi,
   deleteCategoryApi,
@@ -9,6 +10,9 @@ import {
   listCategoriesApi,
   updateCategoryApi,
 } from '@/api/images'
+
+const route = useRoute()
+const router = useRouter()
 
 const loading = ref(false)
 const categories = ref([])
@@ -21,6 +25,17 @@ const form = reactive({
   id: null,
   category_name: '',
   sort: 0,
+})
+
+const backTarget = computed(() => {
+  const from = String(route.query.from || '').replace(/^\//, '')
+  if (from === 'upload') {
+    return { path: '/upload', label: '返回上传' }
+  }
+  if (from === 'blob-migrate') {
+    return { path: '/blob-migrate', label: '返回迁移' }
+  }
+  return { path: '/', label: '返回首页' }
 })
 
 async function loadCategories() {
@@ -99,6 +114,10 @@ async function handleDelete(row) {
   }
 }
 
+function goBack() {
+  router.push(backTarget.value.path)
+}
+
 onMounted(loadCategories)
 </script>
 
@@ -107,8 +126,14 @@ onMounted(loadCategories)
     <div class="page-card">
       <div class="header-row">
         <div>
+          <el-button link type="primary" class="back-btn" @click="goBack">
+            <el-icon><ArrowLeft /></el-icon>
+            {{ backTarget.label }}
+          </el-button>
           <h2 class="page-title">分类管理</h2>
-          <p class="page-desc">维护图片分类，上传时可选择分类。分类下有图片时不可删除。</p>
+          <p class="page-desc">
+            维护上传与迁移使用的图片分类。上传、迁移页可直接新建；此处可改名、排序或删除空分类。
+          </p>
         </div>
         <el-button type="primary" :icon="Plus" @click="openCreate">新增分类</el-button>
       </div>
@@ -149,7 +174,7 @@ onMounted(loadCategories)
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="dialogSaving" @click="submitForm">保存</el-button>
       </template>
-    </el-dialog>
+    </dialog>
   </div>
 </template>
 
@@ -161,6 +186,11 @@ onMounted(loadCategories)
   gap: 16px;
   margin-bottom: 16px;
   flex-wrap: wrap;
+}
+
+.back-btn {
+  padding-left: 0;
+  margin-bottom: 4px;
 }
 
 .page-desc {

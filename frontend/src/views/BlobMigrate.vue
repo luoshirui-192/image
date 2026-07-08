@@ -629,6 +629,10 @@ function openCreateCategory() {
   categoryDialogVisible.value = true
 }
 
+function goManageCategories() {
+  router.push({ name: 'categories', query: { from: 'blob-migrate' } })
+}
+
 async function submitCreateCategory() {
   const name = newCategoryForm.category_name.trim()
   if (!name) {
@@ -900,6 +904,7 @@ onUnmounted(() => {
                   <el-button type="primary" plain @click="openCreateCategory">
                     <el-icon><Plus /></el-icon>
                   </el-button>
+                  <el-button link type="primary" @click="goManageCategories">管理</el-button>
                 </div>
               </el-form-item>
             </el-col>

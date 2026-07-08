@@ -35,14 +35,6 @@ export const MENU_ITEMS = [
     description: '目录、表数据、SQL 查询与多图预览',
   },
   {
-    path: 'categories',
-    name: 'categories',
-    title: '分类管理',
-    icon: 'Menu',
-    adminOnly: false,
-    description: '维护图片分类',
-  },
-  {
     path: 'logs',
     name: 'logs',
     title: '操作日志',
@@ -73,8 +65,15 @@ export function findMenuItemByPath(path) {
   return MENU_ITEMS.find((item) => item.path === normalized || (item.path === '' && normalized === ''))
 }
 
-export function resolveActiveMenuPath(routePath) {
+export function resolveActiveMenuPath(routePath, query = {}) {
   const path = routePath.replace(/^\//, '')
+  if (path === 'categories' && query.from) {
+    const from = String(query.from).replace(/^\//, '')
+    const parent = MENU_ITEMS.find((item) => item.path === from || item.name === from)
+    if (parent) {
+      return parent.path ? `/${parent.path}` : '/'
+    }
+  }
   if (path === 'blob-views' || path.startsWith('blob-views/') || path === 'sql-query' || path === 'sql') {
     return '/blob-browse'
   }

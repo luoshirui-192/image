@@ -104,7 +104,7 @@ const menuItems = computed(() => filterMenuByRole(auth.isAdmin))
 
 
 
-const activeMenu = computed(() => resolveActiveMenuPath(route.path))
+const activeMenu = computed(() => resolveActiveMenuPath(route.path, route.query))
 
 
 
