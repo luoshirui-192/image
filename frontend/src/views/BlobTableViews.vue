@@ -139,8 +139,7 @@ function catalogNodeLabel(data) {
   }
   if (data.nodeType === 'object') {
     const typeLabel = data.objectType === 'view' ? '数据库视图' : '表'
-    const blobs = (data.blobColumns || []).map((item) => item.column).join(', ')
-    return `${data.label} [${typeLabel}]${blobs ? ` · ${blobs}` : ''}`
+    return `${data.label} [${typeLabel}]`
   }
   return data.label
 }
