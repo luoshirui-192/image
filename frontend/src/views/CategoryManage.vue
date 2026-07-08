@@ -174,7 +174,7 @@ onMounted(loadCategories)
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="dialogSaving" @click="submitForm">保存</el-button>
       </template>
-    </dialog>
+    </el-dialog>
   </div>
 </template>
 
