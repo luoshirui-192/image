@@ -214,7 +214,7 @@ onUnmounted(() => {
 
 <template>
 
-  <el-container class="layout-root">
+  <el-container class="layout-root" :class="{ 'sidebar-collapsed': collapsed && !isMobile }">
 
     <!-- Desktop sidebar -->
 
@@ -496,6 +496,16 @@ onUnmounted(() => {
 
 .layout-aside {
 
+  position: fixed;
+
+  top: 0;
+
+  left: 0;
+
+  z-index: 200;
+
+  height: 100vh;
+
   background: var(--sidebar-bg);
 
   color: #fff;
@@ -643,6 +653,18 @@ onUnmounted(() => {
 .layout-main-wrap {
 
   min-width: 0;
+
+  margin-left: var(--sidebar-width);
+
+  transition: margin-left 0.2s ease;
+
+}
+
+
+
+.layout-root.sidebar-collapsed .layout-main-wrap {
+
+  margin-left: var(--sidebar-collapsed-width);
 
 }
 
@@ -817,6 +839,12 @@ onUnmounted(() => {
 
 
 @media (max-width: 991px) {
+
+  .layout-main-wrap {
+
+    margin-left: 0;
+
+  }
 
   .username {
 
