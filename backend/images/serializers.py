@@ -229,7 +229,7 @@ class BlobTableViewSerializer(serializers.Serializer):
     update_time = serializers.DateTimeField(read_only=True, allow_null=True)
 
     def to_representation(self, instance):
-        from images.blob_schema_helpers import parse_blob_columns
+        from images.blob_schema_helpers import parse_blob_column_path_mappings, parse_blob_columns
         from images.models import BlobTableView
 
         if isinstance(instance, BlobTableView):
@@ -241,6 +241,9 @@ class BlobTableViewSerializer(serializers.Serializer):
                 "source_table": instance.source_table,
                 "source_object_type": instance.source_object_type or "table",
                 "path_lookup_table": instance.path_lookup_table or "",
+                "blob_column_path_mappings": parse_blob_column_path_mappings(
+                    instance.blob_column_path_mappings
+                ),
                 "source_pk_column": instance.source_pk_column,
                 "blob_column": instance.blob_column,
                 "blob_columns": parse_blob_columns(instance.blob_columns, instance.blob_column),
@@ -288,7 +291,7 @@ class BlobTableViewCreateSerializer(serializers.Serializer):
         return attrs
 
     def to_representation(self, instance):
-        from images.blob_schema_helpers import parse_blob_columns
+        from images.blob_schema_helpers import parse_blob_column_path_mappings, parse_blob_columns
         from images.models import BlobTableView
 
         if isinstance(instance, BlobTableView):
@@ -300,6 +303,9 @@ class BlobTableViewCreateSerializer(serializers.Serializer):
                 "source_table": instance.source_table,
                 "source_object_type": instance.source_object_type or "table",
                 "path_lookup_table": instance.path_lookup_table or "",
+                "blob_column_path_mappings": parse_blob_column_path_mappings(
+                    instance.blob_column_path_mappings
+                ),
                 "source_pk_column": instance.source_pk_column,
                 "blob_column": instance.blob_column,
                 "blob_columns": parse_blob_columns(instance.blob_columns, instance.blob_column),

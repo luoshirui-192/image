@@ -317,7 +317,11 @@ async function submitCreateView() {
       blob_columns: [...createViewForm.blobColumns],
       where_clause: createViewForm.whereClause.trim(),
     })
-    ElMessage.success('配置已创建')
+    ElMessage.success(
+      res.data?.blob_column_path_mappings?.length
+        ? `配置已创建，已自动解析 ${res.data.blob_column_path_mappings.length} 个 BLOB 列路径映射`
+        : '配置已创建',
+    )
     createViewDialogVisible.value = false
     await loadViews()
     if (res.data?.id) {
@@ -1050,6 +1054,14 @@ onUnmounted(() => {
               :value="col.column"
             />
           </el-select>
+        </el-form-item>
+        <el-form-item v-if="selectedCatalogObject?.objectType === 'view'" label="路径映射">
+          <el-alert
+            type="info"
+            :closable="false"
+            show-icon
+            title="JOIN 视图会根据建视图 SQL 自动推断每个 BLOB 列对应的基表与关联键"
+          />
         </el-form-item>
         <el-form-item label="WHERE">
           <el-input v-model="createViewForm.whereClause" placeholder="不含 WHERE 关键字" />

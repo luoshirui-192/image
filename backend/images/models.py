@@ -113,6 +113,7 @@ class BlobTableView(models.Model):
     source_table = models.CharField(max_length=64)
     source_object_type = models.CharField(max_length=20, default="table")
     path_lookup_table = models.CharField(max_length=64, default="")
+    blob_column_path_mappings = models.TextField(default="")
     source_pk_column = models.CharField(max_length=64, default="id")
     blob_column = models.CharField(max_length=64)
     blob_columns = models.TextField(default="")

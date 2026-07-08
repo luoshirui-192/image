@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS blob_table_view (
     source_table VARCHAR(64) NOT NULL,
     source_object_type VARCHAR(20) NOT NULL DEFAULT 'table',
     path_lookup_table VARCHAR(64) NOT NULL DEFAULT '',
+    blob_column_path_mappings TEXT NOT NULL DEFAULT '',
     source_pk_column VARCHAR(64) NOT NULL DEFAULT 'id',
     blob_column VARCHAR(64) NOT NULL,
     blob_columns TEXT NOT NULL DEFAULT '',

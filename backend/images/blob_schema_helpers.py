@@ -43,6 +43,58 @@ def normalize_object_type(value: str | None, *, default: str = OBJECT_TYPE_TABLE
     return default
 
 
+def parse_blob_column_path_mappings(raw: str | None) -> list[dict[str, str]]:
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    results: list[dict[str, str]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        view_column = str(item.get("view_column") or "").strip()
+        lookup_table = str(item.get("lookup_table") or "").strip()
+        source_id_column = str(item.get("source_id_column") or "").strip()
+        source_column = str(item.get("source_column") or view_column).strip()
+        if view_column and lookup_table and source_id_column:
+            results.append(
+                {
+                    "view_column": view_column,
+                    "lookup_table": lookup_table,
+                    "source_id_column": source_id_column,
+                    "source_column": source_column,
+                }
+            )
+    return results
+
+
+def serialize_blob_column_path_mappings(mappings: list[dict[str, str]] | None) -> str:
+    if not mappings:
+        return ""
+    cleaned: list[dict[str, str]] = []
+    for item in mappings:
+        view_column = str(item.get("view_column") or "").strip()
+        lookup_table = str(item.get("lookup_table") or "").strip()
+        source_id_column = str(item.get("source_id_column") or "").strip()
+        source_column = str(item.get("source_column") or view_column).strip()
+        if not view_column or not lookup_table or not source_id_column:
+            continue
+        cleaned.append(
+            {
+                "view_column": view_column,
+                "lookup_table": lookup_table,
+                "source_id_column": source_id_column,
+                "source_column": source_column,
+            }
+        )
+    return json.dumps(cleaned, ensure_ascii=False) if cleaned else ""
+
+
 def map_storage_table(
     *,
     source_table: str,

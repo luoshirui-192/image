@@ -15,7 +15,12 @@ from images.blob_migration_service import (
     validate_identifier,
     validate_where_clause,
 )
-from images.blob_schema_helpers import parse_blob_columns, serialize_blob_columns
+from images.blob_schema_helpers import (
+    parse_blob_column_path_mappings,
+    parse_blob_columns,
+    serialize_blob_column_path_mappings,
+    serialize_blob_columns,
+)
 from images.external_db_service import db_alias_session, validate_db_alias_reference
 from images.models import BlobTableView, ImageInfo, ImageSourceMap
 
@@ -200,6 +205,7 @@ def get_view_schema(view_id: int) -> dict:
         "source_pk_column": view.source_pk_column,
         "blob_column": view.blob_column,
         "blob_columns": _view_blob_columns(view),
+        "blob_column_path_mappings": parse_blob_column_path_mappings(view.blob_column_path_mappings),
         "columns": [
             {
                 "name": col.name,
@@ -286,8 +292,10 @@ def _build_path_cell(
     source_id: str,
     path_map: dict[str, dict],
     blob_column: str,
+    source_column: str | None = None,
 ) -> dict:
-    meta = path_map.get(blob_column) or path_map.get("")
+    lookup_key = source_column or blob_column
+    meta = path_map.get(lookup_key) or path_map.get(blob_column) or path_map.get("")
     if not meta:
         return {
             "display": "未迁移",
@@ -356,6 +364,68 @@ def _load_path_map(
     return result
 
 
+def _load_path_maps_for_mappings(
+    *,
+    raw_rows: list[tuple],
+    col_names: list[str],
+    mappings: list[dict[str, str]],
+    blob_cols: list[str],
+    fallback_source_table: str,
+    fallback_lookup_table: str,
+) -> list[dict[str, dict[str, dict]]]:
+    """Return per-row path maps keyed by view BLOB column name."""
+    if not mappings:
+        return []
+
+    path_cache: dict[tuple[str, str], dict[str, dict[str, dict]]] = {}
+    for mapping in mappings:
+        view_col = mapping["view_column"]
+        if view_col not in blob_cols:
+            continue
+        sid_col = mapping["source_id_column"]
+        if sid_col not in col_names:
+            continue
+        sid_idx = col_names.index(sid_col)
+        source_ids = list({str(row[sid_idx]) for row in raw_rows})
+        cache_key = (mapping["lookup_table"], mapping["source_column"])
+        if cache_key not in path_cache:
+            path_cache[cache_key] = _load_path_map(
+                fallback_source_table,
+                source_ids,
+                blob_columns=[mapping["source_column"]],
+                path_lookup_table=mapping["lookup_table"],
+            )
+        else:
+            existing = path_cache[cache_key]
+            missing = [sid for sid in source_ids if sid not in existing]
+            if missing:
+                extra = _load_path_map(
+                    fallback_source_table,
+                    missing,
+                    blob_columns=[mapping["source_column"]],
+                    path_lookup_table=mapping["lookup_table"],
+                )
+                for sid, cols in extra.items():
+                    existing.setdefault(sid, {}).update(cols)
+
+    mapping_by_view_col = {m["view_column"]: m for m in mappings}
+    row_maps: list[dict[str, dict[str, dict]]] = []
+    for raw in raw_rows:
+        row_paths: dict[str, dict[str, dict]] = {}
+        for blob_col in blob_cols:
+            mapping = mapping_by_view_col.get(blob_col)
+            if not mapping:
+                continue
+            sid_col = mapping["source_id_column"]
+            sid_idx = col_names.index(sid_col)
+            source_id = str(raw[sid_idx])
+            cache_key = (mapping["lookup_table"], mapping["source_column"])
+            inner = path_cache.get(cache_key, {}).get(source_id, {})
+            row_paths[blob_col] = inner
+        row_maps.append(row_paths)
+    return row_maps
+
+
 def fetch_view_rows(
     view_id: int,
     *,
@@ -390,29 +460,57 @@ def fetch_view_rows(
             raw_rows = cursor.fetchall()
             col_names = [col[0] for col in cursor.description]
 
+        from images.blob_view_path_service import resolve_effective_path_mappings
+
+        path_mappings = resolve_effective_path_mappings(view, conn, blob_cols)
+
     pk_index = col_names.index(pk) if pk in col_names else 0
-    source_ids = [str(row[pk_index]) for row in raw_rows]
-    path_map = _load_path_map(
-        view.source_table,
-        source_ids,
-        blob_columns=blob_cols,
-        path_lookup_table=_path_lookup_table(view),
-    )
+    per_row_path_maps: list[dict[str, dict[str, dict]]] | None = None
+    legacy_path_map: dict[str, dict[str, dict]] = {}
+    if path_mappings:
+        per_row_path_maps = _load_path_maps_for_mappings(
+            raw_rows=raw_rows,
+            col_names=col_names,
+            mappings=path_mappings,
+            blob_cols=blob_cols,
+            fallback_source_table=view.source_table,
+            fallback_lookup_table=_path_lookup_table(view),
+        )
+    else:
+        source_ids = [str(row[pk_index]) for row in raw_rows]
+        legacy_path_map = _load_path_map(
+            view.source_table,
+            source_ids,
+            blob_columns=blob_cols,
+            path_lookup_table=_path_lookup_table(view),
+        )
 
     rows: list[dict] = []
-    for raw in raw_rows:
+    for row_idx, raw in enumerate(raw_rows):
         item: dict[str, Any] = {}
         source_id = str(raw[pk_index])
         for idx, name in enumerate(col_names):
             item[name] = _serialize_cell(raw[idx])
-        row_paths = path_map.get(source_id, {})
-        for blob_col in blob_cols:
-            item[blob_col] = _build_path_cell(
-                source_table=view.source_table,
-                source_id=source_id,
-                path_map=row_paths,
-                blob_column=blob_col,
-            )
+        if per_row_path_maps is not None:
+            row_paths = per_row_path_maps[row_idx]
+            for blob_col in blob_cols:
+                mapping = next((m for m in path_mappings if m["view_column"] == blob_col), None)
+                item[blob_col] = _build_path_cell(
+                    source_table=view.source_table,
+                    source_id=source_id,
+                    path_map=row_paths.get(blob_col, {}),
+                    blob_column=blob_col,
+                    source_column=mapping["source_column"] if mapping else None,
+                )
+        else:
+            row_paths = legacy_path_map.get(source_id, {})
+            for blob_col in blob_cols:
+                item[blob_col] = _build_path_cell(
+                    source_table=view.source_table,
+                    source_id=source_id,
+                    path_map=row_paths,
+                    blob_column=blob_col,
+                )
         rows.append(item)
 
     total = count_view_rows(view_id)
@@ -494,6 +592,9 @@ def create_table_view(
         source_table=table,
         source_object_type=meta["source_object_type"],
         path_lookup_table=meta["path_lookup_table"],
+        blob_column_path_mappings=serialize_blob_column_path_mappings(
+            meta.get("blob_column_path_mappings") or []
+        ),
         source_pk_column=pk,
         blob_column=meta["blob_column"],
         blob_columns=serialize_blob_columns(meta["blob_columns"]),

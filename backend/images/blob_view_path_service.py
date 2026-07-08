@@ -5,7 +5,13 @@ import logging
 import re
 from typing import Any
 
-from images.blob_schema_helpers import OBJECT_TYPE_TABLE, OBJECT_TYPE_VIEW, normalize_object_type
+from images.blob_schema_helpers import (
+    OBJECT_TYPE_TABLE,
+    OBJECT_TYPE_VIEW,
+    normalize_object_type,
+    parse_blob_column_path_mappings,
+)
+from images.blob_view_sql_parser import infer_blob_column_path_mappings
 
 logger = logging.getLogger(__name__)
 
@@ -76,36 +82,10 @@ def parse_simple_view_base_table(view_definition: str) -> str | None:
         return None
 
 
-def resolve_path_lookup_table(
-    conn,
-    *,
-    database: str,
-    object_name: str,
-    object_type: str | None = None,
-    manual: str | None = None,
-) -> str:
-    """
-    Resolve where image_source_map.source_table should point for browse/migrate.
-
-    Tables use their own name; views use the detected base table (or manual override).
-    """
+def fetch_mysql_view_definition(conn, *, database: str, object_name: str) -> str:
     table = _validate_identifier(object_name, label="对象名")
-    normalized_type = normalize_object_type(object_type) if object_type else None
-
-    manual_value = (manual or "").strip()
-    if manual_value:
-        return _validate_identifier(manual_value, label="路径映射表")
-
-    if normalized_type is None and conn.vendor == "mysql":
-        normalized_type = detect_mysql_object_type(conn, database=database, object_name=table)
-    elif normalized_type is None:
-        normalized_type = OBJECT_TYPE_TABLE
-
-    if normalized_type != OBJECT_TYPE_VIEW:
-        return table
-
     if conn.vendor != "mysql":
-        raise BlobViewPathError("非 MySQL 的数据库视图需手动指定 path_lookup_table")
+        raise BlobViewPathError("仅 MySQL 支持读取视图定义")
 
     db_name = _validate_identifier(database, label="数据库名") if database else None
     with conn.cursor() as cursor:
@@ -133,14 +113,79 @@ def resolve_path_lookup_table(
 
     if not row or not row[0]:
         raise BlobViewPathError(f"无法读取视图定义: {table}")
+    return row[0]
 
-    base = parse_simple_view_base_table(row[0])
-    if not base:
-        raise BlobViewPathError(
-            f"无法自动识别视图 {table} 的基表，请在配置中手动填写 path_lookup_table"
+
+def infer_view_path_mappings(
+    conn,
+    *,
+    database: str,
+    object_name: str,
+    blob_columns: list[str],
+) -> list[dict[str, str]]:
+    definition = fetch_mysql_view_definition(conn, database=database, object_name=object_name)
+    mappings = infer_blob_column_path_mappings(definition, blob_columns)
+    if mappings:
+        logger.info(
+            "auto-inferred %d blob path mapping(s) for view=%s",
+            len(mappings),
+            object_name,
         )
-    logger.info("auto-detected path_lookup_table=%s for view=%s", base, table)
-    return base
+    return mappings
+
+
+def resolve_path_lookup_table(
+    conn,
+    *,
+    database: str,
+    object_name: str,
+    object_type: str | None = None,
+    manual: str | None = None,
+    blob_columns: list[str] | None = None,
+) -> str:
+    """
+    Resolve where image_source_map.source_table should point for browse/migrate.
+
+    Tables use their own name; views use the detected base table (or manual override).
+    """
+    table = _validate_identifier(object_name, label="对象名")
+    normalized_type = normalize_object_type(object_type) if object_type else None
+
+    manual_value = (manual or "").strip()
+    if manual_value:
+        return _validate_identifier(manual_value, label="路径映射表")
+
+    if normalized_type is None and conn.vendor == "mysql":
+        normalized_type = detect_mysql_object_type(conn, database=database, object_name=table)
+    elif normalized_type is None:
+        normalized_type = OBJECT_TYPE_TABLE
+
+    if normalized_type != OBJECT_TYPE_VIEW:
+        return table
+
+    if conn.vendor != "mysql":
+        raise BlobViewPathError("非 MySQL 的数据库视图需手动指定 path_lookup_table")
+
+    definition = fetch_mysql_view_definition(conn, database=database, object_name=table)
+    base = parse_simple_view_base_table(definition)
+    if base:
+        logger.info("auto-detected path_lookup_table=%s for view=%s", base, table)
+        return base
+
+    if blob_columns:
+        mappings = infer_blob_column_path_mappings(definition, blob_columns)
+        if mappings:
+            lookup = mappings[0]["lookup_table"]
+            logger.info(
+                "auto-detected path_lookup_table=%s from JOIN view=%s",
+                lookup,
+                table,
+            )
+            return _validate_identifier(lookup, label="路径映射表")
+
+    raise BlobViewPathError(
+        f"无法自动识别视图 {table} 的基表，请在配置中手动填写 path_lookup_table"
+    )
 
 
 def resolve_source_metadata(
@@ -175,10 +220,47 @@ def resolve_source_metadata(
         object_name=object_name,
         object_type=obj_type,
         manual=path_lookup_table,
+        blob_columns=cols,
     )
+
+    path_mappings: list[dict[str, str]] = []
+    if obj_type == OBJECT_TYPE_VIEW and conn.vendor == "mysql":
+        path_mappings = infer_view_path_mappings(
+            conn,
+            database=database,
+            object_name=object_name,
+            blob_columns=cols,
+        )
+
     return {
         "source_object_type": obj_type,
         "path_lookup_table": lookup,
         "blob_columns": cols,
         "blob_column": primary_blob_column(serialize_blob_columns(cols), cols[0]),
+        "blob_column_path_mappings": path_mappings,
     }
+
+
+def resolve_effective_path_mappings(
+    view,
+    conn,
+    blob_columns: list[str],
+) -> list[dict[str, str]]:
+    """Stored per-column mappings, or infer from VIEW definition at runtime."""
+    stored = parse_blob_column_path_mappings(getattr(view, "blob_column_path_mappings", ""))
+    if stored:
+        return stored
+    if normalize_object_type(getattr(view, "source_object_type", "")) != OBJECT_TYPE_VIEW:
+        return []
+    if conn.vendor != "mysql":
+        return []
+    db_name = (getattr(view, "database_name", "") or str(conn.settings_dict.get("NAME") or "")).strip()
+    try:
+        return infer_view_path_mappings(
+            conn,
+            database=db_name,
+            object_name=view.source_table,
+            blob_columns=blob_columns,
+        )
+    except BlobViewPathError:
+        return []
