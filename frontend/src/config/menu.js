@@ -29,10 +29,10 @@ export const MENU_ITEMS = [
   {
     path: 'blob-browse',
     name: 'blob-browse',
-    title: 'BLOB 数据浏览',
+    title: '数据库模拟',
     icon: 'View',
     adminOnly: false,
-    description: '目录浏览、表数据、SQL 查询与多 BLOB 预览',
+    description: '目录、表数据、SQL 查询与多图预览',
   },
   {
     path: 'categories',

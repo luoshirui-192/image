@@ -3,7 +3,6 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Refresh, VideoPlay, View } from '@element-plus/icons-vue'
-import ImageGalleryPanel from '@/components/ImageGalleryPanel.vue'
 import ImagePreview from '@/components/ImagePreview.vue'
 import SqlEditor from '@/components/SqlEditor.vue'
 import {
@@ -52,10 +51,14 @@ const SCROLL_LOAD_DISTANCE = 120
 const browseReady = ref(false)
 let rowsLoadSeq = 0
 
+const selectedRow = ref(null)
+
 const activeView = computed(() => views.value.find((v) => v.id === activeViewId.value) || null)
 
-const galleryItems = ref([])
-const galleryIndex = ref(-1)
+const selectedRowPreviewItems = computed(() => {
+  if (!selectedRow.value) return []
+  return rowPreviewCells(selectedRow.value)
+})
 
 const loadingCatalog = ref(false)
 const selectedCatalogObject = ref(null)
@@ -121,9 +124,8 @@ function catalogNodeLabel(data) {
     return data.isMigrationTarget ? `${data.label}（迁移库）` : data.label
   }
   if (data.nodeType === 'object') {
-    const typeLabel = data.objectType === 'view' ? '数据库视图' : '表'
     const blobs = (data.blobColumns || []).map((item) => item.column).join(', ')
-    return `${data.label} [${typeLabel}]${blobs ? ` · ${blobs}` : ''}`
+    return blobs ? `${data.label} · ${blobs}` : data.label
   }
   return data.label
 }
@@ -230,7 +232,7 @@ async function openCreateViewDialog() {
   if (!selectedCatalogObject.value) return
   const obj = selectedCatalogObject.value
   const conn = obj.connection || {}
-  createViewForm.name = `${obj.label} 浏览`
+  createViewForm.name = obj.label
   createViewForm.blobColumns = (obj.blobColumns || []).map((item) => item.column)
   createViewForm.whereClause = ''
   createViewForm.sourcePkColumn = 'id'
@@ -264,7 +266,7 @@ async function submitCreateView() {
   createViewSaving.value = true
   try {
     const res = await createBlobTableViewApi({
-      name: createViewForm.name.trim() || `${obj.label} 浏览`,
+      name: createViewForm.name.trim() || obj.label,
       db_alias: conn.alias,
       database_name: obj.database,
       source_table: obj.label,
@@ -273,7 +275,7 @@ async function submitCreateView() {
       blob_columns: [...createViewForm.blobColumns],
       where_clause: createViewForm.whereClause.trim(),
     })
-    ElMessage.success('浏览配置已创建')
+    ElMessage.success('配置已创建')
     createViewDialogVisible.value = false
     await loadViews()
     if (res.data?.id) {
@@ -339,13 +341,19 @@ function pathCell(row, colName) {
   return null
 }
 
-const showPreviewColumn = computed(() => blobColumnNames().length > 0)
+function autoSelectFirstRow() {
+  const row = tableRows.value.find((r) => rowPreviewCells(r).length > 0)
+  selectedRow.value = row ?? null
+  if (row) {
+    syncTableCurrentRow(row)
+  }
+}
 
-const previewColumnWidth = computed(() => {
-  const count = blobColumnNames().length
-  if (count <= 1) return 76
-  return Math.min(76 + count * 60, 280)
-})
+function onTableRowClick(row, _column, event) {
+  if (event?.target?.closest?.('button, a, .el-button')) return
+  selectedRow.value = row
+  syncTableCurrentRow(row)
+}
 
 function rowPreviewCells(row) {
   return blobColumnNames()
@@ -359,6 +367,12 @@ function rowPreviewCells(row) {
       }
     })
     .filter(Boolean)
+}
+
+function openPreview(pathCellValue, row) {
+  if (!pathCellValue?.image_info_id) return
+  selectedRow.value = row
+  syncTableCurrentRow(row)
 }
 
 function syncTableHeight() {
@@ -376,7 +390,7 @@ function syncTableHeight() {
     }
   }
 
-  const reservedTop = 56 + 16 + 16 + 20 + 12 + 40 + 72 + 48 + 36
+  const reservedTop = 56 + 16 + 16 + 20 + 12 + 40 + 72 + 48 + 36 + 210
   tableHeight.value = Math.max(420, window.innerHeight - reservedTop)
 }
 
@@ -444,7 +458,7 @@ async function loadViews() {
     }
   } catch (err) {
     views.value = []
-    ElMessage.error(err.message || '加载浏览配置失败')
+    ElMessage.error(err.message || '加载配置失败')
   } finally {
     loadingViews.value = false
   }
@@ -456,7 +470,7 @@ async function loadRows({ append = false } = {}) {
     tableRows.value = []
     total.value = 0
     hasMore.value = false
-    galleryIndex.value = -1
+    selectedRow.value = null
     return
   }
 
@@ -490,7 +504,7 @@ async function loadRows({ append = false } = {}) {
     total.value = data.total ?? tableRows.value.length
     hasMore.value = Boolean(data.has_more)
     if (!append) {
-      autoSelectFirstPreview()
+      autoSelectFirstRow()
     }
   } catch (err) {
     if (seq !== rowsLoadSeq) return
@@ -522,7 +536,7 @@ async function loadMore() {
 
 async function removeView(row) {
   try {
-    await ElMessageBox.confirm(`确定删除浏览配置「${row.name}」？`, '确认', { type: 'warning' })
+    await ElMessageBox.confirm(`确定删除配置「${row.name}」？`, '确认', { type: 'warning' })
     await deleteBlobTableViewApi(row.id)
     ElMessage.success('已删除')
     if (activeViewId.value === row.id) {
@@ -578,109 +592,27 @@ function syncTableCurrentRow(row) {
   highlightAndScrollTableRow(
     tableRef,
     row,
-    (a, b) => getRowImageInfoId(a) === getRowImageInfoId(b),
+    (a, b) => getRowKey(a) === getRowKey(b),
   )
 }
 
-function buildGalleryItems() {
-  const cols = blobColumnNames()
-  if (!cols.length) return []
-  const items = []
-  for (const row of tableRows.value) {
-    for (const col of cols) {
-      const cell = pathCell(row, col)
-      if (!cell?.image_info_id || cell.status !== 'migrated') continue
-      items.push({
-        id: cell.image_info_id,
-        path: cell.path,
-        title: cols.length > 1 ? `${col}: ${cell.path || cell.display}` : (cell.path || cell.display),
-        column: col,
-      })
-    }
-  }
-  return items
+function getRowKey(row) {
+  const pk = activeView.value?.source_pk_column
+  if (pk && row?.[pk] != null) return String(row[pk])
+  return getRowImageInfoId(row) ?? JSON.stringify(row)
 }
-
-function autoSelectFirstPreview() {
-  const items = buildGalleryItems()
-  galleryItems.value = items
-  if (!items.length) {
-    galleryIndex.value = -1
-    return
-  }
-  if (galleryIndex.value < 0 || !items[galleryIndex.value]) {
-    galleryIndex.value = 0
-    syncTableCurrentRow(findRowByImageId(items[0].id))
-  }
-}
-
-function openRowPreview(row, preferredColumn = null) {
-  const items = buildGalleryItems()
-  if (!items.length) return
-  galleryItems.value = items
-  let targetId = null
-  if (preferredColumn) {
-    const cell = pathCell(row, preferredColumn)
-    targetId = cell?.image_info_id ?? null
-  }
-  if (!targetId) {
-    for (const col of blobColumnNames()) {
-      const cell = pathCell(row, col)
-      if (cell?.image_info_id && cell.status === 'migrated') {
-        targetId = cell.image_info_id
-        break
-      }
-    }
-  }
-  const index = targetId ? items.findIndex((item) => item.id === targetId) : -1
-  galleryIndex.value = index >= 0 ? index : 0
-  syncTableCurrentRow(row)
-}
-
-function openPreview(pathCellValue, row) {
-  if (!pathCellValue?.image_info_id) return
-  const col = blobColumnNames().find((name) => pathCell(row, name) === pathCellValue)
-  openRowPreview(row, col || null)
-}
-
-function findRowByImageId(imageId) {
-  return tableRows.value.find((row) => getRowImageInfoId(row) === imageId)
-}
-
-function onTableRowClick(row, _column, event) {
-  if (event?.target?.closest?.('button, a, .el-button')) return
-  openRowPreview(row)
-}
-
-watch(galleryIndex, (index) => {
-  if (index < 0) {
-    syncTableCurrentRow(null)
-    return
-  }
-  const item = galleryItems.value[index]
-  if (!item) return
-  syncTableCurrentRow(findRowByImageId(item.id))
-})
 
 watch(tableRows, () => {
-  const prevId = galleryItems.value[galleryIndex.value]?.id
-  galleryItems.value = buildGalleryItems()
-  if (!galleryItems.value.length) {
-    galleryIndex.value = -1
-    return
+  if (selectedRow.value && !tableRows.value.some((row) => getRowKey(row) === getRowKey(selectedRow.value))) {
+    selectedRow.value = null
   }
-  if (prevId == null) {
-    autoSelectFirstPreview()
-    return
-  }
-  const nextIndex = galleryItems.value.findIndex((item) => item.id === prevId)
-  galleryIndex.value = nextIndex >= 0 ? nextIndex : 0
+  setupTableViewport()
 })
 
 watch(activeViewId, (id, oldId) => {
   if (!browseReady.value || id === oldId) return
   unbindTableScroll()
-  galleryIndex.value = -1
+  selectedRow.value = null
   if (!id) {
     columns.value = []
     tableRows.value = []
@@ -701,10 +633,6 @@ watch(
     }
   },
 )
-
-watch(tableRows, () => {
-  setupTableViewport()
-})
 
 watch(
   () => route.query.viewId,
@@ -759,9 +687,9 @@ onUnmounted(() => {
 <template>
   <div class="blob-views-page">
     <div class="page-card">
-      <h2 class="page-title">BLOB 数据浏览</h2>
+      <h2 class="page-title">数据库模拟</h2>
       <p class="page-desc">
-        左侧按连接与数据库浏览表、数据库视图；支持保存浏览配置、多 BLOB 并排预览，以及在同一页面执行 SQL 查询。
+        左侧按连接与数据库查看表与对象；支持保存配置、多图预览，以及在同一页面执行 SQL 查询。
       </p>
 
       <div class="layout">
@@ -787,11 +715,11 @@ onUnmounted(() => {
             <div class="catalog-selection-title">已选对象</div>
             <div>{{ selectedCatalogObject.database }}.{{ selectedCatalogObject.label }}</div>
             <div class="field-hint">
-              {{ selectedCatalogObject.objectType === 'view' ? '数据库视图' : '表' }}
+              {{ selectedCatalogObject.blobColumns?.map((c) => c.column).join(', ') || '—' }}
             </div>
             <div class="catalog-actions">
               <el-button size="small" type="primary" plain @click="openCreateViewDialog">
-                创建浏览配置
+                创建配置
               </el-button>
               <el-button size="small" plain @click="rightTab = 'sql'">SQL 查询</el-button>
               <el-button size="small" link type="primary" @click="goMigrateWithCatalog">
@@ -801,13 +729,13 @@ onUnmounted(() => {
           </div>
 
           <div class="panel-head panel-head-spaced">
-            <span>已保存浏览配置</span>
+            <span>已保存配置</span>
             <el-button link type="primary" :loading="loadingViews" @click="loadViews">
               <el-icon><Refresh /></el-icon>
             </el-button>
           </div>
           <el-skeleton v-if="loadingViews && !views.length" :rows="4" animated />
-          <el-empty v-else-if="!views.length" description="暂无浏览配置，可在 BLOB 迁移页保存" />
+          <el-empty v-else-if="!views.length" description="暂无配置，可在 BLOB 迁移页保存" />
           <ul v-else class="view-list">
             <li
               v-for="item in views"
@@ -815,13 +743,13 @@ onUnmounted(() => {
               :class="['view-item', { active: item.id === activeViewId }]"
               @click="selectView(item.id)"
             >
-              <div class="view-item-title">{{ item.name }}</div>
-              <div class="view-item-meta">
-                {{ item.db_label || item.db_alias }} · {{ item.source_table }}
-              </div>
-              <div class="view-item-stats">
-                <span v-if="item.row_count != null">{{ item.row_count }} 行</span>
-                <span v-else-if="item.stats_error" class="warn">无法统计</span>
+              <div class="view-item-line">
+                <span class="view-item-title">{{ item.name }}</span>
+                <span class="view-item-meta">
+                  {{ item.db_label || item.db_alias }} · {{ item.source_table }}
+                  <template v-if="item.row_count != null"> · {{ item.row_count }} 行</template>
+                  <span v-else-if="item.stats_error" class="warn"> · 无法统计</span>
+                </span>
               </div>
               <el-button
                 link
@@ -840,7 +768,7 @@ onUnmounted(() => {
 
         <main class="data-panel">
           <el-tabs v-model="rightTab" class="right-tabs">
-            <el-tab-pane label="表浏览" name="browse">
+            <el-tab-pane label="表数据" name="browse">
               <div v-if="activeView" class="browse-pane">
                 <div class="data-head">
                   <div>
@@ -874,51 +802,17 @@ onUnmounted(() => {
                         border
                         stripe
                         highlight-current-row
-                        :row-key="(row) => getRowImageInfoId(row) ?? JSON.stringify(row)"
-                        class="data-table"
+                        :row-key="getRowKey"
+                        class="data-table compact-table"
                         empty-text="无数据"
                         @row-click="onTableRowClick"
                       >
-                        <el-table-column
-                          v-if="showPreviewColumn"
-                          label="预览"
-                          :width="previewColumnWidth"
-                          fixed="left"
-                          align="center"
-                          class-name="preview-col"
-                        >
-                          <template #default="{ row }">
-                            <div v-if="rowPreviewCells(row).length" class="row-thumb-strip">
-                              <button
-                                v-for="item in rowPreviewCells(row)"
-                                :key="item.column"
-                                type="button"
-                                class="row-thumb-btn"
-                                :title="item.title"
-                                @click.stop="openPreview(item.cell, row)"
-                              >
-                                <ImagePreview
-                                  :image-id="item.cell.image_info_id"
-                                  :image-path="item.cell.path"
-                                  :size="52"
-                                />
-                                <span
-                                  v-if="rowPreviewCells(row).length > 1"
-                                  class="row-thumb-label"
-                                >
-                                  {{ item.column }}
-                                </span>
-                              </button>
-                            </div>
-                            <span v-else class="no-preview">—</span>
-                          </template>
-                        </el-table-column>
                         <el-table-column
                           v-for="col in columns"
                           :key="col.name"
                           :prop="col.name"
                           :label="col.is_path_substitute ? `${col.name}（路径）` : col.name"
-                          :min-width="col.is_path_substitute ? 220 : 120"
+                          :min-width="col.is_path_substitute ? 200 : 100"
                           show-overflow-tooltip
                         >
                           <template #default="{ row }">
@@ -953,14 +847,33 @@ onUnmounted(() => {
                     <div v-else-if="tableRows.length && !hasMore" class="load-more-hint muted">已全部加载</div>
                   </div>
 
-                  <ImageGalleryPanel
-                    v-model:current-index="galleryIndex"
-                    :items="galleryItems"
-                    class="blob-preview-pane"
-                  />
+                  <div class="row-preview-panel">
+                    <div class="row-preview-head">
+                      <span>行预览</span>
+                      <span v-if="selectedRowPreviewItems.length" class="row-preview-count">
+                        {{ selectedRowPreviewItems.length }} 张
+                      </span>
+                    </div>
+                    <div v-if="selectedRowPreviewItems.length" class="row-preview-strip">
+                      <div
+                        v-for="item in selectedRowPreviewItems"
+                        :key="item.column"
+                        class="row-preview-card"
+                      >
+                        <div class="row-preview-label">{{ item.column }}</div>
+                        <ImagePreview
+                          :image-id="item.cell.image_info_id"
+                          :image-path="item.cell.path"
+                          :size="112"
+                        />
+                        <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
+                      </div>
+                    </div>
+                    <div v-else class="row-preview-empty">点击表格行，在下方并排预览该行已迁移的图片</div>
+                  </div>
                 </div>
               </div>
-              <el-empty v-else description="请选择左侧浏览配置，或从目录创建" />
+              <el-empty v-else description="请选择左侧配置，或从目录创建" />
             </el-tab-pane>
 
             <el-tab-pane label="SQL 查询" name="sql">
@@ -1013,7 +926,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <el-dialog v-model="createViewDialogVisible" title="从目录创建浏览配置" width="480px">
+    <el-dialog v-model="createViewDialogVisible" title="从目录创建配置" width="480px">
       <el-form label-width="100px">
         <el-form-item label="名称">
           <el-input v-model="createViewForm.name" maxlength="100" />
@@ -1095,8 +1008,17 @@ onUnmounted(() => {
   padding: 4px 0;
 }
 
+.catalog-tree :deep(.el-tree-node__content) {
+  height: 24px;
+}
+
+.catalog-tree :deep(.el-tree-node__label) {
+  overflow: visible;
+}
+
 .catalog-node {
-  font-size: 13px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .catalog-selection {
@@ -1224,8 +1146,8 @@ onUnmounted(() => {
 
 .view-item {
   position: relative;
-  padding: 10px 32px 10px 10px;
-  border-radius: 6px;
+  padding: 3px 24px 3px 6px;
+  border-radius: 4px;
   cursor: pointer;
   border: 1px solid transparent;
 }
@@ -1239,18 +1161,29 @@ onUnmounted(() => {
   background: var(--el-color-primary-light-9);
 }
 
+.view-item-line {
+  min-width: 0;
+}
+
 .view-item-title {
   font-weight: 500;
-  margin-bottom: 4px;
-}
-
-.view-item-meta,
-.view-item-stats {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.view-item-stats .warn {
+.view-item-meta {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.view-item-meta .warn {
   color: var(--el-color-warning);
 }
 
@@ -1310,13 +1243,14 @@ onUnmounted(() => {
 .table-panel {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 260px;
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   overflow: hidden;
 }
 
 .table-main {
+  flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -1324,11 +1258,84 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.blob-preview-pane {
-  min-width: 260px;
-  min-height: 280px;
-  height: 100%;
-  max-height: 100%;
+.row-preview-panel {
+  flex: 0 0 200px;
+  min-height: 160px;
+  max-height: 220px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.row-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  flex-shrink: 0;
+}
+
+.row-preview-count {
+  font-weight: normal;
+  color: var(--el-text-color-secondary);
+}
+
+.row-preview-strip {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+}
+
+.row-preview-strip::-webkit-scrollbar {
+  height: 8px;
+}
+
+.row-preview-strip::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: var(--el-border-color);
+}
+
+.row-preview-card {
+  flex: 0 0 auto;
+  width: 128px;
+  text-align: center;
+}
+
+.row-preview-label {
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-preview-path {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--el-text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-preview-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .table-viewport {
@@ -1341,6 +1348,24 @@ onUnmounted(() => {
 
 .data-table {
   width: 100%;
+}
+
+.compact-table :deep(.el-table__cell) {
+  padding: 1px 0;
+  font-size: 12px;
+}
+
+.compact-table :deep(.el-table__header .el-table__cell) {
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.compact-table :deep(.el-table__body tr) {
+  height: 24px;
+}
+
+.compact-table :deep(.el-tag) {
+  transform: scale(0.9);
 }
 
 .data-table :deep(.el-table__header-wrapper) {
@@ -1358,52 +1383,10 @@ onUnmounted(() => {
   height: 10px;
 }
 
-.row-thumb-strip {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  max-width: 100%;
-  padding: 2px 0 4px;
-  scrollbar-width: thin;
-}
-
-.row-thumb-strip::-webkit-scrollbar {
-  height: 6px;
-}
-
-.row-thumb-strip::-webkit-scrollbar-thumb {
-  border-radius: 3px;
-  background: var(--el-border-color);
-}
-
-.row-thumb-btn {
-  flex: 0 0 auto;
-  border: none;
-  background: transparent;
-  padding: 0;
-  cursor: pointer;
-}
-
-.row-thumb-label {
-  display: block;
-  margin-top: 2px;
-  font-size: 10px;
-  color: var(--el-text-color-secondary);
-  max-width: 52px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.no-preview {
-  color: var(--el-text-color-placeholder);
-}
-
 .path-cell {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 

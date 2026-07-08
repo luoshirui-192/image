@@ -293,15 +293,15 @@ async function saveView() {
   try {
     const res = await createBlobTableViewApi({
       ...migrationPayloadBase(),
-      name: form.name.trim() || `${form.sourceTable} 浏览`,
+      name: form.name.trim() || form.sourceTable.trim(),
     })
-    ElMessage.success('浏览配置已保存')
+    ElMessage.success('配置已保存')
     const viewId = res.data?.id
     if (viewId) {
       router.push({ path: '/blob-browse', query: { viewId: String(viewId) } })
     }
   } catch (err) {
-    ElMessage.error(err.message || '保存浏览配置失败')
+    ElMessage.error(err.message || '保存配置失败')
   } finally {
     savingView.value = false
   }
@@ -924,9 +924,9 @@ onUnmounted(() => {
               保存迁移配置
             </el-button>
             <el-button type="success" plain :loading="savingView" @click="saveView">
-              保存为浏览配置
+              保存为表配置
             </el-button>
-            <span class="field-hint inline-hint">浏览配置用于远程表/数据库视图的数据查看，BLOB 列显示为本地路径，不执行迁移</span>
+            <span class="field-hint inline-hint">用于远程表/对象的数据查看，BLOB 列显示为本地路径，不执行迁移</span>
           </el-form-item>
         </el-form>
       </section>
