@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Refresh, VideoPlay, View } from '@element-plus/icons-vue'
+import { Refresh, VideoPlay, View } from '@element-plus/icons-vue'
 import ImagePreview from '@/components/ImagePreview.vue'
 import SqlEditor from '@/components/SqlEditor.vue'
 import {
@@ -62,6 +62,7 @@ const selectedRowPreviewItems = computed(() => {
 
 const loadingCatalog = ref(false)
 const selectedCatalogObject = ref(null)
+const viewsVersion = ref(0)
 
 const rightTab = ref('browse')
 
@@ -131,14 +132,25 @@ function catalogNodeLabel(data) {
   return data.label
 }
 
-function formatSavedViewName(name) {
-  const text = (name || '').trim()
-  if (!text) return text
-  return text
-    .replace(/\s*浏览\s*$/u, '')
-    .replace(/\s*视图\s*$/u, '')
-    .trim() || text
+function viewCatalogKey(view) {
+  return `${view.db_alias || ''}\0${view.database_name || ''}\0${view.source_table || ''}\0${view.source_object_type || 'table'}`
 }
+
+function catalogObjectKey(data) {
+  const conn = data.connection || {}
+  return `${conn.alias || ''}\0${data.database || ''}\0${data.label || ''}\0${data.objectType || 'table'}`
+}
+
+function findSavedViewForCatalogNode(data) {
+  if (!data || data.nodeType !== 'object') return null
+  const key = catalogObjectKey(data)
+  return views.value.find((view) => viewCatalogKey(view) === key) || null
+}
+
+const savedViewForSelection = computed(() => {
+  if (!selectedCatalogObject.value) return null
+  return findSavedViewForCatalogNode(selectedCatalogObject.value)
+})
 
 async function loadCatalogTree(root, resolve) {
   loadingCatalog.value = true
@@ -213,11 +225,19 @@ async function loadCatalogTree(root, resolve) {
 function onCatalogNodeClick(data) {
   if (data.nodeType === 'database') {
     selectedCatalogObject.value = null
+    activeViewId.value = null
     return
   }
   if (data.nodeType !== 'object') return
   selectedCatalogObject.value = data
   sqlText.value = `SELECT * FROM \`${data.label}\` LIMIT 80`
+  const saved = findSavedViewForCatalogNode(data)
+  if (saved) {
+    activeViewId.value = saved.id
+    rightTab.value = 'browse'
+  } else {
+    activeViewId.value = null
+  }
 }
 
 function goMigrateWithCatalog() {
@@ -460,11 +480,9 @@ async function loadViews() {
   try {
     const res = await listBlobTableViewsApi()
     views.value = res.data || []
-    if (!activeViewId.value && views.value.length) {
-      activeViewId.value = views.value[0].id
-    }
+    viewsVersion.value += 1
     if (activeViewId.value && !views.value.some((v) => v.id === activeViewId.value)) {
-      activeViewId.value = views.value[0]?.id ?? null
+      activeViewId.value = null
     }
   } catch (err) {
     views.value = []
@@ -531,11 +549,6 @@ async function loadRows({ append = false } = {}) {
   }
 }
 
-function selectView(id) {
-  if (activeViewId.value === id) return
-  activeViewId.value = id
-}
-
 async function refreshActiveView() {
   await loadRows({ append: false })
 }
@@ -545,8 +558,9 @@ async function loadMore() {
 }
 
 async function removeView(row) {
+  if (!row?.id) return
   try {
-    await ElMessageBox.confirm(`确定删除配置「${row.name}」？`, '确认', { type: 'warning' })
+    await ElMessageBox.confirm(`确定删除配置「${row.source_table || row.name}」？`, '确认', { type: 'warning' })
     await deleteBlobTableViewApi(row.id)
     ElMessage.success('已删除')
     if (activeViewId.value === row.id) {
@@ -706,8 +720,12 @@ onUnmounted(() => {
         <aside class="view-list-panel">
           <div class="panel-head">
             <span>数据库目录</span>
+            <el-button link type="primary" :loading="loadingViews" @click="loadViews">
+              <el-icon><Refresh /></el-icon>
+            </el-button>
           </div>
           <el-tree
+            :key="`catalog-${viewsVersion}`"
             lazy
             :load="loadCatalogTree"
             node-key="id"
@@ -717,22 +735,60 @@ onUnmounted(() => {
             @node-click="onCatalogNodeClick"
           >
             <template #default="{ data }">
-              <span class="catalog-node">{{ catalogNodeLabel(data) }}</span>
+              <span class="catalog-node">
+                <span class="catalog-node-label">{{ catalogNodeLabel(data) }}</span>
+                <el-tag
+                  v-if="findSavedViewForCatalogNode(data)"
+                  size="small"
+                  type="success"
+                  effect="plain"
+                  class="catalog-saved-tag"
+                >
+                  已保存
+                </el-tag>
+              </span>
             </template>
           </el-tree>
 
           <div v-if="selectedCatalogObject" class="catalog-selection">
-            <div class="catalog-selection-title">已选对象</div>
+            <div class="catalog-selection-title">
+              已选对象
+              <el-tag v-if="savedViewForSelection" size="small" type="success" effect="plain">已保存</el-tag>
+            </div>
             <div>{{ selectedCatalogObject.database }}.{{ selectedCatalogObject.label }}</div>
             <div class="field-hint">
               {{ selectedCatalogObject.objectType === 'view' ? '数据库视图' : '表' }}
               <template v-if="selectedCatalogObject.blobColumns?.length">
                 · {{ selectedCatalogObject.blobColumns.map((c) => c.column).join(', ') }}
               </template>
+              <template v-if="savedViewForSelection?.row_count != null">
+                · {{ savedViewForSelection.row_count }} 行
+              </template>
             </div>
             <div class="catalog-actions">
-              <el-button size="small" type="primary" plain @click="openCreateViewDialog">
+              <el-button
+                v-if="!savedViewForSelection"
+                size="small"
+                type="primary"
+                plain
+                @click="openCreateViewDialog"
+              >
                 创建配置
+              </el-button>
+              <el-button
+                v-if="savedViewForSelection"
+                size="small"
+                type="primary"
+                plain
+                @click="activeViewId = savedViewForSelection.id; rightTab = 'browse'"
+              >
+                打开
+              </el-button>
+              <el-button v-if="savedViewForSelection" size="small" plain @click="refreshActiveView">
+                刷新
+              </el-button>
+              <el-button v-if="savedViewForSelection" size="small" type="danger" plain @click="removeView(savedViewForSelection)">
+                删除配置
               </el-button>
               <el-button size="small" plain @click="rightTab = 'sql'">SQL 查询</el-button>
               <el-button size="small" link type="primary" @click="goMigrateWithCatalog">
@@ -740,43 +796,6 @@ onUnmounted(() => {
               </el-button>
             </div>
           </div>
-
-          <div class="panel-head panel-head-spaced">
-            <span>已保存配置</span>
-            <el-button link type="primary" :loading="loadingViews" @click="loadViews">
-              <el-icon><Refresh /></el-icon>
-            </el-button>
-          </div>
-          <el-skeleton v-if="loadingViews && !views.length" :rows="4" animated />
-          <el-empty v-else-if="!views.length" description="暂无配置，可在 BLOB 迁移页保存" />
-          <ul v-else class="view-list">
-            <li
-              v-for="item in views"
-              :key="item.id"
-              :class="['view-item', { active: item.id === activeViewId }]"
-              @click="selectView(item.id)"
-            >
-              <div class="view-item-line">
-                <span class="view-item-title">{{ formatSavedViewName(item.name) }}</span>
-                <span class="view-item-meta">
-                  {{ item.db_label || item.db_alias }} · {{ item.source_table }}
-                  <template v-if="item.row_count != null"> · {{ item.row_count }} 行</template>
-                  <span v-else-if="item.stats_error" class="warn"> · 无法统计</span>
-                </span>
-              </div>
-              <el-button
-                link
-                type="danger"
-                class="view-item-delete"
-                @click.stop="removeView(item)"
-              >
-                <el-icon><Delete /></el-icon>
-              </el-button>
-            </li>
-          </ul>
-          <el-button type="primary" plain class="goto-migrate" @click="router.push('/blob-migrate')">
-            去 BLOB 迁移页新建
-          </el-button>
         </aside>
 
         <main class="data-panel">
@@ -785,7 +804,7 @@ onUnmounted(() => {
               <div v-if="activeView" class="browse-pane">
                 <div class="data-head">
                   <div>
-                    <h3>{{ formatSavedViewName(activeView.name) }}</h3>
+                    <h3>{{ activeView.source_table }}</h3>
                     <p class="field-hint">
                       {{ activeView.db_label || activeView.db_alias }} /
                       {{ activeView.source_table }} · PK {{ activeView.source_pk_column }} ·
@@ -886,7 +905,7 @@ onUnmounted(() => {
                   </div>
                 </div>
               </div>
-              <el-empty v-else description="请选择左侧配置，或从目录创建" />
+              <el-empty v-else description="请在左侧目录选择对象，或打开已保存的配置" />
             </el-tab-pane>
 
             <el-tab-pane label="SQL 查询" name="sql">
@@ -1014,7 +1033,8 @@ onUnmounted(() => {
 }
 
 .catalog-tree {
-  max-height: 240px;
+  flex: 1;
+  min-height: 120px;
   overflow: auto;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
@@ -1022,7 +1042,8 @@ onUnmounted(() => {
 }
 
 .catalog-tree :deep(.el-tree-node__content) {
-  height: 24px;
+  height: auto;
+  min-height: 24px;
 }
 
 .catalog-tree :deep(.el-tree-node__label) {
@@ -1030,8 +1051,30 @@ onUnmounted(() => {
 }
 
 .catalog-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.catalog-node-label {
+  min-width: 0;
+}
+
+.catalog-saved-tag {
+  flex-shrink: 0;
+  height: 18px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
+.catalog-selection-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  margin-bottom: 4px;
 }
 
 .catalog-selection {
@@ -1039,11 +1082,7 @@ onUnmounted(() => {
   border-radius: 6px;
   background: var(--el-fill-color-light);
   font-size: 12px;
-}
-
-.catalog-selection-title {
-  font-weight: 600;
-  margin-bottom: 4px;
+  flex-shrink: 0;
 }
 
 .catalog-actions {
@@ -1124,12 +1163,6 @@ onUnmounted(() => {
   margin-left: 8px;
 }
 
-.panel-head-spaced {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--el-border-color-lighter);
-}
-
 .view-list-panel {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
@@ -1146,68 +1179,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   font-weight: 600;
-}
-
-.view-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  flex: 1;
-  overflow: auto;
-  min-height: 0;
-}
-
-.view-item {
-  position: relative;
-  padding: 3px 24px 3px 6px;
-  border-radius: 4px;
-  cursor: pointer;
-  border: 1px solid transparent;
-}
-
-.view-item:hover {
-  background: var(--el-fill-color-light);
-}
-
-.view-item.active {
-  border-color: var(--el-color-primary-light-5);
-  background: var(--el-color-primary-light-9);
-}
-
-.view-item-line {
-  min-width: 0;
-}
-
-.view-item-title {
-  font-weight: 500;
-  font-size: 12px;
-  line-height: 1.3;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.view-item-meta {
-  font-size: 11px;
-  color: var(--el-text-color-secondary);
-  line-height: 1.25;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.view-item-meta .warn {
-  color: var(--el-color-warning);
-}
-
-.view-item-delete {
-  position: absolute;
-  top: 8px;
-  right: 4px;
-}
-
-.goto-migrate {
-  width: 100%;
+  flex-shrink: 0;
 }
 
 .data-panel {
