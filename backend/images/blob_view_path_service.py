@@ -183,6 +183,13 @@ def resolve_path_lookup_table(
             )
             return _validate_identifier(lookup, label="路径映射表")
 
+    from images.blob_view_sql_parser import parse_view_driving_table
+
+    driving = parse_view_driving_table(definition)
+    if driving:
+        logger.info("fallback path_lookup_table=%s (driving table) for view=%s", driving, table)
+        return _validate_identifier(driving, label="基表名")
+
     raise BlobViewPathError(
         f"无法自动识别视图 {table} 的基表，请在配置中手动填写 path_lookup_table"
     )
@@ -209,8 +216,12 @@ def resolve_source_metadata(
         raise BlobViewPathError("至少需要一个 BLOB 列")
 
     obj_type = normalize_object_type(object_type) if object_type else None
-    if obj_type is None and conn.vendor == "mysql":
-        obj_type = detect_mysql_object_type(conn, database=database, object_name=object_name)
+    if conn.vendor == "mysql":
+        detected = detect_mysql_object_type(conn, database=database, object_name=object_name)
+        if detected == OBJECT_TYPE_VIEW:
+            obj_type = OBJECT_TYPE_VIEW
+        elif obj_type is None:
+            obj_type = detected
     elif obj_type is None:
         obj_type = OBJECT_TYPE_TABLE
 

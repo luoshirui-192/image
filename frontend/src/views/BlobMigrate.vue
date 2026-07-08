@@ -270,9 +270,11 @@ function formatSourceColumns(row) {
 }
 
 function migrationPayloadBase() {
+  const dbName = selectedDb.value?.name
   return {
     name: form.name.trim() || undefined,
     db_alias: form.dbAlias,
+    database_name: dbName && dbName !== 'default' ? dbName : undefined,
     source_table: form.sourceTable.trim(),
     source_pk_column: form.sourcePkColumn.trim() || 'id',
     blob_column: (form.blobColumns[0] || form.blobColumn || '').trim(),

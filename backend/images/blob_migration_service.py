@@ -1024,9 +1024,10 @@ def create_migration_source(**fields) -> BlobMigrationSource:
         )
 
     db_alias = fields.get("db_alias") or "default"
-    with db_alias_session(db_alias) as alias:
+    initial_db = (fields.get("database_name") or "").strip()
+    with db_alias_session(db_alias, database=initial_db or None) as alias:
         conn = connections[alias]
-        db_name = str(conn.settings_dict.get("NAME") or "")
+        db_name = initial_db or str(conn.settings_dict.get("NAME") or "")
         try:
             meta = resolve_source_metadata(
                 conn,

@@ -17,6 +17,26 @@ JOIN_VIEW_SQL = (
     "`wgr_face_images` `c` on((`c`.`file_name` = `a`.`Matchname`)))"
 )
 
+JOIN_VIEW_SQL_WITH_AS = (
+    "select `a`.`Araname` AS `Araname`,`a`.`Arcname` AS `Arcname`,"
+    "`a`.`Matchname` AS `Matchname`,`b`.`image_data` AS `image_data`,"
+    "`d`.`image_data` AS `imagedataArc`,`c`.`image_content` AS `image_content` "
+    "from (((`wgr_1vn_ara_arc` as `a` join `t_images_SAXCreg` as `b` "
+    "on((`b`.`Fname` = `a`.`Araname`))) join `t_images_SAXCreg` as `d` "
+    "on((`d`.`Fname` = `a`.`Arcname`))) join `wgr_face_images` as `c` "
+    "on((`c`.`file_name` = `a`.`Matchname`)))"
+)
+
+JOIN_VIEW_SQL_TABLE_NAMES = (
+    "select `wgr_1vn_ara_arc`.`Araname` AS `Araname`,"
+    "`a`.`Matchname` AS `Matchname`,"
+    "`t_images_SAXCreg`.`image_data` AS `image_data`,"
+    "`wgr_face_images`.`image_content` AS `image_content` "
+    "from `wgr_1vn_ara_arc` `a` join `t_images_SAXCreg` `b` "
+    "on `b`.`Fname` = `a`.`Araname` join `wgr_face_images` `c` "
+    "on `c`.`file_name` = `a`.`Matchname`"
+)
+
 
 class BlobViewPathHelperTestCase(SimpleTestCase):
     def test_parse_simple_view_base_table(self):
@@ -60,3 +80,16 @@ class BlobViewPathHelperTestCase(SimpleTestCase):
                 "source_column": "image_content",
             },
         )
+
+    def test_infer_join_view_with_as_keyword(self):
+        blob_columns = ["image_data", "imagedataArc", "image_content"]
+        mappings = infer_blob_column_path_mappings(JOIN_VIEW_SQL_WITH_AS, blob_columns)
+        self.assertEqual(len(mappings), 3)
+
+    def test_infer_join_view_table_names_in_select(self):
+        blob_columns = ["image_data", "image_content"]
+        mappings = infer_blob_column_path_mappings(JOIN_VIEW_SQL_TABLE_NAMES, blob_columns)
+        by_col = {item["view_column"]: item for item in mappings}
+        self.assertEqual(len(mappings), 2)
+        self.assertEqual(by_col["image_data"]["source_id_column"], "Araname")
+        self.assertEqual(by_col["image_content"]["source_id_column"], "Matchname")

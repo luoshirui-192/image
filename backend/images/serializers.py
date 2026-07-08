@@ -113,6 +113,7 @@ class BlobMigrationSourceSerializer(serializers.Serializer):
     tags = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
     where_clause = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
     db_alias = serializers.CharField(required=False, default="default", max_length=32)
+    database_name = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
     enabled = serializers.IntegerField(required=False, default=1)
     last_run_at = serializers.DateTimeField(read_only=True)
     create_time = serializers.DateTimeField(read_only=True)

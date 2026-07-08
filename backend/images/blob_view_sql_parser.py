@@ -4,22 +4,41 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# `table` `alias` after FROM / JOIN
+# `schema`.`table` `alias` / `table` AS `alias` after FROM / JOIN (optional parens)
 TABLE_ALIAS_RE = re.compile(
-    r"(?:FROM|JOIN)\s+`?(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)`?\s+`?(?P<alias>[a-zA-Z_][a-zA-Z0-9_]*)`?",
+    r"(?:FROM|JOIN)\s+"
+    r"(?:\(\s*)*"
+    r"(?:(?:`?(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)`?)\.)?"
+    r"`?(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)`?\s+"
+    r"(?:AS\s+)?"
+    r"`?(?P<alias>[a-zA-Z_][a-zA-Z0-9_]*)`?",
     re.IGNORECASE,
 )
 
-# `alias`.`col` AS `view_col`  (view_col optional — defaults to col)
+# `schema`.`ref`.`col` AS `view_col`  (ref = alias or table name)
 SELECT_ITEM_RE = re.compile(
-    r"`?(?P<src_alias>[a-zA-Z_][a-zA-Z0-9_]*)`?\.\s*`?(?P<src_col>[a-zA-Z_][a-zA-Z0-9_]*)`?"
-    r"(?:\s+AS\s+`?(?P<view_col>[a-zA-Z_][a-zA-Z0-9_]*)`?)?",
+    r"(?:(?:`?(?P<sel_schema>[a-zA-Z_][a-zA-Z0-9_]*)`?)\.)?"
+    r"`?(?P<src_ref>[a-zA-Z_][a-zA-Z0-9_]*)`?\.\s*"
+    r"`?(?P<src_col>[a-zA-Z_][a-zA-Z0-9_]*)`?"
+    r"(?:\s+(?:AS\s+)?`?(?P<view_col>[a-zA-Z_][a-zA-Z0-9_]*)`?)?",
     re.IGNORECASE,
 )
 
 JOIN_ON_RE = re.compile(
-    r"`?(?P<left_alias>[a-zA-Z_][a-zA-Z0-9_]*)`?\.\s*`?(?P<left_col>[a-zA-Z_][a-zA-Z0-9_]*)`?\s*="
-    r"\s*(?:\(\s*)?`?(?P<right_alias>[a-zA-Z_][a-zA-Z0-9_]*)`?\.\s*`?(?P<right_col>[a-zA-Z_][a-zA-Z0-9_]*)`?",
+    r"(?:(?:`?(?P<left_schema>[a-zA-Z_][a-zA-Z0-9_]*)`?)\.)?"
+    r"`?(?P<left_ref>[a-zA-Z_][a-zA-Z0-9_]*)`?\.\s*"
+    r"`?(?P<left_col>[a-zA-Z_][a-zA-Z0-9_]*)`?\s*="
+    r"\s*(?:\(\s*)*"
+    r"(?:(?:`?(?P<right_schema>[a-zA-Z_][a-zA-Z0-9_]*)`?)\.)?"
+    r"`?(?P<right_ref>[a-zA-Z_][a-zA-Z0-9_]*)`?\.\s*"
+    r"`?(?P<right_col>[a-zA-Z_][a-zA-Z0-9_]*)`?",
+    re.IGNORECASE,
+)
+
+DRIVING_TABLE_RE = re.compile(
+    r"\bFROM\s+(?:\(\s*)*"
+    r"(?:(?:`?(?P<schema>[a-zA-Z_][a-zA-Z0-9_]*)`?)\.)?"
+    r"`?(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)`?",
     re.IGNORECASE,
 )
 
@@ -62,7 +81,7 @@ def parse_table_aliases(from_and_joins: str) -> dict[str, str]:
     return aliases
 
 
-def parse_select_columns(select_part: str) -> dict[str, tuple[str, str]]:
+def parse_select_columns(select_part: str, alias_to_table: dict[str, str]) -> dict[str, tuple[str, str]]:
     """Map view column name -> (source alias, source column)."""
     mapping: dict[str, tuple[str, str]] = {}
     if not select_part:
@@ -71,25 +90,34 @@ def parse_select_columns(select_part: str) -> dict[str, tuple[str, str]]:
         match = SELECT_ITEM_RE.search(chunk)
         if not match:
             continue
-        src_alias = match.group("src_alias")
+        src_ref = match.group("src_ref")
         src_col = match.group("src_col")
         view_col = match.group("view_col") or src_col
+        src_alias = _resolve_table_ref(src_ref, alias_to_table)
         mapping[view_col] = (src_alias, src_col)
     return mapping
 
 
-def parse_join_conditions(from_and_joins: str) -> list[JoinCondition]:
+def parse_join_conditions(from_and_joins: str, alias_to_table: dict[str, str]) -> list[JoinCondition]:
     conditions: list[JoinCondition] = []
     for match in JOIN_ON_RE.finditer(from_and_joins or ""):
         conditions.append(
             JoinCondition(
-                left_alias=match.group("left_alias"),
+                left_alias=_resolve_table_ref(match.group("left_ref"), alias_to_table),
                 left_col=match.group("left_col"),
-                right_alias=match.group("right_alias"),
+                right_alias=_resolve_table_ref(match.group("right_ref"), alias_to_table),
                 right_col=match.group("right_col"),
             )
         )
     return conditions
+
+
+def parse_view_driving_table(view_definition: str) -> str | None:
+    _, from_part = split_select_from(view_definition)
+    match = DRIVING_TABLE_RE.search(from_part or "")
+    if not match:
+        return None
+    return match.group("table")
 
 
 def infer_blob_column_path_mappings(
@@ -107,12 +135,12 @@ def infer_blob_column_path_mappings(
         return []
 
     table_aliases = parse_table_aliases(from_part)
-    select_map = parse_select_columns(select_part)
-    joins = parse_join_conditions(from_part)
+    select_map = parse_select_columns(select_part, table_aliases)
+    joins = parse_join_conditions(from_part, table_aliases)
     if not table_aliases or not select_map:
         return []
 
-    main_alias = _first_from_alias(from_part)
+    main_alias = _first_from_alias(from_part, table_aliases)
     reverse_select: dict[tuple[str, str], str] = {
         (src_alias, src_col): view_col for view_col, (src_alias, src_col) in select_map.items()
     }
@@ -123,9 +151,7 @@ def infer_blob_column_path_mappings(
         if not src:
             continue
         src_alias, src_col = src
-        lookup_table = table_aliases.get(src_alias)
-        if not lookup_table:
-            continue
+        lookup_table = table_aliases.get(src_alias) or src_alias
         source_id_column = _resolve_source_id_column(
             src_alias=src_alias,
             joins=joins,
@@ -145,15 +171,24 @@ def infer_blob_column_path_mappings(
     return results
 
 
-def _first_from_alias(from_and_joins: str) -> str | None:
-    match = re.search(
-        r"\bFROM\s+`?(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)`?\s+`?(?P<alias>[a-zA-Z_][a-zA-Z0-9_]*)`?",
-        from_and_joins or "",
-        re.IGNORECASE,
-    )
+def _first_from_alias(from_and_joins: str, alias_to_table: dict[str, str]) -> str | None:
+    match = DRIVING_TABLE_RE.search(from_and_joins or "")
     if not match:
         return None
-    return match.group("alias")
+    table = match.group("table")
+    for alias, mapped in alias_to_table.items():
+        if mapped == table and alias != table:
+            return alias
+    return table
+
+
+def _resolve_table_ref(ref: str, alias_to_table: dict[str, str]) -> str:
+    if ref in alias_to_table:
+        return ref
+    matches = [alias for alias, table in alias_to_table.items() if table == ref]
+    if len(matches) == 1:
+        return matches[0]
+    return ref
 
 
 def _resolve_source_id_column(

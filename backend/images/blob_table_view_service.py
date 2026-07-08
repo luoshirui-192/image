@@ -557,9 +557,10 @@ def create_table_view(
     where = validate_where_clause(where_clause)
     display_json = _serialize_display_columns(display_columns)
 
-    with db_alias_session(db_alias) as alias:
+    initial_db = (database_name or "").strip()
+    with db_alias_session(db_alias, database=initial_db or None) as alias:
         conn = connections[alias]
-        db_name = (database_name or str(conn.settings_dict.get("NAME") or "")).strip()
+        db_name = initial_db or str(conn.settings_dict.get("NAME") or "").strip()
         try:
             meta = resolve_source_metadata(
                 conn,
