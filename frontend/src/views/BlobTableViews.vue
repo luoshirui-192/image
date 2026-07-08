@@ -41,6 +41,7 @@ const loadingMore = ref(false)
 
 const tableRef = ref(null)
 const tableWrapRef = ref(null)
+const rowPreviewPanelRef = ref(null)
 const tableHeight = ref(520)
 let tableScrollEl = null
 let resizeObserver = null
@@ -59,6 +60,18 @@ const selectedRowPreviewItems = computed(() => {
   if (!selectedRow.value) return []
   return rowPreviewCells(selectedRow.value)
 })
+
+const previewableTableRows = computed(() =>
+  tableRows.value.filter((row) => rowPreviewCells(row).length > 0),
+)
+
+const selectedPreviewRowIndex = computed(() => {
+  if (!selectedRow.value) return -1
+  const key = getRowKey(selectedRow.value)
+  return previewableTableRows.value.findIndex((row) => getRowKey(row) === key)
+})
+
+let previewWheelLocked = false
 
 const loadingCatalog = ref(false)
 const selectedCatalogObject = ref(null)
@@ -372,17 +385,64 @@ function pathCell(row, colName) {
 }
 
 function autoSelectFirstRow() {
-  const row = tableRows.value.find((r) => rowPreviewCells(r).length > 0)
-  selectedRow.value = row ?? null
-  if (row) {
-    syncTableCurrentRow(row)
+  const row = previewableTableRows.value[0] ?? null
+  selectPreviewRow(row)
+}
+
+function selectPreviewRow(row, { focusPanel = false } = {}) {
+  selectedRow.value = row
+  syncTableCurrentRow(row)
+  if (focusPanel) {
+    nextTick(() => rowPreviewPanelRef.value?.focus())
+  }
+}
+
+function goPrevPreviewRow() {
+  const rows = previewableTableRows.value
+  if (rows.length <= 1) return
+  const idx = selectedPreviewRowIndex.value
+  if (idx <= 0) return
+  selectPreviewRow(rows[idx - 1])
+}
+
+function goNextPreviewRow() {
+  const rows = previewableTableRows.value
+  if (rows.length <= 1) return
+  const idx = selectedPreviewRowIndex.value
+  if (idx < 0 || idx >= rows.length - 1) return
+  selectPreviewRow(rows[idx + 1])
+}
+
+function onPreviewKeydown(event) {
+  if (!previewableTableRows.value.length) return
+  if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+    event.preventDefault()
+    goPrevPreviewRow()
+  } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+    event.preventDefault()
+    goNextPreviewRow()
+  }
+}
+
+function onPreviewWheel(event) {
+  const rows = previewableTableRows.value
+  if (rows.length <= 1 || previewWheelLocked) return
+  if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
+  event.preventDefault()
+  previewWheelLocked = true
+  window.setTimeout(() => {
+    previewWheelLocked = false
+  }, 200)
+  if (event.deltaY > 0) {
+    goNextPreviewRow()
+  } else if (event.deltaY < 0) {
+    goPrevPreviewRow()
   }
 }
 
 function onTableRowClick(row, _column, event) {
   if (event?.target?.closest?.('button, a, .el-button')) return
-  selectedRow.value = row
-  syncTableCurrentRow(row)
+  selectPreviewRow(row, { focusPanel: true })
 }
 
 function rowPreviewCells(row) {
@@ -401,8 +461,7 @@ function rowPreviewCells(row) {
 
 function openPreview(pathCellValue, row) {
   if (!pathCellValue?.image_info_id) return
-  selectedRow.value = row
-  syncTableCurrentRow(row)
+  selectPreviewRow(row, { focusPanel: true })
 }
 
 function syncTableHeight() {
@@ -879,11 +938,26 @@ onUnmounted(() => {
                     <div v-else-if="tableRows.length && !hasMore" class="load-more-hint muted">已全部加载</div>
                   </div>
 
-                  <div class="row-preview-panel">
+                  <div
+                    ref="rowPreviewPanelRef"
+                    class="row-preview-panel"
+                    tabindex="0"
+                    @keydown="onPreviewKeydown"
+                    @wheel="onPreviewWheel"
+                  >
                     <div class="row-preview-head">
                       <span>行预览</span>
                       <span v-if="selectedRowPreviewItems.length" class="row-preview-count">
                         {{ selectedRowPreviewItems.length }} 张
+                      </span>
+                      <span
+                        v-if="previewableTableRows.length > 1 && selectedPreviewRowIndex >= 0"
+                        class="row-preview-count"
+                      >
+                        第 {{ selectedPreviewRowIndex + 1 }} / {{ previewableTableRows.length }} 行
+                      </span>
+                      <span v-if="previewableTableRows.length > 1" class="row-preview-hint">
+                        聚焦后 ↑↓ 或滚轮切换行
                       </span>
                     </div>
                     <div v-if="selectedRowPreviewItems.length" class="row-preview-strip">
@@ -1281,16 +1355,30 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  outline: none;
+}
+
+.row-preview-panel:focus-visible {
+  border-color: var(--el-color-primary-light-5);
+  box-shadow: 0 0 0 1px var(--el-color-primary-light-7);
 }
 
 .row-preview-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   font-size: 12px;
   font-weight: 600;
   margin-bottom: 6px;
   flex-shrink: 0;
+}
+
+.row-preview-hint {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: normal;
+  color: var(--el-text-color-secondary);
 }
 
 .row-preview-count {
