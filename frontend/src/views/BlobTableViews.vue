@@ -124,10 +124,20 @@ function catalogNodeLabel(data) {
     return data.isMigrationTarget ? `${data.label}（迁移库）` : data.label
   }
   if (data.nodeType === 'object') {
+    const typeLabel = data.objectType === 'view' ? '数据库视图' : '表'
     const blobs = (data.blobColumns || []).map((item) => item.column).join(', ')
-    return blobs ? `${data.label} · ${blobs}` : data.label
+    return `${data.label} [${typeLabel}]${blobs ? ` · ${blobs}` : ''}`
   }
   return data.label
+}
+
+function formatSavedViewName(name) {
+  const text = (name || '').trim()
+  if (!text) return text
+  return text
+    .replace(/\s*浏览\s*$/u, '')
+    .replace(/\s*视图\s*$/u, '')
+    .trim() || text
 }
 
 async function loadCatalogTree(root, resolve) {
@@ -715,7 +725,10 @@ onUnmounted(() => {
             <div class="catalog-selection-title">已选对象</div>
             <div>{{ selectedCatalogObject.database }}.{{ selectedCatalogObject.label }}</div>
             <div class="field-hint">
-              {{ selectedCatalogObject.blobColumns?.map((c) => c.column).join(', ') || '—' }}
+              {{ selectedCatalogObject.objectType === 'view' ? '数据库视图' : '表' }}
+              <template v-if="selectedCatalogObject.blobColumns?.length">
+                · {{ selectedCatalogObject.blobColumns.map((c) => c.column).join(', ') }}
+              </template>
             </div>
             <div class="catalog-actions">
               <el-button size="small" type="primary" plain @click="openCreateViewDialog">
@@ -744,7 +757,7 @@ onUnmounted(() => {
               @click="selectView(item.id)"
             >
               <div class="view-item-line">
-                <span class="view-item-title">{{ item.name }}</span>
+                <span class="view-item-title">{{ formatSavedViewName(item.name) }}</span>
                 <span class="view-item-meta">
                   {{ item.db_label || item.db_alias }} · {{ item.source_table }}
                   <template v-if="item.row_count != null"> · {{ item.row_count }} 行</template>
@@ -772,7 +785,7 @@ onUnmounted(() => {
               <div v-if="activeView" class="browse-pane">
                 <div class="data-head">
                   <div>
-                    <h3>{{ activeView.name }}</h3>
+                    <h3>{{ formatSavedViewName(activeView.name) }}</h3>
                     <p class="field-hint">
                       {{ activeView.db_label || activeView.db_alias }} /
                       {{ activeView.source_table }} · PK {{ activeView.source_pk_column }} ·
