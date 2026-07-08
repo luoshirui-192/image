@@ -1035,19 +1035,46 @@ onUnmounted(() => {
 .catalog-tree {
   flex: 1;
   min-height: 120px;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
   padding: 4px 0;
+  scrollbar-width: thin;
+}
+
+.catalog-tree::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+
+.catalog-tree::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: var(--el-border-color);
+}
+
+.catalog-tree :deep(.el-tree) {
+  width: max-content;
+  min-width: 100%;
+}
+
+.catalog-tree :deep(.el-tree-node),
+.catalog-tree :deep(.el-tree-node__children) {
+  overflow: visible;
 }
 
 .catalog-tree :deep(.el-tree-node__content) {
   height: auto;
   min-height: 24px;
+  overflow: visible;
+  width: max-content;
+  min-width: 100%;
 }
 
 .catalog-tree :deep(.el-tree-node__label) {
   overflow: visible;
+  flex: 0 1 auto;
+  max-width: none;
 }
 
 .catalog-node {
@@ -1056,10 +1083,11 @@ onUnmounted(() => {
   gap: 6px;
   font-size: 12px;
   white-space: nowrap;
+  width: max-content;
 }
 
 .catalog-node-label {
-  min-width: 0;
+  flex-shrink: 0;
 }
 
 .catalog-saved-tag {
