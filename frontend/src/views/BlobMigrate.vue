@@ -69,7 +69,7 @@ const runOptions = reactive({
   batchSize: 100,
   dryRun: true,
   skipExisting: true,
-  warmThumbsAfter: true,
+  warmThumbsAfter: false,
 })
 
 const categoryDialogVisible = ref(false)
@@ -1004,7 +1004,7 @@ onUnmounted(() => {
             <span v-if="displayJob.eta_seconds != null" class="job-eta">剩余 {{ formatEta(displayJob.eta_seconds) }}</span>
           </div>
           <el-progress
-            :percentage="Math.min(100, Math.round(displayJob.percent || 0))"
+            :percentage="Math.min(jobInProgress ? 99 : 100, Math.round(displayJob.percent || 0))"
             :status="displayJob.status === 'failed' ? 'exception' : displayJob.status === 'completed' ? 'success' : undefined"
             :stroke-width="16"
             striped

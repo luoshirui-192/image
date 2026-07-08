@@ -812,10 +812,23 @@ def _run_migration_batch_cursor(
     return batch, items
 
 
+def _job_migration_work_done(job: BlobMigrationJob) -> bool:
+    """True when succeeded+failed reached the estimated pending work (skip_existing jobs)."""
+    total = int(job.total_estimate or 0)
+    if total <= 0:
+        return False
+    done = int(job.succeeded or 0) + int(job.failed or 0)
+    return done >= total
+
+
 def execute_migration_job_batches(job: BlobMigrationJob) -> None:
     source = _load_source(job.source_id)
     _validate_source_config(source)
     batch_size = _max_batch_size(job.batch_size)
+
+    job.refresh_from_db()
+    if bool(job.skip_existing) and int(job.total_estimate or 0) <= 0:
+        return
 
     while True:
         job.refresh_from_db()
@@ -835,6 +848,9 @@ def execute_migration_job_batches(job: BlobMigrationJob) -> None:
             break
 
         _update_job_progress(job, batch, last_pk=batch.last_pk or job.last_pk_cursor)
+
+        if bool(job.skip_existing) and _job_migration_work_done(job):
+            break
 
         if not job.run_all:
             break

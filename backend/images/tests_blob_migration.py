@@ -301,6 +301,25 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(ImageInfo.objects.count(), 0)
 
     @override_settings(UPLOAD_ROOT=None, BLOB_MIGRATION_UPLOAD_WORKERS=1)
+    def test_rerun_job_completes_when_nothing_pending(self):
+        upload_root = str(self.upload_root)
+        with override_settings(UPLOAD_ROOT=upload_root):
+            first = run_blob_migration(self.source.id, batch_size=10, dry_run=False)
+            self.assertEqual(first.succeeded, 1)
+
+            job = create_migration_job(
+                source_id=self.source.id,
+                created_by="blob_admin",
+                batch_size=10,
+                run_all=True,
+                skip_existing=True,
+            )
+            self.assertEqual(job.total_estimate, 0)
+            finished = execute_migration_job(job.id)
+            self.assertEqual(finished.status, BlobMigrationJob.STATUS_COMPLETED)
+            self.assertEqual(finished.succeeded, 0)
+
+    @override_settings(UPLOAD_ROOT=None, BLOB_MIGRATION_UPLOAD_WORKERS=1)
     def test_migration_job_runs_to_completion(self):
         upload_root = str(self.upload_root)
         with override_settings(UPLOAD_ROOT=upload_root):

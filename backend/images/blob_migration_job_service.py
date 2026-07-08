@@ -176,10 +176,20 @@ def _compute_eta_seconds(job: BlobMigrationJob) -> int | None:
     return int(remaining / rate) if remaining else 0
 
 
+def _job_migration_work_done(job: BlobMigrationJob) -> bool:
+    """True when succeeded+failed reached the estimated pending work (skip_existing jobs)."""
+    total = int(job.total_estimate or 0)
+    if total <= 0:
+        return False
+    return _job_progress_count(job) >= total
+
+
 def serialize_migration_job(job: BlobMigrationJob, *, include_recent_errors: bool = True) -> dict[str, Any]:
     progress_count = _job_progress_count(job)
     total = max(int(job.total_estimate or 0), progress_count)
     percent = round(100.0 * progress_count / total, 2) if total else 0.0
+    if job.status in ACTIVE_STATUSES and percent >= 100:
+        percent = 99.0
     payload: dict[str, Any] = {
         "id": job.id,
         "source_id": job.source_id,
@@ -242,7 +252,8 @@ def export_job_errors_csv(job_id: int) -> str:
     return output.getvalue()
 
 
-def _warm_thumbnails_after_job(job: BlobMigrationJob) -> None:
+def _warm_thumbnails_after_job(job_id: int) -> None:
+    job = _load_job(job_id)
     if not job.warm_thumbs_after or job.dry_run:
         return
     from images.blob_migration_service import _load_source, _storage_table
@@ -268,9 +279,32 @@ def _warm_thumbnails_after_job(job: BlobMigrationJob) -> None:
         except Exception:
             logger.warning("warm thumb failed path=%s", image.image_path, exc_info=True)
     BlobMigrationJob.objects.filter(pk=job.pk).update(
-        message=f"{job.message or '完成'}；已预热 {warmed} 张缩略图",
+        message=f"{job.message or '迁移完成'}；已预热 {warmed} 张缩略图",
         updated_at=timezone.now(),
     )
+
+
+def _run_warm_thumbnails_worker(job_id: int) -> None:
+    from django.db import close_old_connections
+
+    close_old_connections()
+    try:
+        _warm_thumbnails_after_job(job_id)
+    except Exception:
+        logger.exception("warm thumbnails worker failed job_id=%s", job_id)
+    finally:
+        close_old_connections()
+
+
+def _kick_warm_thumbnails_async(job_id: int) -> None:
+    thread = threading.Thread(
+        target=_run_warm_thumbnails_worker,
+        args=(job_id,),
+        name=f"blob-migrate-warm-{job_id}",
+        daemon=True,
+    )
+    thread.start()
+    logger.info("kicked warm thumbnails thread job_id=%s", job_id)
 
 
 def execute_migration_job(job_id: int) -> BlobMigrationJob:
@@ -321,7 +355,6 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
                 updated_at=timezone.now(),
             )
         elif job.status == BlobMigrationJob.STATUS_RUNNING:
-            _warm_thumbnails_after_job(job)
             job.refresh_from_db()
             BlobMigrationJob.objects.filter(pk=job.pk).update(
                 status=BlobMigrationJob.STATUS_COMPLETED,
@@ -329,6 +362,8 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
                 message=job.message or "迁移完成",
                 updated_at=timezone.now(),
             )
+            if job.warm_thumbs_after:
+                _kick_warm_thumbnails_async(job.id)
     except Exception as exc:
         logger.exception("migration job failed id=%s", job_id)
         BlobMigrationJob.objects.filter(pk=job.pk).update(
