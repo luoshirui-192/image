@@ -783,31 +783,33 @@ onUnmounted(() => {
               <el-icon><Refresh /></el-icon>
             </el-button>
           </div>
-          <el-tree
-            :key="`catalog-${viewsVersion}`"
-            lazy
-            :load="loadCatalogTree"
-            node-key="id"
-            :props="{ label: 'label', isLeaf: 'leaf' }"
-            highlight-current
-            class="catalog-tree"
-            @node-click="onCatalogNodeClick"
-          >
-            <template #default="{ data }">
-              <span class="catalog-node">
-                <span class="catalog-node-label">{{ catalogNodeLabel(data) }}</span>
-                <el-tag
-                  v-if="findSavedViewForCatalogNode(data)"
-                  size="small"
-                  type="success"
-                  effect="plain"
-                  class="catalog-saved-tag"
-                >
-                  已保存
-                </el-tag>
-              </span>
-            </template>
-          </el-tree>
+          <div class="catalog-tree-wrap">
+            <el-tree
+              :key="`catalog-${viewsVersion}`"
+              lazy
+              :load="loadCatalogTree"
+              node-key="id"
+              :props="{ label: 'label', isLeaf: 'leaf' }"
+              highlight-current
+              class="catalog-tree"
+              @node-click="onCatalogNodeClick"
+            >
+              <template #default="{ data }">
+                <span class="catalog-node">
+                  <span class="catalog-node-label">{{ catalogNodeLabel(data) }}</span>
+                  <el-tag
+                    v-if="findSavedViewForCatalogNode(data)"
+                    size="small"
+                    type="success"
+                    effect="plain"
+                    class="catalog-saved-tag"
+                  >
+                    已保存
+                  </el-tag>
+                </span>
+              </template>
+            </el-tree>
+          </div>
 
           <div v-if="selectedCatalogObject" class="catalog-selection">
             <div class="catalog-selection-title">
@@ -1106,35 +1108,36 @@ onUnmounted(() => {
   min-height: 0;
 }
 
-.catalog-tree {
+.catalog-tree-wrap {
   flex: 1;
   min-height: 120px;
-  overflow-x: auto;
-  overflow-y: auto;
+  min-width: 0;
+  overflow: auto;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
-  padding: 4px 0;
   scrollbar-width: thin;
 }
 
-.catalog-tree::-webkit-scrollbar {
-  height: 8px;
+.catalog-tree-wrap::-webkit-scrollbar {
+  height: 10px;
   width: 8px;
 }
 
-.catalog-tree::-webkit-scrollbar-thumb {
+.catalog-tree-wrap::-webkit-scrollbar-thumb {
   border-radius: 4px;
   background: var(--el-border-color);
 }
 
-.catalog-tree :deep(.el-tree) {
-  width: max-content;
+.catalog-tree {
+  display: inline-block;
   min-width: 100%;
+  width: max-content;
+  padding: 4px 0;
+  box-sizing: border-box;
 }
 
-.catalog-tree :deep(.el-tree-node),
-.catalog-tree :deep(.el-tree-node__children) {
-  overflow: visible;
+.catalog-tree :deep(.el-tree-node) {
+  white-space: nowrap;
 }
 
 .catalog-tree :deep(.el-tree-node__content) {
@@ -1142,12 +1145,12 @@ onUnmounted(() => {
   min-height: 24px;
   overflow: visible;
   width: max-content;
-  min-width: 100%;
+  max-width: none;
 }
 
 .catalog-tree :deep(.el-tree-node__label) {
   overflow: visible;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   max-width: none;
 }
 
