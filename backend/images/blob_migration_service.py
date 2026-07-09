@@ -15,7 +15,9 @@ from django.db import close_old_connections, connections
 from django.utils import timezone
 
 from images.blob_schema_helpers import (
+    OBJECT_TYPE_VIEW,
     map_storage_table,
+    normalize_object_type,
     parse_blob_column_path_mappings,
     parse_blob_columns,
     serialize_blob_column_path_mappings,
@@ -258,13 +260,69 @@ def resolve_source_database_name(source: BlobMigrationSource) -> str:
 
 
 def prepare_migration_source(source: BlobMigrationSource, *, persist: bool = True) -> BlobMigrationSource:
-    """Ensure database_name is set before any remote COUNT or cursor scan."""
+    """Ensure database_name and JOIN path mappings are ready before remote scans."""
     resolved = resolve_source_database_name(source)
     current = (getattr(source, "database_name", "") or "").strip()
     if resolved and resolved != current:
         if persist and source.pk:
             BlobMigrationSource.objects.filter(pk=source.pk).update(database_name=resolved)
         source.database_name = resolved
+    source = _refresh_path_mappings_if_needed(source, persist=persist)
+    return source
+
+
+def _refresh_path_mappings_if_needed(source: BlobMigrationSource, *, persist: bool) -> BlobMigrationSource:
+    """Backfill lookup_id_column on stored JOIN view mappings from the view SQL."""
+    mappings = _path_mappings(source)
+    if not mappings or normalize_object_type(source.source_object_type) != OBJECT_TYPE_VIEW:
+        return source
+    if all((m.get("lookup_id_column") or "").strip() for m in mappings):
+        return source
+    try:
+        blob_cols = _source_blob_columns(source)
+        with _source_db_session(source) as alias:
+            conn = _remote_connection(alias)
+            if conn.vendor != "mysql":
+                return source
+            from images.blob_view_path_service import infer_view_path_mappings
+
+            db_name = _source_database_name(source) or str(conn.settings_dict.get("NAME") or "")
+            inferred = {
+                m["view_column"]: m
+                for m in infer_view_path_mappings(
+                    conn,
+                    database=db_name,
+                    object_name=source.source_table,
+                    blob_columns=blob_cols,
+                )
+            }
+    except Exception:
+        logger.warning(
+            "refresh path mappings failed source_id=%s table=%s",
+            source.id,
+            source.source_table,
+            exc_info=True,
+        )
+        return source
+
+    updated = False
+    merged: list[dict[str, str]] = []
+    for mapping in mappings:
+        item = dict(mapping)
+        if not (item.get("lookup_id_column") or "").strip():
+            fresh = inferred.get(item.get("view_column") or "")
+            if fresh and fresh.get("lookup_id_column"):
+                item["lookup_id_column"] = fresh["lookup_id_column"]
+                updated = True
+        merged.append(item)
+    if not updated:
+        return source
+    serialized = serialize_blob_column_path_mappings(merged)
+    source.blob_column_path_mappings = serialized
+    if persist and source.pk:
+        BlobMigrationSource.objects.filter(pk=source.pk).update(
+            blob_column_path_mappings=serialized,
+        )
     return source
 
 
@@ -428,6 +486,78 @@ def _blob_nonempty_sql(conn, blob_quoted: str) -> str:
     return f"({blob_quoted} IS NOT NULL)"
 
 
+def _cursor_candidate_checks(source: BlobMigrationSource, conn) -> list[str]:
+    """
+    Filters for finding migratable rows without reading BLOB bytes.
+
+    JOIN views often expose NULL in view BLOB columns while bytes live on base
+    tables; when path mappings exist, key columns are a reliable scan filter.
+    """
+    path_mappings = _path_mappings(source)
+    if path_mappings:
+        seen: set[str] = set()
+        checks: list[str] = []
+        for mapping in path_mappings:
+            col = (mapping.get("source_id_column") or "").strip()
+            if not col or col in seen:
+                continue
+            seen.add(col)
+            checks.append(_blob_nonempty_sql(conn, _quote_ident(col)))
+        if checks:
+            return checks
+    blob_cols = _source_blob_columns(source)
+    return [_blob_nonempty_sql(conn, _quote_ident(col)) for col in blob_cols]
+
+
+def _lookup_id_column(mapping: dict[str, str]) -> str:
+    explicit = (mapping.get("lookup_id_column") or "").strip()
+    if explicit:
+        return explicit
+    return (mapping.get("source_id_column") or "").strip()
+
+
+def _fetch_blob_from_lookup_table(
+    source: BlobMigrationSource,
+    mapping: dict[str, str],
+    row: dict,
+) -> bytes | None:
+    """Read BLOB bytes from the mapped base table when the view column is NULL."""
+    lookup_table = (mapping.get("lookup_table") or "").strip()
+    blob_col = (mapping.get("source_column") or mapping.get("view_column") or "").strip()
+    sid_col = (mapping.get("source_id_column") or "").strip()
+    lookup_id_col = _lookup_id_column(mapping)
+    if not lookup_table or not blob_col or not sid_col or not lookup_id_col:
+        return None
+    if sid_col not in row:
+        return None
+    lookup_id_val = row[sid_col]
+    if lookup_id_val is None:
+        return None
+
+    table = _quote_ident(lookup_table)
+    blob = _quote_ident(blob_col)
+    id_col = _quote_ident(lookup_id_col)
+    sql = f"SELECT {blob} FROM {table} WHERE {id_col} = %s LIMIT 1"
+    with _source_db_session(source) as alias:
+        conn = _remote_connection(alias)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, [lookup_id_val])
+            raw = cursor.fetchone()
+    if not raw:
+        return None
+    return _coerce_blob(raw[0])
+
+
+def _blob_bytes_for_column(source: BlobMigrationSource, row: dict, blob_column: str) -> bytes | None:
+    content = _coerce_blob(row.get(blob_column))
+    if content:
+        return content
+    mapping = _mapping_for_column(source, blob_column)
+    if not mapping:
+        return None
+    return _fetch_blob_from_lookup_table(source, mapping, row)
+
+
 def _validate_source_config(source: BlobMigrationSource) -> None:
     validate_identifier(source.source_table, label="源表名")
     validate_identifier(source.source_pk_column, label="主键列")
@@ -575,9 +705,8 @@ def _cursor_where_parts(
     """Shared WHERE clause for cursor scans over legacy source rows."""
     pk_col_name = source.source_pk_column
     pk = _quote_ident(pk_col_name)
-    blob_cols = _source_blob_columns(source)
 
-    blob_checks = [_blob_nonempty_sql(conn, _quote_ident(col)) for col in blob_cols]
+    blob_checks = _cursor_candidate_checks(source, conn)
     where_parts = ["(" + " OR ".join(blob_checks) + ")"]
     params: list = []
     extra = validate_where_clause(source.where_clause)
@@ -798,7 +927,7 @@ def _migrate_single_column(
         )
 
     try:
-        content = _coerce_blob(row.get(blob_column))
+        content = _blob_bytes_for_column(source, row, blob_column)
         if not content:
             return MigrationItemResult(
                 source_id=row_pk,
@@ -1253,17 +1382,31 @@ def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dic
         conn = _remote_connection(alias)
         table = _quote_ident(source.source_table)
         extra = validate_where_clause(source.where_clause)
-        where_sql = f" WHERE ({extra})" if extra else ""
-        # One table scan, IS NOT NULL only — never LENGTH(blob).
-        select_parts = [
-            f"SUM(CASE WHEN {_blob_nonempty_sql(conn, _quote_ident(col))} THEN 1 ELSE 0 END)"
-            for col in blob_cols
-        ]
-        sql = f"SELECT {', '.join(select_parts)} FROM {table}{where_sql}"
-        with conn.cursor() as cursor:
-            cursor.execute(sql)
-            row = cursor.fetchone() or ()
-        total_with_blob = sum(int(v or 0) for v in row)
+        where_parts: list[str] = []
+        if extra:
+            where_parts.append(f"({extra})")
+        if path_mappings:
+            checks = _cursor_candidate_checks(source, conn)
+            if checks:
+                where_parts.append("(" + " OR ".join(checks) + ")")
+            sql = f"SELECT COUNT(*) FROM {table}"
+            if where_parts:
+                sql += f" WHERE {' AND '.join(where_parts)}"
+            with conn.cursor() as cursor:
+                cursor.execute(sql)
+                rows_with_keys = int((cursor.fetchone() or [0])[0] or 0)
+            total_with_blob = rows_with_keys * max(1, len(blob_cols))
+        else:
+            where_sql = f" WHERE ({extra})" if extra else ""
+            select_parts = [
+                f"SUM(CASE WHEN {_blob_nonempty_sql(conn, _quote_ident(col))} THEN 1 ELSE 0 END)"
+                for col in blob_cols
+            ]
+            sql = f"SELECT {', '.join(select_parts)} FROM {table}{where_sql}"
+            with conn.cursor() as cursor:
+                cursor.execute(sql)
+                row = cursor.fetchone() or ()
+            total_with_blob = sum(int(v or 0) for v in row)
 
     live_maps = ImageSourceMap.objects.filter(image_info_id__in=_live_image_subquery())
     migrated = 0

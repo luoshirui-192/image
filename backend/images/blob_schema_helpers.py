@@ -61,15 +61,17 @@ def parse_blob_column_path_mappings(raw: str | None) -> list[dict[str, str]]:
         lookup_table = str(item.get("lookup_table") or "").strip()
         source_id_column = str(item.get("source_id_column") or "").strip()
         source_column = str(item.get("source_column") or view_column).strip()
+        lookup_id_column = str(item.get("lookup_id_column") or "").strip()
         if view_column and lookup_table and source_id_column:
-            results.append(
-                {
-                    "view_column": view_column,
-                    "lookup_table": lookup_table,
-                    "source_id_column": source_id_column,
-                    "source_column": source_column,
-                }
-            )
+            entry = {
+                "view_column": view_column,
+                "lookup_table": lookup_table,
+                "source_id_column": source_id_column,
+                "source_column": source_column,
+            }
+            if lookup_id_column:
+                entry["lookup_id_column"] = lookup_id_column
+            results.append(entry)
     return results
 
 
@@ -82,16 +84,18 @@ def serialize_blob_column_path_mappings(mappings: list[dict[str, str]] | None) -
         lookup_table = str(item.get("lookup_table") or "").strip()
         source_id_column = str(item.get("source_id_column") or "").strip()
         source_column = str(item.get("source_column") or view_column).strip()
+        lookup_id_column = str(item.get("lookup_id_column") or "").strip()
         if not view_column or not lookup_table or not source_id_column:
             continue
-        cleaned.append(
-            {
-                "view_column": view_column,
-                "lookup_table": lookup_table,
-                "source_id_column": source_id_column,
-                "source_column": source_column,
-            }
-        )
+        entry = {
+            "view_column": view_column,
+            "lookup_table": lookup_table,
+            "source_id_column": source_id_column,
+            "source_column": source_column,
+        }
+        if lookup_id_column:
+            entry["lookup_id_column"] = lookup_id_column
+        cleaned.append(entry)
     return json.dumps(cleaned, ensure_ascii=False) if cleaned else ""
 
 

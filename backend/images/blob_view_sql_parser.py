@@ -152,19 +152,20 @@ def infer_blob_column_path_mappings(
             continue
         src_alias, src_col = src
         lookup_table = table_aliases.get(src_alias) or src_alias
-        source_id_column = _resolve_source_id_column(
+        source_id_column, lookup_id_column = _resolve_source_id_columns(
             src_alias=src_alias,
             joins=joins,
             main_alias=main_alias,
             reverse_select=reverse_select,
         )
-        if not source_id_column:
+        if not source_id_column or not lookup_id_column:
             continue
         results.append(
             {
                 "view_column": view_col,
                 "lookup_table": lookup_table,
                 "source_id_column": source_id_column,
+                "lookup_id_column": lookup_id_column,
                 "source_column": src_col,
             }
         )
@@ -191,31 +192,33 @@ def _resolve_table_ref(ref: str, alias_to_table: dict[str, str]) -> str:
     return ref
 
 
-def _resolve_source_id_column(
+def _resolve_source_id_columns(
     *,
     src_alias: str,
     joins: list[JoinCondition],
     main_alias: str | None,
     reverse_select: dict[tuple[str, str], str],
-) -> str | None:
-    """Pick the view column whose value matches image_source_map.source_id."""
+) -> tuple[str | None, str | None]:
+    """Return (view source_id column, lookup-table id column) for image_source_map.source_id."""
     for join in joins:
         if src_alias not in (join.left_alias, join.right_alias):
             continue
         if join.left_alias == src_alias:
+            lookup_id_column = join.left_col
             other_alias, other_col = join.right_alias, join.right_col
         else:
+            lookup_id_column = join.right_col
             other_alias, other_col = join.left_alias, join.left_col
 
         view_col = reverse_select.get((other_alias, other_col))
         if view_col:
-            return view_col
+            return view_col, lookup_id_column
 
         if main_alias and other_alias == main_alias:
             view_col = reverse_select.get((main_alias, other_col))
             if view_col:
-                return view_col
-    return None
+                return view_col, lookup_id_column
+    return None, None
 
 
 def _split_select_items(select_part: str) -> list[str]:
