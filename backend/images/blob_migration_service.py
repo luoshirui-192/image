@@ -867,6 +867,11 @@ def _run_migration_batch_cursor(
     for item in prepared.pre_skipped:
         _record_batch_item(batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap)
 
+    # Flush pre-skipped counts early so the UI moves before BLOB I/O starts.
+    if job and batch.processed:
+        _update_job_progress(job, batch, last_pk=prepared.last_pk)
+        batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
+
     work_units = _build_work_units(
         source,
         prepared.blob_rows,
@@ -877,6 +882,7 @@ def _run_migration_batch_cursor(
         return batch, items
 
     workers = 1 if dry_run else _upload_workers()
+    flush_every = 5
 
     if workers <= 1:
         for row, col in work_units:
@@ -884,6 +890,9 @@ def _run_migration_batch_cursor(
                 break
             item = _migrate_work_unit(source, row, col, actor=actor, dry_run=dry_run)
             _record_batch_item(batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap)
+            if job and batch.processed >= flush_every:
+                _update_job_progress(job, batch, last_pk=prepared.last_pk)
+                batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
     else:
         lock = Lock()
 
@@ -904,6 +913,9 @@ def _run_migration_batch_cursor(
                     _record_batch_item(
                         batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap
                     )
+                    if job and batch.processed >= flush_every:
+                        _update_job_progress(job, batch, last_pk=prepared.last_pk)
+                        batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
 
     return batch, items
 

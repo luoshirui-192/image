@@ -127,7 +127,7 @@ export function createBlobMigrationJobApi({
   dryRun = false,
   skipExisting = true,
   runAll = true,
-  warmThumbsAfter = false,
+  warmThumbsAfter = true,
 }) {
   return request.post('/images/blob-migration/jobs/', {
     source_id: sourceId,
@@ -159,7 +159,7 @@ export function cancelBlobMigrationJobApi(jobId) {
   return request.post(`/images/blob-migration/jobs/${jobId}/cancel/`)
 }
 
-export function retryBlobMigrationJobApi({ parentJobId, batchSize = 50, dryRun = false, warmThumbsAfter = false }) {
+export function retryBlobMigrationJobApi({ parentJobId, batchSize = 50, dryRun = false, warmThumbsAfter = true }) {
   return request.post('/images/blob-migration/jobs/retry/', {
     parent_job_id: parentJobId,
     batch_size: batchSize,

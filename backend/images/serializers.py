@@ -173,14 +173,14 @@ class BlobMigrationJobCreateSerializer(serializers.Serializer):
     dry_run = serializers.BooleanField(required=False, default=False)
     skip_existing = serializers.BooleanField(required=False, default=True)
     run_all = serializers.BooleanField(required=False, default=True)
-    warm_thumbs_after = serializers.BooleanField(required=False, default=False)
+    warm_thumbs_after = serializers.BooleanField(required=False, default=True)
 
 
 class BlobMigrationJobRetrySerializer(serializers.Serializer):
     parent_job_id = serializers.IntegerField(min_value=1)
     batch_size = serializers.IntegerField(required=False, default=50, min_value=1, max_value=500)
     dry_run = serializers.BooleanField(required=False, default=False)
-    warm_thumbs_after = serializers.BooleanField(required=False, default=False)
+    warm_thumbs_after = serializers.BooleanField(required=False, default=True)
 
 
 class BlobMigrationJobClearSerializer(serializers.Serializer):

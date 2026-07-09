@@ -64,7 +64,7 @@ def create_migration_job(
     dry_run: bool = False,
     skip_existing: bool = True,
     run_all: bool = True,
-    warm_thumbs_after: bool = False,
+    warm_thumbs_after: bool = True,
     retry_failed_only: bool = False,
     parent_job_id: int | None = None,
 ) -> BlobMigrationJob:
@@ -157,7 +157,7 @@ def list_migration_jobs(*, source_id: int | None = None, limit: int = 50) -> lis
 
 
 def _job_progress_count(job: BlobMigrationJob) -> int:
-    """Rows actually handled (success + fail); skipped rows do not count toward progress."""
+    """Rows that reduce remaining pending work (success + fail). Skips are shown separately in UI."""
     return int(job.succeeded or 0) + int(job.failed or 0)
 
 

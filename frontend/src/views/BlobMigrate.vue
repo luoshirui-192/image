@@ -70,7 +70,7 @@ const runOptions = reactive({
   batchSize: 100,
   dryRun: true,
   skipExisting: true,
-  warmThumbsAfter: false,
+  warmThumbsAfter: true,
 })
 
 const categoryDialogVisible = ref(false)
@@ -431,6 +431,9 @@ function sourceById(sourceId) {
 function liveStatsForJob(job) {
   if (!job) return null
   if (job.source_stats) return job.source_stats
+  // While a job is running, never fall back to stale source-list stats
+  // (those stay at "migrated 0" until the job finishes and sources reload).
+  if (['pending', 'running'].includes(job.status)) return null
   return sourceById(job.source_id)?.stats || null
 }
 
@@ -442,35 +445,60 @@ function jobNeedsRetry(job) {
 
 function jobProgressCount(job) {
   if (!job) return 0
+  if (['pending', 'running'].includes(job.status)) {
+    // During run: count everything handled so the bar moves even when many rows are skipped.
+    return (
+      Number(job.succeeded || 0) +
+      Number(job.failed || 0) +
+      Number(job.skipped || 0)
+    )
+  }
   if (job.display_done != null) return job.display_done
   const stats = liveStatsForJob(job)
-  if (stats && !['pending', 'running'].includes(job.status)) {
-    return Number(stats.migrated || 0)
-  }
+  if (stats) return Number(stats.migrated || 0)
   return job.progress_count ?? (job.succeeded || 0) + (job.failed || 0)
 }
 
 function jobProgressTotal(job) {
   if (!job) return 0
+  if (['pending', 'running'].includes(job.status)) {
+    return Math.max(Number(job.total_estimate || 0), jobProgressCount(job))
+  }
   if (job.display_total != null) return job.display_total
   const stats = liveStatsForJob(job)
-  if (stats && !['pending', 'running'].includes(job.status)) {
-    return Number(stats.total_with_blob || 0)
-  }
+  if (stats) return Number(stats.total_with_blob || 0)
   return job.total_estimate || 0
 }
 
 function formatJobProgress(job) {
   const done = jobProgressCount(job)
   const total = jobProgressTotal(job)
-  const percent = job?.percent ?? (total ? Math.round((100 * done) / total) : 0)
+  const percent = total ? Math.round((100 * done) / total) : 0
   return `${done} / ${total} (${percent}%)`
 }
 
 function formatLiveProgress(job) {
+  if (!job) return '—'
+  if (['pending', 'running'].includes(job.status)) {
+    const done = jobProgressCount(job)
+    const total = jobProgressTotal(job)
+    return `已处理 ${done} / 预估 ${total}（成功 ${job.succeeded || 0} · 跳过 ${job.skipped || 0} · 失败 ${job.failed || 0}）`
+  }
   const stats = liveStatsForJob(job)
   if (!stats) return formatJobProgress(job)
   return `已迁移 ${stats.migrated} / 共 ${stats.total_with_blob}（待处理 ${stats.pending}）`
+}
+
+function jobProgressPercent(job) {
+  if (!job) return 0
+  if (['pending', 'running'].includes(job.status)) {
+    const done = jobProgressCount(job)
+    const total = jobProgressTotal(job)
+    if (!total) return 0
+    const percent = Math.round((100 * done) / total)
+    return Math.min(99, Math.max(0, percent))
+  }
+  return Math.min(100, Math.round(job.percent || 0))
 }
 
 async function refreshActiveJob(jobId) {
@@ -1072,7 +1100,7 @@ onUnmounted(() => {
             <el-checkbox v-model="runOptions.skipExisting">跳过已迁移</el-checkbox>
           </el-form-item>
           <el-form-item>
-            <el-checkbox v-model="runOptions.warmThumbsAfter">完成后预热缩略图</el-checkbox>
+            <el-checkbox v-model="runOptions.warmThumbsAfter">完成后预热缩略图（默认开启）</el-checkbox>
           </el-form-item>
           <el-form-item>
             <el-button :loading="running && !jobInProgress" @click="executeMigration">
@@ -1092,7 +1120,7 @@ onUnmounted(() => {
             <span v-if="displayJob.eta_seconds != null" class="job-eta">剩余 {{ formatEta(displayJob.eta_seconds) }}</span>
           </div>
           <el-progress
-            :percentage="Math.min(jobInProgress ? 99 : 100, Math.round(displayJob.percent || 0))"
+            :percentage="jobProgressPercent(displayJob)"
             :status="!jobInProgress && Number(liveStatsForJob(displayJob)?.pending ?? displayJob.live_pending ?? 1) <= 0
               ? 'success'
               : displayJob.status === 'failed' && jobNeedsRetry(displayJob)
@@ -1108,8 +1136,7 @@ onUnmounted(() => {
             {{ formatLiveProgress(displayJob) }}
           </p>
           <p v-if="jobInProgress" class="job-message field-hint">
-            本轮处理：成功 {{ displayJob.succeeded }} · 跳过 {{ displayJob.skipped }}
-            <template v-if="displayJob.failed"> · 本轮失败 {{ displayJob.failed }}</template>
+            大表首批可能较慢；进度按已处理条数更新（含跳过）。完成后会显示当前已迁移/待处理。
           </p>
           <p v-else-if="displayJob.message" class="job-message">{{ displayJob.message }}</p>
           <div v-if="displayJob.recent_errors?.length && jobNeedsRetry(displayJob)" class="job-errors">

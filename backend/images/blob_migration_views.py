@@ -227,7 +227,7 @@ class BlobMigrationJobListCreateView(APIView):
                 dry_run=data.get("dry_run", False),
                 skip_existing=data.get("skip_existing", True),
                 run_all=data.get("run_all", True),
-                warm_thumbs_after=data.get("warm_thumbs_after", False),
+                warm_thumbs_after=data.get("warm_thumbs_after", True),
             )
         except JobServiceError as exc:
             return error_response(str(exc), code=4001, status=400)
@@ -324,7 +324,7 @@ class BlobMigrationJobRetryView(APIView):
                 dry_run=data.get("dry_run", False),
                 skip_existing=False,
                 run_all=True,
-                warm_thumbs_after=data.get("warm_thumbs_after", False),
+                warm_thumbs_after=data.get("warm_thumbs_after", True),
                 retry_failed_only=True,
                 parent_job_id=parent.id,
             )

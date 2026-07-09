@@ -413,6 +413,7 @@ async function submitCreateView() {
           dryRun: false,
           skipExisting: true,
           runAll: true,
+          warmThumbsAfter: true,
         })
         const jobId = jobRes.data?.id
         message += jobId ? `；已启动迁移任务 #${jobId}` : '；已启动迁移任务'
