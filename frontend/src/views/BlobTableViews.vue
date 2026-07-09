@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, VideoPlay, View } from '@element-plus/icons-vue'
 import ImagePreview from '@/components/ImagePreview.vue'
@@ -16,7 +16,9 @@ import {
   listBlobCatalogConnectionsApi,
   listBlobCatalogDatabasesApi,
   listBlobCatalogObjectsApi,
+  listBlobMigrationSourcesApi,
   listBlobTableViewsApi,
+  getBlobMigrationSourceApi,
   listCategoriesApi,
 } from '@/api/images'
 import {
@@ -29,7 +31,6 @@ import {
 import { highlightAndScrollTableRow } from '@/utils/tableScroll'
 
 const route = useRoute()
-const router = useRouter()
 
 const views = ref([])
 const loadingViews = ref(false)
@@ -88,6 +89,19 @@ const sqlExecuting = ref(false)
 const sqlValidating = ref(false)
 const sqlResult = ref(null)
 const sqlError = ref('')
+
+const migrationSources = ref([])
+const selectionMigrationStats = ref(null)
+const loadingSelectionMigrationStats = ref(false)
+
+const migrateDialogVisible = ref(false)
+const migrateSaving = ref(false)
+const migrateForm = reactive({
+  categoryId: null,
+  nameColumn: '',
+  suffixColumn: '',
+  tags: '',
+})
 
 const createViewDialogVisible = ref(false)
 const createViewSaving = ref(false)
@@ -179,6 +193,38 @@ const savedViewForSelection = computed(() => {
   return findSavedViewForCatalogNode(selectedCatalogObject.value)
 })
 
+function viewMigrationKey(view) {
+  if (!view) return ''
+  return `${view.db_alias || ''}\0${view.database_name || ''}\0${view.source_table || ''}\0${view.source_object_type || 'table'}`
+}
+
+function findMigrationSourceForView(view) {
+  if (!view) return null
+  const key = viewMigrationKey(view)
+  return migrationSources.value.find((source) => viewMigrationKey(source) === key) || null
+}
+
+const showMigrateForSelection = computed(() => {
+  if (!savedViewForSelection.value) return false
+  if (loadingSelectionMigrationStats.value) return false
+  const stats = selectionMigrationStats.value
+  if (!stats) return false
+  if (stats.noSource) return true
+  if (stats.error) return true
+  return Number(stats.pending ?? 0) > 0
+})
+
+const selectionPendingHint = computed(() => {
+  if (!savedViewForSelection.value) return ''
+  if (loadingSelectionMigrationStats.value) return '检测迁移状态…'
+  const stats = selectionMigrationStats.value
+  if (!stats || stats.noSource) return '尚未配置迁移'
+  if (stats.error) return '迁移状态未知'
+  const pending = Number(stats.pending ?? 0)
+  if (pending <= 0) return ''
+  return `待迁移 ${pending} 条`
+})
+
 async function loadCatalogTree(root, resolve) {
   loadingCatalog.value = true
   try {
@@ -267,25 +313,136 @@ function onCatalogNodeClick(data) {
   }
 }
 
-function goMigrateWithCatalog() {
-  if (!selectedCatalogObject.value) {
-    router.push('/blob-migrate')
+async function loadMigrationSources() {
+  try {
+    const res = await listBlobMigrationSourcesApi({ includeStats: false })
+    migrationSources.value = res.data || []
+  } catch {
+    migrationSources.value = []
+  }
+}
+
+async function refreshSelectionMigrationStats() {
+  const view = savedViewForSelection.value
+  if (!view) {
+    selectionMigrationStats.value = null
     return
   }
-  const obj = selectedCatalogObject.value
-  const conn = obj.connection || {}
-  const blobCols = (obj.blobColumns || []).map((item) => item.column).filter(Boolean)
-  router.push({
-    path: '/blob-migrate',
-    query: {
-      dbAlias: conn.alias || '',
-      sourceTable: obj.label,
-      database: obj.database || '',
-      objectType: obj.objectType || 'table',
-      blobColumns: blobCols.join(','),
-      sourcePkColumn: createViewForm.sourcePkColumn || 'id',
-    },
+  const source = findMigrationSourceForView(view)
+  if (!source?.id) {
+    selectionMigrationStats.value = { noSource: true }
+    return
+  }
+  loadingSelectionMigrationStats.value = true
+  try {
+    const res = await getBlobMigrationSourceApi(source.id, { includeStats: true })
+    selectionMigrationStats.value = res.data?.stats || { error: true }
+  } catch {
+    selectionMigrationStats.value = { error: true }
+  } finally {
+    loadingSelectionMigrationStats.value = false
+  }
+}
+
+function blobColumnsFromView(view) {
+  if (!view) return []
+  const raw = view.blob_columns
+  if (Array.isArray(raw) && raw.length) return raw
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed) && parsed.length) return parsed
+    } catch {
+      // ignore invalid JSON
+    }
+  }
+  return view.blob_column ? [view.blob_column] : []
+}
+
+function buildMigrationSourcePayload(view, form) {
+  return {
+    name: `${view.name || view.source_table} 迁移`,
+    db_alias: view.db_alias,
+    database_name: view.database_name || '',
+    source_table: view.source_table,
+    source_object_type: view.source_object_type || 'table',
+    source_pk_column: view.source_pk_column || 'id',
+    blob_columns: blobColumnsFromView(view),
+    path_lookup_table: view.path_lookup_table || '',
+    blob_column_path_mappings: view.blob_column_path_mappings || [],
+    where_clause: view.where_clause || '',
+    name_column: form.nameColumn.trim(),
+    suffix_column: form.suffixColumn.trim(),
+    category_id: form.categoryId,
+    tags: form.tags.trim(),
+  }
+}
+
+async function startMigrationJob(sourceId) {
+  const jobRes = await createBlobMigrationJobApi({
+    sourceId,
+    batchSize: 100,
+    dryRun: false,
+    skipExisting: true,
+    runAll: true,
+    warmThumbsAfter: true,
   })
+  return jobRes.data
+}
+
+async function ensureMigrationSourceForView(view, form) {
+  const existing = findMigrationSourceForView(view)
+  if (existing?.id) return existing.id
+  const sourceRes = await createBlobMigrationSourceApi(buildMigrationSourcePayload(view, form), {
+    includeStats: false,
+  })
+  const sourceId = sourceRes.data?.id
+  if (sourceId) {
+    await loadMigrationSources()
+  }
+  return sourceId
+}
+
+async function openMigrateDialog() {
+  const view = savedViewForSelection.value
+  if (!view) return
+  migrateForm.categoryId = null
+  migrateForm.nameColumn = ''
+  migrateForm.suffixColumn = ''
+  migrateForm.tags = ''
+  await loadCategories()
+  migrateDialogVisible.value = true
+}
+
+async function submitSavedViewMigration() {
+  const view = savedViewForSelection.value
+  if (!view) return
+  if (!migrateForm.categoryId) {
+    ElMessage.warning('请选择迁移目标分类')
+    return
+  }
+  migrateSaving.value = true
+  try {
+    const sourceId = await ensureMigrationSourceForView(view, migrateForm)
+    if (!sourceId) {
+      ElMessage.error('创建迁移配置失败')
+      return
+    }
+    const job = await startMigrationJob(sourceId)
+    const jobId = job?.id
+    const estimate = Number(job?.total_estimate ?? 0)
+    let message = jobId ? `已启动迁移任务 #${jobId}` : '已启动迁移任务'
+    if (estimate <= 0 && job?.status === 'completed') {
+      message = '当前无待迁移项'
+    }
+    ElMessage.success(message)
+    migrateDialogVisible.value = false
+    await refreshSelectionMigrationStats()
+  } catch (err) {
+    ElMessage.error(err.message || '启动迁移失败')
+  } finally {
+    migrateSaving.value = false
+  }
 }
 
 async function loadCategories() {
@@ -320,6 +477,7 @@ async function submitCreateCategory() {
     await loadCategories()
     if (res.data?.id) {
       createViewForm.categoryId = res.data.id
+      migrateForm.categoryId = res.data.id
     }
   } catch (err) {
     ElMessage.error(err.message || '创建分类失败')
@@ -393,34 +551,16 @@ async function submitCreateView() {
         : '配置已创建'
 
     if (createViewForm.alsoMigrate) {
-      const sourceRes = await createBlobMigrationSourceApi(
-        {
-          ...sharedPayload,
-          name: `${sharedPayload.name} 迁移`,
-          name_column: createViewForm.nameColumn.trim(),
-          suffix_column: createViewForm.suffixColumn.trim(),
-          category_id: createViewForm.categoryId,
-          tags: createViewForm.tags.trim(),
-        },
-        { includeStats: false },
-      )
-      const sourceId = sourceRes.data?.id
+      const sourceId = await ensureMigrationSourceForView(res.data, createViewForm)
       message += sourceId
         ? `；迁移配置已保存（#${sourceId}）`
         : '；迁移配置已保存'
 
       if (createViewForm.startMigration && sourceId) {
-        const jobRes = await createBlobMigrationJobApi({
-          sourceId,
-          batchSize: 100,
-          dryRun: false,
-          skipExisting: true,
-          runAll: true,
-          warmThumbsAfter: true,
-        })
-        const jobId = jobRes.data?.id
-        const estimate = Number(jobRes.data?.total_estimate ?? 0)
-        if (estimate <= 0 && jobRes.data?.status === 'completed') {
+        const job = await startMigrationJob(sourceId)
+        const jobId = job?.id
+        const estimate = Number(job?.total_estimate ?? 0)
+        if (estimate <= 0 && job?.status === 'completed') {
           message += '；当前无待迁移项'
         } else {
           message += jobId ? `；已启动迁移任务 #${jobId}` : '；已启动迁移任务'
@@ -754,19 +894,7 @@ function statusLabel(status) {
 }
 
 function blobColumnNames() {
-  const view = activeView.value
-  if (!view) return []
-  const raw = view.blob_columns
-  if (Array.isArray(raw) && raw.length) return raw
-  if (typeof raw === 'string' && raw.trim()) {
-    try {
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed) && parsed.length) return parsed
-    } catch {
-      // ignore invalid JSON
-    }
-  }
-  return view.blob_column ? [view.blob_column] : []
+  return blobColumnsFromView(activeView.value)
 }
 
 function blobColumnName() {
@@ -847,6 +975,14 @@ watch(
   { immediate: true },
 )
 
+watch(savedViewForSelection, (view) => {
+  if (view) {
+    refreshSelectionMigrationStats()
+  } else {
+    selectionMigrationStats.value = null
+  }
+})
+
 watch(rightTab, (tab) => {
   if (tab === 'browse') {
     setupTableViewport()
@@ -857,7 +993,7 @@ onMounted(async () => {
   window.addEventListener('resize', syncTableHeight)
 
   browseReady.value = false
-  await loadViews()
+  await Promise.all([loadViews(), loadMigrationSources()])
 
   const routeViewId = Number(route.query.viewId)
   if (routeViewId && !Number.isNaN(routeViewId) && views.value.some((v) => v.id === routeViewId)) {
@@ -935,36 +1071,32 @@ onUnmounted(() => {
               <template v-if="savedViewForSelection?.row_count != null">
                 · {{ savedViewForSelection.row_count }} 行
               </template>
+              <template v-if="selectionPendingHint">
+                · {{ selectionPendingHint }}
+              </template>
             </div>
             <div class="catalog-actions">
-              <el-button
-                v-if="!savedViewForSelection"
-                size="small"
-                type="primary"
-                plain
-                @click="openCreateViewDialog"
-              >
-                创建配置
-              </el-button>
-              <el-button
-                v-if="savedViewForSelection"
-                size="small"
-                type="primary"
-                plain
-                @click="activeViewId = savedViewForSelection.id; rightTab = 'browse'"
-              >
-                打开
-              </el-button>
-              <el-button v-if="savedViewForSelection" size="small" plain @click="refreshActiveView">
-                刷新
-              </el-button>
-              <el-button v-if="savedViewForSelection" size="small" type="danger" plain @click="removeView(savedViewForSelection)">
-                删除配置
-              </el-button>
-              <el-button size="small" plain @click="rightTab = 'sql'">SQL 查询</el-button>
-              <el-button size="small" link type="primary" @click="goMigrateWithCatalog">
-                去迁移页
-              </el-button>
+              <template v-if="!savedViewForSelection">
+                <el-button size="small" type="primary" plain @click="openCreateViewDialog">
+                  创建配置
+                </el-button>
+              </template>
+              <template v-else>
+                <el-button
+                  v-if="showMigrateForSelection"
+                  size="small"
+                  type="primary"
+                  :icon="VideoPlay"
+                  @click="openMigrateDialog"
+                >
+                  一键迁移
+                </el-button>
+                <el-button size="small" plain @click="refreshActiveView">刷新</el-button>
+                <el-button size="small" type="danger" plain @click="removeView(savedViewForSelection)">
+                  删除配置
+                </el-button>
+                <el-button size="small" plain @click="rightTab = 'sql'">SQL 查询</el-button>
+              </template>
             </div>
           </div>
         </aside>
@@ -1221,6 +1353,48 @@ onUnmounted(() => {
         <el-button @click="createViewDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="createViewSaving" @click="submitCreateView">
           {{ createViewForm.alsoMigrate && createViewForm.startMigration ? '创建并开始迁移' : '创建' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="migrateDialogVisible" title="一键迁移" width="520px">
+      <p class="field-hint migrate-dialog-desc">
+        将「{{ savedViewForSelection?.source_table }}」的 BLOB 数据迁移到图片库，并启动后台任务。
+      </p>
+      <el-form label-width="110px">
+        <el-form-item label="目标分类" required>
+          <div class="category-row">
+            <el-select
+              v-model="migrateForm.categoryId"
+              filterable
+              clearable
+              placeholder="选择分类"
+              style="flex: 1"
+            >
+              <el-option
+                v-for="cat in categories"
+                :key="cat.id"
+                :label="cat.category_name"
+                :value="cat.id"
+              />
+            </el-select>
+            <el-button @click="openCreateCategory">新建</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="文件名列">
+          <el-input v-model="migrateForm.nameColumn" placeholder="可选，用于生成文件名" maxlength="64" />
+        </el-form-item>
+        <el-form-item label="后缀列">
+          <el-input v-model="migrateForm.suffixColumn" placeholder="可选，如 jpg/png" maxlength="64" />
+        </el-form-item>
+        <el-form-item label="标签">
+          <el-input v-model="migrateForm.tags" placeholder="可选" maxlength="500" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="migrateDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="migrateSaving" @click="submitSavedViewMigration">
+          开始迁移
         </el-button>
       </template>
     </el-dialog>
