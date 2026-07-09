@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
+from typing import Any
 
 from django.conf import settings
 from django.db import close_old_connections, connections
@@ -272,6 +273,65 @@ def _source_db_session(source: BlobMigrationSource):
     return db_alias_session(source.db_alias, database=_source_database_name(source))
 
 
+def _remote_connection(conn_alias: str):
+    """Connection for remote scans; caller must hold _source_db_session."""
+    return connections[conn_alias]
+
+
+def _live_image_subquery():
+    return ImageInfo.objects.filter(is_delete=0).values("id")
+
+
+def _map_exists_for_migration(
+    *,
+    lookup_table: str,
+    source_id: str,
+    map_column: str,
+    blob_columns: list[str],
+) -> bool:
+    """True only when a live image_source_map points at a non-deleted image_info."""
+    live_images = ImageInfo.objects.filter(is_delete=0).values("id")
+    qs = ImageSourceMap.objects.filter(
+        source_table=lookup_table,
+        source_id=source_id,
+        image_info_id__in=live_images,
+    )
+    if qs.filter(source_column=map_column).exists():
+        return True
+    if len(blob_columns) == 1 and map_column == blob_columns[0]:
+        return qs.filter(source_column="").exists()
+    return False
+
+
+def _probe_remote_blob_rows(source: BlobMigrationSource) -> dict[str, Any]:
+    """Cheap sanity check before walking the cursor."""
+    blob_cols = _source_blob_columns(source)
+    with _source_db_session(source) as alias:
+        conn = _remote_connection(alias)
+        table = _quote_ident(source.source_table)
+        extra = validate_where_clause(source.where_clause)
+        where_sql = f" WHERE ({extra})" if extra else ""
+        blob_checks = [_blob_nonempty_sql(conn, _quote_ident(col)) for col in blob_cols]
+        blob_where = f"({' OR '.join(blob_checks)})"
+        with conn.cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) FROM {table}{where_sql}")
+            table_rows = int((cursor.fetchone() or [0])[0] or 0)
+            cursor.execute(f"SELECT COUNT(*) FROM {table}{where_sql}{' AND ' if where_sql else ' WHERE '}{blob_where}")
+            blob_rows = int((cursor.fetchone() or [0])[0] or 0)
+            current_db = ""
+            try:
+                cursor.execute("SELECT DATABASE()")
+                current_db = str((cursor.fetchone() or [""])[0] or "")
+            except Exception:
+                pass
+    return {
+        "database": current_db or _source_database_name(source) or source.db_alias,
+        "table_rows": table_rows,
+        "blob_rows": blob_rows,
+        "blob_columns": blob_cols,
+    }
+
+
 def _quote_ident(name: str) -> str:
     return f"`{validate_identifier(name)}`"
 
@@ -468,6 +528,7 @@ class _MigrationBatchContext:
             rows = ImageSourceMap.objects.filter(
                 source_table=lookup_table,
                 source_id__in=list(source_ids),
+                image_info_id__in=_live_image_subquery(),
             )
             if cols:
                 rows = rows.filter(source_column__in=cols)
@@ -531,11 +592,12 @@ def _cursor_where_parts(
 def _fetch_source_pks_cursor(
     source: BlobMigrationSource,
     *,
+    conn_alias: str,
     after_pk: str = "",
     limit: int = 1,
 ) -> list[dict]:
     """Light scan: PK (+ optional name/suffix) without reading BLOB columns."""
-    conn = connections[source.db_alias]
+    conn = _remote_connection(conn_alias)
     table = _quote_ident(source.source_table)
     pk_col_name = source.source_pk_column
     where_parts, params, pk = _cursor_where_parts(source, conn, after_pk=after_pk)
@@ -558,12 +620,17 @@ def _fetch_source_pks_cursor(
         return [dict(zip(columns, raw)) for raw in cursor.fetchall()]
 
 
-def _fetch_source_rows_by_pks(source: BlobMigrationSource, pk_values: list[str]) -> list[dict]:
+def _fetch_source_rows_by_pks(
+    source: BlobMigrationSource,
+    pk_values: list[str],
+    *,
+    conn_alias: str,
+) -> list[dict]:
     """Fetch full rows (including BLOB) for specific primary keys."""
     if not pk_values:
         return []
 
-    conn = connections[source.db_alias]
+    conn = _remote_connection(conn_alias)
     table = _quote_ident(source.source_table)
     pk_col_name = source.source_pk_column
     pk = _quote_ident(pk_col_name)
@@ -592,8 +659,8 @@ def _prepare_migration_batch(
     """Two-phase batch prep: scan PKs first, bulk-check maps, fetch BLOB only when needed."""
     pk_col = source.source_pk_column
 
-    with _source_db_session(source):
-        light_rows = _fetch_source_pks_cursor(source, after_pk=after_pk, limit=batch_size)
+    with _source_db_session(source) as alias:
+        light_rows = _fetch_source_pks_cursor(source, conn_alias=alias, after_pk=after_pk, limit=batch_size)
 
     if not light_rows:
         return _PreparedMigrationBatch(rows_fetched=0, last_pk=after_pk, blob_rows=[], pre_skipped=[])
@@ -603,8 +670,8 @@ def _prepare_migration_batch(
     pre_skipped: list[MigrationItemResult] = []
 
     if not skip_existing:
-        with _source_db_session(source):
-            blob_rows = _fetch_source_rows_by_pks(source, pk_values)
+        with _source_db_session(source) as alias:
+            blob_rows = _fetch_source_rows_by_pks(source, pk_values, conn_alias=alias)
         return _PreparedMigrationBatch(
             rows_fetched=len(light_rows),
             last_pk=last_pk,
@@ -632,8 +699,8 @@ def _prepare_migration_batch(
         if needs_blob:
             pks_needing_blob.append(source_id_str)
 
-    with _source_db_session(source):
-        blob_rows = _fetch_source_rows_by_pks(source, pks_needing_blob)
+    with _source_db_session(source) as alias:
+        blob_rows = _fetch_source_rows_by_pks(source, pks_needing_blob, conn_alias=alias)
     return _PreparedMigrationBatch(
         rows_fetched=len(light_rows),
         last_pk=last_pk,
@@ -670,7 +737,7 @@ def _fetch_source_row_by_pk(source: BlobMigrationSource, pk_value: str) -> dict 
 
     sql = f"SELECT {', '.join(select_cols)} FROM {table} WHERE {pk} = %s LIMIT 1"
     with _source_db_session(source) as alias:
-        conn = connections[alias]
+        conn = _remote_connection(alias)
         with conn.cursor() as cursor:
             cursor.execute(sql, [pk_value])
             columns = [col[0] for col in cursor.description]
@@ -682,13 +749,31 @@ def _fetch_source_row_by_pk(source: BlobMigrationSource, pk_value: str) -> dict 
 
 def _is_already_migrated(source: BlobMigrationSource, row: dict, blob_column: str) -> bool:
     lookup_table, source_id_str, map_column = _map_target_for_column(source, row, blob_column)
-    qs = ImageSourceMap.objects.filter(source_table=lookup_table, source_id=source_id_str)
-    if qs.filter(source_column=map_column).exists():
-        return True
-    cols = _source_blob_columns(source)
-    if len(cols) == 1 and blob_column == cols[0]:
-        return qs.filter(source_column="").exists()
-    return False
+    return _map_exists_for_migration(
+        lookup_table=lookup_table,
+        source_id=source_id_str,
+        map_column=map_column,
+        blob_columns=_source_blob_columns(source),
+    )
+
+
+def _upsert_source_map(
+    *,
+    lookup_table: str,
+    map_source_id: str,
+    map_column: str,
+    image_info_id: int,
+) -> None:
+    """Create or refresh mapping — stale rows without live image_info are overwritten."""
+    ImageSourceMap.objects.update_or_create(
+        source_table=lookup_table,
+        source_id=map_source_id,
+        source_column=map_column,
+        defaults={
+            "image_info_id": image_info_id,
+            "migrated_at": timezone.now(),
+        },
+    )
 
 
 def _migrate_single_column(
@@ -751,12 +836,11 @@ def _migrate_single_column(
             category_id=source.category_id,
             tags=source.tags,
         )
-        ImageSourceMap.objects.create(
-            source_table=lookup_table,
-            source_id=map_source_id,
-            source_column=map_column,
+        _upsert_source_map(
+            lookup_table=lookup_table,
+            map_source_id=map_source_id,
+            map_column=map_column,
             image_info_id=image.id,
-            migrated_at=timezone.now(),
         )
         return MigrationItemResult(
             source_id=row_pk,
@@ -776,12 +860,11 @@ def _migrate_single_column(
                 error="已存在相同图片",
             )
         existing = exc.existing
-        ImageSourceMap.objects.create(
-            source_table=lookup_table,
-            source_id=map_source_id,
-            source_column=map_column,
+        _upsert_source_map(
+            lookup_table=lookup_table,
+            map_source_id=map_source_id,
+            map_column=map_column,
             image_info_id=existing.id,
-            migrated_at=timezone.now(),
         )
         return MigrationItemResult(
             source_id=row_pk,
@@ -997,7 +1080,7 @@ def _sync_job_estimate_from_handled(job: BlobMigrationJob) -> None:
 def _record_empty_scan_diagnostic(job: BlobMigrationJob, source: BlobMigrationSource) -> None:
     try:
         with _source_db_session(source) as alias:
-            conn = connections[alias]
+            conn = _remote_connection(alias)
             table = _quote_ident(source.source_table)
             extra = validate_where_clause(source.where_clause)
             where_sql = f" WHERE ({extra})" if extra else ""
@@ -1031,6 +1114,26 @@ def execute_migration_job_batches(job: BlobMigrationJob) -> None:
     source = prepare_migration_source(_load_source(job.source_id))
     _validate_source_config(source)
     batch_size = _max_batch_size(job.batch_size)
+
+    probe = _probe_remote_blob_rows(source)
+    cols_label = ",".join(probe["blob_columns"])
+    BlobMigrationJob.objects.filter(pk=job.pk).update(
+        message=(
+            f"迁移进行中（库={probe['database']} 表={source.source_table} "
+            f"BLOB列={cols_label} 候选={probe['blob_rows']}）"
+        )[:500],
+        updated_at=timezone.now(),
+    )
+    if probe["blob_rows"] <= 0:
+        BlobMigrationJob.objects.filter(pk=job.pk).update(
+            message=(
+                f"源表无 BLOB 候选行（库={probe['database']} 表={source.source_table} "
+                f"总行={probe['table_rows']} BLOB列={cols_label}）"
+            )[:500],
+            updated_at=timezone.now(),
+        )
+        return
+
     batches_run = 0
 
     while True:
@@ -1152,6 +1255,23 @@ def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dic
             if cached and now - cached[0] < _STATS_CACHE_TTL_SECONDS:
                 return dict(cached[1])
 
+    with _source_db_session(source) as alias:
+        conn = _remote_connection(alias)
+        table = _quote_ident(source.source_table)
+        extra = validate_where_clause(source.where_clause)
+        where_sql = f" WHERE ({extra})" if extra else ""
+        # One table scan, IS NOT NULL only — never LENGTH(blob).
+        select_parts = [
+            f"SUM(CASE WHEN {_blob_nonempty_sql(conn, _quote_ident(col))} THEN 1 ELSE 0 END)"
+            for col in blob_cols
+        ]
+        sql = f"SELECT {', '.join(select_parts)} FROM {table}{where_sql}"
+        with conn.cursor() as cursor:
+            cursor.execute(sql)
+            row = cursor.fetchone() or ()
+        total_with_blob = sum(int(v or 0) for v in row)
+
+    live_maps = ImageSourceMap.objects.filter(image_info_id__in=_live_image_subquery())
     migrated = 0
     if path_mappings:
         seen_keys: set[tuple[str, str]] = set()
@@ -1164,41 +1284,25 @@ def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dic
                 continue
             seen_keys.add(key)
             lookup_table, map_column = key
-            migrated += ImageSourceMap.objects.filter(
+            migrated += live_maps.filter(
                 source_table=lookup_table,
                 source_column=map_column,
             ).count()
             if len(blob_cols) == 1:
-                migrated += ImageSourceMap.objects.filter(
+                migrated += live_maps.filter(
                     source_table=lookup_table,
                     source_column="",
                 ).count()
     else:
-        migrated = ImageSourceMap.objects.filter(
+        migrated = live_maps.filter(
             source_table=storage_table,
             source_column__in=blob_cols,
         ).count()
         if len(blob_cols) == 1:
-            migrated += ImageSourceMap.objects.filter(
+            migrated += live_maps.filter(
                 source_table=storage_table,
                 source_column="",
             ).count()
-
-    with _source_db_session(source):
-        conn = connections[source.db_alias]
-        table = _quote_ident(source.source_table)
-        extra = validate_where_clause(source.where_clause)
-        # One table scan, IS NOT NULL only — never LENGTH(blob).
-        select_parts = [
-            f"SUM(CASE WHEN {_blob_nonempty_sql(conn, _quote_ident(col))} THEN 1 ELSE 0 END)"
-            for col in blob_cols
-        ]
-        where_sql = f" WHERE ({extra})" if extra else ""
-        sql = f"SELECT {', '.join(select_parts)} FROM {table}{where_sql}"
-        with conn.cursor() as cursor:
-            cursor.execute(sql)
-            row = cursor.fetchone() or ()
-        total_with_blob = sum(int(v or 0) for v in row)
 
     result = {
         "source_id": source.id,

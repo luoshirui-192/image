@@ -273,6 +273,42 @@ class BlobMigrationTestCase(TestCase):
         self.assertEqual(source.database_name, "legacy_catalog_db")
 
     @override_settings(UPLOAD_ROOT=None)
+    def test_orphan_source_map_does_not_skip_migration(self):
+        """Stale image_source_map without live image_info must not block migration."""
+        upload_root = str(self.upload_root)
+        ImageSourceMap.objects.create(
+            source_table="legacy_photos",
+            source_id="1",
+            source_column="photo",
+            image_info_id=99999,
+            migrated_at=timezone.now(),
+        )
+        stats = count_migration_candidates(self.source.id)
+        self.assertGreater(stats["pending"], 0)
+
+        with override_settings(UPLOAD_ROOT=upload_root):
+            result = run_blob_migration(self.source.id, batch_size=10, dry_run=False, skip_existing=True)
+            self.assertEqual(result.succeeded, 1)
+            self.assertEqual(ImageInfo.objects.filter(is_delete=0).count(), 1)
+
+    @override_settings(UPLOAD_ROOT=None, BLOB_MIGRATION_UPLOAD_WORKERS=1)
+    def test_empty_blob_scan_fails_job(self):
+        source = BlobMigrationSource.objects.create(
+            name="empty filter",
+            source_table="legacy_photos",
+            source_pk_column="id",
+            blob_column="photo",
+            category_id=1,
+            db_alias="default",
+            where_clause="1=0",
+            enabled=1,
+        )
+        job = create_migration_job(source_id=source.id, created_by="blob_admin", batch_size=10, run_all=True)
+        finished = execute_migration_job(job.id)
+        self.assertEqual(finished.status, BlobMigrationJob.STATUS_FAILED)
+        self.assertIn("源表无", finished.message)
+
+    @override_settings(UPLOAD_ROOT=None)
     def test_run_blob_migration_writes_file_and_map(self):
         upload_root = str(self.upload_root)
         with override_settings(UPLOAD_ROOT=upload_root):

@@ -554,6 +554,8 @@ async function refreshActiveJob(jobId) {
         const pending = Number(sourceById(res.data.source_id)?.stats?.pending ?? -1)
         if (pending > 0) {
           ElMessage.warning(`任务结束，仍有 ${pending} 条待迁移`)
+        } else if (Number(res.data.succeeded || 0) <= 0) {
+          ElMessage.warning(res.data.message || '任务结束，但未迁移任何图片')
         } else {
           ElMessage.success(res.message || '迁移已完成')
         }

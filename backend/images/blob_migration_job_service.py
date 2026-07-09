@@ -353,6 +353,26 @@ def _completion_message(job: BlobMigrationJob) -> str:
     return f"迁移完成（成功 {succeeded} · 跳过 {skipped} · 失败 {failed}）"
 
 
+def _resolve_final_job_status(job: BlobMigrationJob) -> tuple[str, str]:
+    """Pick terminal status/message — never report success when nothing was migrated."""
+    succeeded = int(job.succeeded or 0)
+    skipped = int(job.skipped or 0)
+    failed = int(job.failed or 0)
+    if succeeded > 0:
+        return BlobMigrationJob.STATUS_COMPLETED, _completion_message(job)
+    if failed > 0:
+        return BlobMigrationJob.STATUS_FAILED, _completion_message(job)
+    if skipped > 0:
+        return (
+            BlobMigrationJob.STATUS_COMPLETED,
+            f"未新增迁移：{skipped} 条已有有效图片映射",
+        )
+    prior = (job.message or "").strip()
+    if prior.startswith("源表"):
+        return BlobMigrationJob.STATUS_FAILED, prior
+    return BlobMigrationJob.STATUS_FAILED, "未发现可迁移数据，请检查库名/表名/BLOB 列配置"
+
+
 def _refresh_job_estimate_for_ui(job: BlobMigrationJob) -> BlobMigrationJob:
     """Best-effort COUNT for the progress bar. Never affects whether batches run."""
     if job.retry_failed_only or int(job.total_estimate or 0) > 0:
@@ -446,15 +466,15 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
             )
         elif job.status == BlobMigrationJob.STATUS_RUNNING:
             job.refresh_from_db()
-            done_message = _completion_message(job)
+            final_status, done_message = _resolve_final_job_status(job)
             BlobMigrationJob.objects.filter(pk=job.pk).update(
-                status=BlobMigrationJob.STATUS_COMPLETED,
+                status=final_status,
                 finished_at=timezone.now(),
                 message=done_message,
                 updated_at=timezone.now(),
             )
             job.refresh_from_db()
-            if job.warm_thumbs_after and int(job.succeeded or 0) > 0:
+            if final_status == BlobMigrationJob.STATUS_COMPLETED and job.warm_thumbs_after and int(job.succeeded or 0) > 0:
                 _kick_warm_thumbnails_async(job.id)
     except Exception as exc:
         logger.exception("migration job failed id=%s", job_id)
