@@ -373,15 +373,16 @@ def _resolve_final_job_status(job: BlobMigrationJob) -> tuple[str, str]:
     return BlobMigrationJob.STATUS_FAILED, "未发现可迁移数据，请检查库名/表名/BLOB 列配置"
 
 
-def _refresh_job_estimate_for_ui(job: BlobMigrationJob) -> BlobMigrationJob:
+def _refresh_job_estimate_for_ui(job: BlobMigrationJob, *, touch_message: bool = True) -> BlobMigrationJob:
     """Best-effort COUNT for the progress bar. Never affects whether batches run."""
     if job.retry_failed_only or int(job.total_estimate or 0) > 0:
         return job
 
-    BlobMigrationJob.objects.filter(pk=job.pk, status=BlobMigrationJob.STATUS_RUNNING).update(
-        message="正在统计待迁移数量…",
-        updated_at=timezone.now(),
-    )
+    if touch_message:
+        BlobMigrationJob.objects.filter(pk=job.pk, status=BlobMigrationJob.STATUS_RUNNING).update(
+            message="正在统计待迁移数量…",
+            updated_at=timezone.now(),
+        )
     try:
         prepare_migration_source(_load_source(job.source_id))
         stats = count_migration_candidates(job.source_id, use_cache=True)
@@ -396,20 +397,50 @@ def _refresh_job_estimate_for_ui(job: BlobMigrationJob) -> BlobMigrationJob:
             job.source_id,
             exc_info=True,
         )
-        BlobMigrationJob.objects.filter(pk=job.pk).update(
-            message="统计未完成，正在扫描迁移…",
-            updated_at=timezone.now(),
-        )
+        if touch_message and _job_handled_count(job) == 0:
+            BlobMigrationJob.objects.filter(pk=job.pk).update(
+                message="统计未完成，正在扫描迁移…",
+                updated_at=timezone.now(),
+            )
         job.refresh_from_db()
         return job
 
-    BlobMigrationJob.objects.filter(pk=job.pk).update(
-        total_estimate=max(0, estimate),
-        message=f"迁移进行中（预估 {estimate}）" if estimate > 0 else "迁移进行中（扫描确认中）",
-        updated_at=timezone.now(),
-    )
+    updates: dict[str, Any] = {
+        "total_estimate": max(0, estimate),
+        "updated_at": timezone.now(),
+    }
+    if touch_message and _job_handled_count(job) == 0:
+        updates["message"] = (
+            f"迁移进行中（预估 {estimate}）" if estimate > 0 else "迁移进行中（扫描确认中）"
+        )
+    BlobMigrationJob.objects.filter(pk=job.pk).update(**updates)
     job.refresh_from_db()
     return job
+
+
+def _run_job_estimate_worker(job_id: int) -> None:
+    from django.db import close_old_connections
+
+    close_old_connections()
+    try:
+        job = _load_job(job_id)
+        if job.status not in ACTIVE_STATUSES:
+            return
+        _refresh_job_estimate_for_ui(job, touch_message=False)
+    except Exception:
+        logger.warning("async job estimate failed job_id=%s", job_id, exc_info=True)
+    finally:
+        close_old_connections()
+
+
+def _kick_job_estimate_async(job_id: int) -> None:
+    thread = threading.Thread(
+        target=_run_job_estimate_worker,
+        args=(job_id,),
+        name=f"blob-estimate-{job_id}",
+        daemon=True,
+    )
+    thread.start()
 
 
 def execute_migration_job(job_id: int) -> BlobMigrationJob:
@@ -452,9 +483,7 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
             retry_failed_rows_for_job(job)
         else:
             prepare_migration_source(_load_source(job.source_id))
-            job = _refresh_job_estimate_for_ui(job)
-            if job.cancel_requested or job.status == BlobMigrationJob.STATUS_CANCELLED:
-                return _load_job(job_id)
+            _kick_job_estimate_async(job_id)
             execute_migration_job_batches(job)
         job.refresh_from_db()
         if job.cancel_requested or job.status == BlobMigrationJob.STATUS_CANCELLED:

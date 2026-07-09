@@ -306,7 +306,7 @@ class BlobMigrationTestCase(TestCase):
         job = create_migration_job(source_id=source.id, created_by="blob_admin", batch_size=10, run_all=True)
         finished = execute_migration_job(job.id)
         self.assertEqual(finished.status, BlobMigrationJob.STATUS_FAILED)
-        self.assertIn("源表无", finished.message)
+        self.assertIn("源表", finished.message)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_run_blob_migration_writes_file_and_map(self):

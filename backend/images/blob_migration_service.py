@@ -1087,8 +1087,12 @@ def _record_empty_scan_diagnostic(job: BlobMigrationJob, source: BlobMigrationSo
             with conn.cursor() as cursor:
                 cursor.execute(f"SELECT COUNT(*) FROM {table}{where_sql}")
                 table_rows = int((cursor.fetchone() or [0])[0] or 0)
-                cursor.execute("SELECT DATABASE()")
-                current_db = str((cursor.fetchone() or [""])[0] or "")
+                current_db = ""
+                try:
+                    cursor.execute("SELECT DATABASE()")
+                    current_db = str((cursor.fetchone() or [""])[0] or "")
+                except Exception:
+                    pass
         BlobMigrationJob.objects.filter(pk=job.pk).update(
             message=(
                 f"源表扫描无 BLOB 候选行（库={current_db or _source_database_name(source) or source.db_alias} "
@@ -1114,25 +1118,15 @@ def execute_migration_job_batches(job: BlobMigrationJob) -> None:
     source = prepare_migration_source(_load_source(job.source_id))
     _validate_source_config(source)
     batch_size = _max_batch_size(job.batch_size)
-
-    probe = _probe_remote_blob_rows(source)
-    cols_label = ",".join(probe["blob_columns"])
+    blob_cols = _source_blob_columns(source)
+    cols_label = ",".join(blob_cols)
+    db_label = _source_database_name(source) or source.db_alias
     BlobMigrationJob.objects.filter(pk=job.pk).update(
         message=(
-            f"迁移进行中（库={probe['database']} 表={source.source_table} "
-            f"BLOB列={cols_label} 候选={probe['blob_rows']}）"
+            f"迁移进行中（库={db_label} 表={source.source_table} BLOB列={cols_label}）"
         )[:500],
         updated_at=timezone.now(),
     )
-    if probe["blob_rows"] <= 0:
-        BlobMigrationJob.objects.filter(pk=job.pk).update(
-            message=(
-                f"源表无 BLOB 候选行（库={probe['database']} 表={source.source_table} "
-                f"总行={probe['table_rows']} BLOB列={cols_label}）"
-            )[:500],
-            updated_at=timezone.now(),
-        )
-        return
 
     batches_run = 0
 
