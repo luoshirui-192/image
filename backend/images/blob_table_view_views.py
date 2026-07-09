@@ -74,7 +74,13 @@ class BlobTableViewListCreateView(APIView):
 
     def get(self, request):
         views = BlobTableView.objects.all().order_by("-id")
-        data = [_serialize_view(view, include_stats=True) for view in views]
+        # Never COUNT remote tables for every saved view on page load — that stalls workers.
+        include_stats = str(request.query_params.get("include_stats", "0")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        data = [_serialize_view(view, include_stats=include_stats) for view in views]
         return success_response(data)
 
     def post(self, request):
@@ -93,7 +99,7 @@ class BlobTableViewListCreateView(APIView):
             detail=f"view={view.name} table={view.source_table}",
         )
         return success_response(
-            _serialize_view(view, include_stats=True),
+            _serialize_view(view, include_stats=False),
             message="表视图已保存",
             status=201,
         )
@@ -115,7 +121,7 @@ class BlobTableViewDetailView(APIView):
         view = self._get_view(pk)
         if view is None:
             return error_response("表视图不存在", code=4044, status=404)
-        return success_response(_serialize_view(view, include_stats=True))
+        return success_response(_serialize_view(view, include_stats=False))
 
     def patch(self, request, pk: int):
         view = self._get_view(pk)
@@ -129,7 +135,7 @@ class BlobTableViewDetailView(APIView):
         except BlobTableViewError as exc:
             return error_response(str(exc), code=4001, status=400)
         write_operate_log(request, "blob_table_view_update", detail=f"view_id={pk}")
-        return success_response(_serialize_view(updated, include_stats=True), message="已更新")
+        return success_response(_serialize_view(updated, include_stats=False), message="已更新")
 
     def delete(self, request, pk: int):
         view = self._get_view(pk)

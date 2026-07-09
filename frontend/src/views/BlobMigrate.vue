@@ -226,10 +226,8 @@ async function loadSources() {
     if (!runOptions.sourceId && sources.value.length) {
       runOptions.sourceId = sources.value[0].id
     }
-    // Load live stats in background so the saved-config list always appears.
-    sources.value.forEach((source) => {
-      refreshSourceStats(source.id)
-    })
+    // Do NOT fan-out per-source COUNT queries here — that saturates gunicorn workers
+    // and freezes the whole site on large remote tables.
   } catch (err) {
     sources.value = []
     ElMessage.error(err.message || '加载迁移配置失败')
@@ -237,8 +235,9 @@ async function loadSources() {
 }
 
 async function refreshSourceStats(sourceId) {
+  if (!sourceId) return
   try {
-    const res = await getBlobMigrationSourceApi(sourceId)
+    const res = await getBlobMigrationSourceApi(sourceId, { includeStats: true })
     const stats = res.data?.stats || null
     const idx = sources.value.findIndex((s) => s.id === sourceId)
     if (idx >= 0) {
@@ -535,21 +534,11 @@ async function refreshActiveJob(jobId) {
       running.value = false
       await Promise.all([loadSources(), loadJobHistoryList()])
       if (res.data.status === 'completed') {
-        const pending = Number(res.data.live_pending ?? res.data.source_stats?.pending ?? 0)
-        if (pending > 0) {
-          ElMessage.warning(`任务结束，仍有 ${pending} 条待迁移`)
-        } else {
-          ElMessage.success(res.message || '迁移已完成，当前无待处理项')
-        }
+        ElMessage.success(res.message || '迁移已完成')
       } else if (res.data.status === 'cancelled') {
         ElMessage.warning('迁移任务已取消')
       } else if (res.data.status === 'failed') {
-        const pending = Number(res.data.live_pending ?? res.data.source_stats?.pending ?? 0)
-        if (pending <= 0) {
-          ElMessage.success('当前数据已全部迁移完成')
-        } else {
-          ElMessage.error(res.data.message || `迁移未完成，仍有 ${pending} 条待处理`)
-        }
+        ElMessage.error(res.data.message || '迁移失败')
       }
     }
   } catch {
@@ -1076,7 +1065,7 @@ onUnmounted(() => {
               · {{ formatSourceColumns(row) }}
             </template>
           </el-table-column>
-          <el-table-column label="进度" min-width="180">
+          <el-table-column label="进度" min-width="200">
             <template #default="{ row }">
               <span v-if="row.stats">
                 已迁移 {{ row.stats.migrated }} / 共 {{ row.stats.total_with_blob }}
@@ -1088,7 +1077,15 @@ onUnmounted(() => {
                 >待处理 {{ row.stats.pending }}</el-tag>
                 <el-tag v-else size="small" type="success" style="margin-left: 8px">已完成</el-tag>
               </span>
-              <span v-else class="field-hint">统计加载中…</span>
+              <el-button
+                v-else
+                link
+                type="primary"
+                size="small"
+                @click="refreshSourceStats(row.id)"
+              >
+                加载进度
+              </el-button>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="100">

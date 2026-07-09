@@ -984,7 +984,10 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <div class="data-head-actions">
-                    <span class="row-count">已加载 {{ tableRows.length }} / {{ total }}</span>
+                    <span class="row-count">
+                      已加载 {{ tableRows.length
+                      }}<template v-if="total >= 0"> / {{ total }}</template>
+                    </span>
                     <el-button :loading="loadingRows" @click="refreshActiveView">刷新</el-button>
                   </div>
                 </div>

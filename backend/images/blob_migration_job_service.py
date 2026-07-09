@@ -14,7 +14,6 @@ from django.utils import timezone
 
 from images.blob_migration_service import (
     BlobMigrationError,
-    count_migration_candidates,
     execute_migration_job_batches,
     retry_failed_rows_for_job,
 )
@@ -80,13 +79,8 @@ def create_migration_job(
     else:
         _assert_no_active_job(source_id)
 
-    try:
-        # Fast path: do not block job creation on a full remote table scan.
-        stats = count_migration_candidates(source_id, use_cache=True)
-        total_estimate = stats["pending"] if skip_existing else stats["total_with_blob"]
-    except Exception:
-        logger.warning("count_migration_candidates failed source_id=%s", source_id, exc_info=True)
-        total_estimate = 0
+    # Do not block job creation on remote COUNT — start immediately; progress grows from live counters.
+    total_estimate = 0
     if retry_failed_only and parent_job_id:
         total_estimate = BlobMigrationJobError.objects.filter(job_id=parent_job_id, retried=0).count()
 
@@ -193,40 +187,20 @@ def serialize_migration_job(
     job: BlobMigrationJob,
     *,
     include_recent_errors: bool = True,
-    include_source_stats: bool = True,
+    include_source_stats: bool = False,
 ) -> dict[str, Any]:
+    # include_source_stats is ignored: never attach remote COUNT to job responses —
+    # it saturates workers and freezes the site. Use GET /sources/{id}/?include_stats=1.
+    _ = include_source_stats
     progress_count = _job_progress_count(job)
     total = max(int(job.total_estimate or 0), progress_count)
     percent = round(100.0 * progress_count / total, 2) if total else 0.0
     if job.status in ACTIVE_STATUSES and percent >= 100:
         percent = 99.0
 
-    source_stats: dict[str, Any] | None = None
-    # Avoid expensive remote COUNT while the job is still running (polled every few seconds).
-    should_load_stats = include_source_stats and job.status not in ACTIVE_STATUSES
-    if should_load_stats:
-        try:
-            source_stats = count_migration_candidates(job.source_id)
-        except Exception:
-            logger.warning(
-                "attach source_stats failed job_id=%s source_id=%s",
-                job.id,
-                job.source_id,
-                exc_info=True,
-            )
-
-    # Prefer live source progress once the job is no longer running.
-    live_total = int((source_stats or {}).get("total_with_blob") or 0)
-    live_migrated = int((source_stats or {}).get("migrated") or 0)
-    live_pending = int((source_stats or {}).get("pending") or 0)
-    if source_stats and job.status not in ACTIVE_STATUSES:
-        display_total = live_total
-        display_done = live_migrated
-        display_percent = round(100.0 * live_migrated / live_total, 2) if live_total else 100.0
-    else:
-        display_total = total
-        display_done = progress_count
-        display_percent = percent
+    display_total = total
+    display_done = progress_count
+    display_percent = percent
 
     payload: dict[str, Any] = {
         "id": job.id,
@@ -254,31 +228,26 @@ def serialize_migration_job(
         "finished_at": job.finished_at.isoformat(sep=" ", timespec="seconds") if job.finished_at else None,
         "updated_at": job.updated_at.isoformat(sep=" ", timespec="seconds") if job.updated_at else None,
         "create_time": job.create_time.isoformat(sep=" ", timespec="seconds") if job.create_time else None,
-        "source_stats": source_stats,
-        "live_migrated": live_migrated,
-        "live_pending": live_pending,
-        "live_total": live_total,
+        "source_stats": None,
+        "live_migrated": None,
+        "live_pending": None,
+        "live_total": None,
         "display_done": display_done,
         "display_total": display_total,
     }
     if include_recent_errors:
-        # Finished jobs: if live pending is 0, don't surface historical failures.
-        if source_stats is not None and job.status not in ACTIVE_STATUSES and live_pending <= 0:
-            payload["recent_errors"] = []
-            payload["error_count"] = 0
-        else:
-            errors = BlobMigrationJobError.objects.filter(job_id=job.id).order_by("-id")[:20]
-            payload["recent_errors"] = [
-                {
-                    "source_pk": err.source_pk,
-                    "source_column": err.source_column or "",
-                    "filename": err.filename,
-                    "error": err.error_message,
-                    "retried": bool(err.retried),
-                }
-                for err in errors
-            ]
-            payload["error_count"] = BlobMigrationJobError.objects.filter(job_id=job.id).count()
+        errors = BlobMigrationJobError.objects.filter(job_id=job.id).order_by("-id")[:20]
+        payload["recent_errors"] = [
+            {
+                "source_pk": err.source_pk,
+                "source_column": err.source_column or "",
+                "filename": err.filename,
+                "error": err.error_message,
+                "retried": bool(err.retried),
+            }
+            for err in errors
+        ]
+        payload["error_count"] = BlobMigrationJobError.objects.filter(job_id=job.id).count()
     return payload
 
 

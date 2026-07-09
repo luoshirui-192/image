@@ -513,7 +513,10 @@ def fetch_view_rows(
                 )
         rows.append(item)
 
-    total = count_view_rows(view_id)
+    # Avoid a second remote COUNT(*) on every page load — it stalls workers on large tables.
+    # has_more uses "got a full page" as a cheap signal; total stays unknown (-1) unless needed.
+    total = -1
+    has_more = len(rows) >= limit
     BlobTableView.objects.filter(pk=view.id).update(last_viewed_at=timezone.now())
 
     return {
@@ -530,7 +533,7 @@ def fetch_view_rows(
         "offset": offset,
         "limit": limit,
         "total": total,
-        "has_more": offset + len(rows) < total,
+        "has_more": has_more,
     }
 
 

@@ -123,7 +123,7 @@ class BlobMigrationSourceListCreateView(APIView):
         )
         payload = BlobMigrationSourceSerializer(source).data
         # Stats are optional: a slow COUNT must not make "save" look like it failed.
-        include_stats = str(request.query_params.get("include_stats", "1")).lower() in {
+        include_stats = str(request.query_params.get("include_stats", "0")).lower() in {
             "1",
             "true",
             "yes",
@@ -155,10 +155,20 @@ class BlobMigrationSourceDetailView(APIView):
         if source is None:
             return error_response("迁移配置不存在", code=4044, status=404)
         payload = BlobMigrationSourceSerializer(source).data
-        try:
-            payload["stats"] = count_migration_candidates(source.id)
-        except BlobMigrationError as exc:
-            payload["stats"] = {"error": str(exc)}
+        include_stats = str(request.query_params.get("include_stats", "0")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if include_stats:
+            try:
+                payload["stats"] = count_migration_candidates(source.id)
+            except BlobMigrationError as exc:
+                payload["stats"] = {"error": str(exc)}
+            except Exception as exc:
+                payload["stats"] = {"error": str(exc)}
+        else:
+            payload["stats"] = None
         return success_response(payload)
 
     def delete(self, request, pk: int):

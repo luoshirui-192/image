@@ -109,8 +109,11 @@ export function createBlobMigrationSourceApi(data, { includeStats = false } = {}
   })
 }
 
-export function getBlobMigrationSourceApi(id) {
-  return request.get(`/images/blob-migration/sources/${id}/`, { timeout: 120000 })
+export function getBlobMigrationSourceApi(id, { includeStats = false } = {}) {
+  return request.get(`/images/blob-migration/sources/${id}/`, {
+    params: { include_stats: includeStats ? 1 : 0 },
+    timeout: includeStats ? 120000 : 30000,
+  })
 }
 
 export function deleteBlobMigrationSourceApi(id) {
