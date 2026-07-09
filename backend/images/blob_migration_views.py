@@ -207,7 +207,12 @@ class BlobMigrationJobListCreateView(APIView):
             except (TypeError, ValueError):
                 return error_response("source_id 无效", code=4001, status=400)
         jobs = list_migration_jobs(source_id=parsed_source, limit=50)
-        return success_response([serialize_migration_job(job) for job in jobs])
+        return success_response(
+            [
+                serialize_migration_job(job, include_recent_errors=False, include_source_stats=False)
+                for job in jobs
+            ]
+        )
 
     def post(self, request):
         serializer = BlobMigrationJobCreateSerializer(data=request.data)

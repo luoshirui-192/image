@@ -385,8 +385,14 @@ function clearActiveJob() {
   running.value = false
 }
 
-function viewJob(row) {
-  setActiveJob(row)
+async function viewJob(row) {
+  if (!row?.id) return
+  try {
+    const res = await getBlobMigrationJobApi(row.id)
+    setActiveJob(res.data || row)
+  } catch {
+    setActiveJob(row)
+  }
 }
 
 function stopJobPolling() {
@@ -418,16 +424,53 @@ function jobStatusLabel(status) {
   return labels[status] || status
 }
 
+function sourceById(sourceId) {
+  return sources.value.find((s) => s.id === sourceId) || null
+}
+
+function liveStatsForJob(job) {
+  if (!job) return null
+  if (job.source_stats) return job.source_stats
+  return sourceById(job.source_id)?.stats || null
+}
+
+function jobNeedsRetry(job) {
+  const stats = liveStatsForJob(job)
+  if (stats) return Number(stats.pending || 0) > 0
+  return Number(job?.failed || 0) > 0
+}
+
 function jobProgressCount(job) {
   if (!job) return 0
+  if (job.display_done != null) return job.display_done
+  const stats = liveStatsForJob(job)
+  if (stats && !['pending', 'running'].includes(job.status)) {
+    return Number(stats.migrated || 0)
+  }
   return job.progress_count ?? (job.succeeded || 0) + (job.failed || 0)
+}
+
+function jobProgressTotal(job) {
+  if (!job) return 0
+  if (job.display_total != null) return job.display_total
+  const stats = liveStatsForJob(job)
+  if (stats && !['pending', 'running'].includes(job.status)) {
+    return Number(stats.total_with_blob || 0)
+  }
+  return job.total_estimate || 0
 }
 
 function formatJobProgress(job) {
   const done = jobProgressCount(job)
-  const total = job?.total_estimate || 0
+  const total = jobProgressTotal(job)
   const percent = job?.percent ?? (total ? Math.round((100 * done) / total) : 0)
   return `${done} / ${total} (${percent}%)`
+}
+
+function formatLiveProgress(job) {
+  const stats = liveStatsForJob(job)
+  if (!stats) return formatJobProgress(job)
+  return `已迁移 ${stats.migrated} / 共 ${stats.total_with_blob}（待处理 ${stats.pending}）`
 }
 
 async function refreshActiveJob(jobId) {
@@ -441,11 +484,21 @@ async function refreshActiveJob(jobId) {
       running.value = false
       await Promise.all([loadSources(), loadJobHistoryList()])
       if (res.data.status === 'completed') {
-        ElMessage.success(res.message || '迁移任务已完成')
+        const pending = Number(res.data.live_pending ?? res.data.source_stats?.pending ?? 0)
+        if (pending > 0) {
+          ElMessage.warning(`任务结束，仍有 ${pending} 条待迁移`)
+        } else {
+          ElMessage.success(res.message || '迁移已完成，当前无待处理项')
+        }
       } else if (res.data.status === 'cancelled') {
         ElMessage.warning('迁移任务已取消')
       } else if (res.data.status === 'failed') {
-        ElMessage.error(res.data.message || '迁移任务失败')
+        const pending = Number(res.data.live_pending ?? res.data.source_stats?.pending ?? 0)
+        if (pending <= 0) {
+          ElMessage.success('当前数据已全部迁移完成')
+        } else {
+          ElMessage.error(res.data.message || `迁移未完成，仍有 ${pending} 条待处理`)
+        }
       }
     }
   } catch {
@@ -976,7 +1029,13 @@ onUnmounted(() => {
             <template #default="{ row }">
               <span v-if="row.stats">
                 已迁移 {{ row.stats.migrated }} / 共 {{ row.stats.total_with_blob }}
-                （待处理 {{ row.stats.pending }}）
+                <el-tag
+                  v-if="row.stats.pending > 0"
+                  size="small"
+                  type="warning"
+                  style="margin-left: 8px"
+                >待处理 {{ row.stats.pending }}</el-tag>
+                <el-tag v-else size="small" type="success" style="margin-left: 8px">已完成</el-tag>
               </span>
               <span v-else>—</span>
             </template>
@@ -1034,26 +1093,33 @@ onUnmounted(() => {
           </div>
           <el-progress
             :percentage="Math.min(jobInProgress ? 99 : 100, Math.round(displayJob.percent || 0))"
-            :status="displayJob.status === 'failed' ? 'exception' : displayJob.status === 'completed' ? 'success' : undefined"
+            :status="!jobInProgress && Number(liveStatsForJob(displayJob)?.pending ?? displayJob.live_pending ?? 1) <= 0
+              ? 'success'
+              : displayJob.status === 'failed' && jobNeedsRetry(displayJob)
+                ? 'exception'
+                : displayJob.status === 'completed'
+                  ? 'success'
+                  : undefined"
             :stroke-width="16"
             striped
             :striped-flow="jobInProgress && displayJob.status === 'running'"
           />
           <p class="job-stats">
-            已迁移 {{ jobProgressCount(displayJob) }} / {{ displayJob.total_estimate }}
-            · 成功 {{ displayJob.succeeded }}
-            · 跳过 {{ displayJob.skipped }}
-            · 失败 {{ displayJob.failed }}
+            {{ formatLiveProgress(displayJob) }}
           </p>
-          <p v-if="displayJob.message" class="job-message">{{ displayJob.message }}</p>
-          <div v-if="displayJob.recent_errors?.length" class="job-errors">
+          <p v-if="jobInProgress" class="job-message field-hint">
+            本轮处理：成功 {{ displayJob.succeeded }} · 跳过 {{ displayJob.skipped }}
+            <template v-if="displayJob.failed"> · 本轮失败 {{ displayJob.failed }}</template>
+          </p>
+          <p v-else-if="displayJob.message" class="job-message">{{ displayJob.message }}</p>
+          <div v-if="displayJob.recent_errors?.length && jobNeedsRetry(displayJob)" class="job-errors">
             <div v-for="(err, idx) in displayJob.recent_errors" :key="idx" class="job-error-line">
               {{ err.source_pk }}: {{ err.error }}
             </div>
           </div>
-          <div v-if="displayJob.failed > 0 && !jobInProgress" class="job-actions">
-            <el-button size="small" @click="retryFailedJob(displayJob)">重试失败项</el-button>
-            <el-button size="small" @click="downloadJobErrors(displayJob)">导出失败 CSV</el-button>
+          <div v-if="jobNeedsRetry(displayJob) && !jobInProgress" class="job-actions">
+            <el-button size="small" type="primary" @click="retryFailedJob(displayJob)">继续迁移待处理项</el-button>
+            <el-button size="small" @click="downloadJobErrors(displayJob)">导出错误 CSV</el-button>
           </div>
         </div>
 
@@ -1080,7 +1146,7 @@ onUnmounted(() => {
         </el-table>
 
         <div v-if="jobHistory.length" class="job-history-head">
-          <h4 class="subsection-title">任务历史</h4>
+          <h4 class="subsection-title">任务记录</h4>
           <el-button
             size="small"
             type="danger"
@@ -1088,27 +1154,23 @@ onUnmounted(() => {
             :disabled="clearableJobCount <= 0"
             @click="clearJobHistory"
           >
-            清除历史
+            清除记录
           </el-button>
         </div>
         <el-table v-if="jobHistory.length" :data="jobHistory" size="small" border max-height="280">
           <el-table-column prop="status" label="状态" width="100">
             <template #default="{ row }">{{ jobStatusLabel(row.status) }}</template>
           </el-table-column>
-          <el-table-column label="进度" min-width="160">
-            <template #default="{ row }">{{ formatJobProgress(row) }}</template>
-          </el-table-column>
-          <el-table-column label="结果" min-width="180">
-            <template #default="{ row }">
-              成功 {{ row.succeeded }} · 跳过 {{ row.skipped }} · 失败 {{ row.failed }}
-            </template>
+          <el-table-column label="当前进度" min-width="220">
+            <template #default="{ row }">{{ formatLiveProgress(row) }}</template>
           </el-table-column>
           <el-table-column prop="create_time" label="创建时间" min-width="160" />
-          <el-table-column label="操作" width="240">
+          <el-table-column label="操作" width="220">
             <template #default="{ row }">
               <el-button link type="primary" @click="viewJob(row)">查看</el-button>
-              <el-button v-if="row.failed > 0" link type="primary" @click="retryFailedJob(row)">重试失败</el-button>
-              <el-button v-if="row.failed > 0" link @click="downloadJobErrors(row)">导出</el-button>
+              <el-button v-if="jobNeedsRetry(row)" link type="primary" @click="retryFailedJob(row)">
+                继续迁移
+              </el-button>
               <el-button link type="danger" @click="removeJob(row)">删除</el-button>
             </template>
           </el-table-column>
