@@ -393,20 +393,23 @@ async function submitCreateView() {
         : '配置已创建'
 
     if (createViewForm.alsoMigrate) {
-      const sourceRes = await createBlobMigrationSourceApi({
-        ...sharedPayload,
-        name: `${sharedPayload.name} 迁移`,
-        name_column: createViewForm.nameColumn.trim(),
-        suffix_column: createViewForm.suffixColumn.trim(),
-        category_id: createViewForm.categoryId,
-        tags: createViewForm.tags.trim(),
-      })
-      const stats = sourceRes.data?.stats || {}
-      const pending = Number(stats.pending || 0)
+      const sourceRes = await createBlobMigrationSourceApi(
+        {
+          ...sharedPayload,
+          name: `${sharedPayload.name} 迁移`,
+          name_column: createViewForm.nameColumn.trim(),
+          suffix_column: createViewForm.suffixColumn.trim(),
+          category_id: createViewForm.categoryId,
+          tags: createViewForm.tags.trim(),
+        },
+        { includeStats: false },
+      )
       const sourceId = sourceRes.data?.id
-      message += `；迁移配置已保存（待迁移 ${pending}）`
+      message += sourceId
+        ? `；迁移配置已保存（#${sourceId}）`
+        : '；迁移配置已保存'
 
-      if (createViewForm.startMigration && sourceId && pending > 0) {
+      if (createViewForm.startMigration && sourceId) {
         const jobRes = await createBlobMigrationJobApi({
           sourceId,
           batchSize: 100,
@@ -416,9 +419,12 @@ async function submitCreateView() {
           warmThumbsAfter: true,
         })
         const jobId = jobRes.data?.id
-        message += jobId ? `；已启动迁移任务 #${jobId}` : '；已启动迁移任务'
-      } else if (createViewForm.startMigration && pending <= 0) {
-        message += '；无需迁移（已全部完成或无 BLOB）'
+        const estimate = Number(jobRes.data?.total_estimate ?? 0)
+        if (estimate <= 0 && jobRes.data?.status === 'completed') {
+          message += '；当前无待迁移项'
+        } else {
+          message += jobId ? `；已启动迁移任务 #${jobId}` : '；已启动迁移任务'
+        }
       }
     }
 

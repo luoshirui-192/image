@@ -80,8 +80,12 @@ def create_migration_job(
     else:
         _assert_no_active_job(source_id)
 
-    stats = count_migration_candidates(source_id)
-    total_estimate = stats["pending"] if skip_existing else stats["total_with_blob"]
+    try:
+        stats = count_migration_candidates(source_id)
+        total_estimate = stats["pending"] if skip_existing else stats["total_with_blob"]
+    except Exception:
+        logger.warning("count_migration_candidates failed source_id=%s", source_id, exc_info=True)
+        total_estimate = 0
     if retry_failed_only and parent_job_id:
         total_estimate = BlobMigrationJobError.objects.filter(job_id=parent_job_id, retried=0).count()
 

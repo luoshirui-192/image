@@ -95,12 +95,22 @@ export function discoverBlobTablesApi({ dbAlias = 'default' } = {}) {
   return request.post('/images/blob-migration/discover/', { db_alias: dbAlias }, { timeout: 120000 })
 }
 
-export function listBlobMigrationSourcesApi() {
-  return request.get('/images/blob-migration/sources/', { timeout: 120000 })
+export function listBlobMigrationSourcesApi({ includeStats = false } = {}) {
+  return request.get('/images/blob-migration/sources/', {
+    params: { include_stats: includeStats ? 1 : 0 },
+    timeout: includeStats ? 120000 : 30000,
+  })
 }
 
-export function createBlobMigrationSourceApi(data) {
-  return request.post('/images/blob-migration/sources/', data, { timeout: 120000 })
+export function createBlobMigrationSourceApi(data, { includeStats = false } = {}) {
+  return request.post('/images/blob-migration/sources/', data, {
+    params: { include_stats: includeStats ? 1 : 0 },
+    timeout: includeStats ? 120000 : 60000,
+  })
+}
+
+export function getBlobMigrationSourceApi(id) {
+  return request.get(`/images/blob-migration/sources/${id}/`, { timeout: 120000 })
 }
 
 export function deleteBlobMigrationSourceApi(id) {

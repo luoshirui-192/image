@@ -21,6 +21,7 @@ import {
   listBlobMigrationDatabasesApi,
   listBlobMigrationJobsApi,
   listBlobMigrationSourcesApi,
+  getBlobMigrationSourceApi,
   listCategoriesApi,
   listExternalDbConnectionsApi,
   retryBlobMigrationJobApi,
@@ -220,13 +221,35 @@ async function loadCategories() {
 
 async function loadSources() {
   try {
-    const res = await listBlobMigrationSourcesApi()
+    const res = await listBlobMigrationSourcesApi({ includeStats: false })
     sources.value = res.data || []
     if (!runOptions.sourceId && sources.value.length) {
       runOptions.sourceId = sources.value[0].id
     }
-  } catch {
+    // Load live stats in background so the saved-config list always appears.
+    sources.value.forEach((source) => {
+      refreshSourceStats(source.id)
+    })
+  } catch (err) {
     sources.value = []
+    ElMessage.error(err.message || '加载迁移配置失败')
+  }
+}
+
+async function refreshSourceStats(sourceId) {
+  try {
+    const res = await getBlobMigrationSourceApi(sourceId)
+    const stats = res.data?.stats || null
+    const idx = sources.value.findIndex((s) => s.id === sourceId)
+    if (idx >= 0) {
+      sources.value[idx] = {
+        ...sources.value[idx],
+        ...(res.data || {}),
+        stats,
+      }
+    }
+  } catch {
+    // Keep the source row visible even if stats timing out.
   }
 }
 
@@ -1053,7 +1076,7 @@ onUnmounted(() => {
               · {{ formatSourceColumns(row) }}
             </template>
           </el-table-column>
-          <el-table-column label="进度" min-width="160">
+          <el-table-column label="进度" min-width="180">
             <template #default="{ row }">
               <span v-if="row.stats">
                 已迁移 {{ row.stats.migrated }} / 共 {{ row.stats.total_with_blob }}
@@ -1065,7 +1088,7 @@ onUnmounted(() => {
                 >待处理 {{ row.stats.pending }}</el-tag>
                 <el-tag v-else size="small" type="success" style="margin-left: 8px">已完成</el-tag>
               </span>
-              <span v-else>—</span>
+              <span v-else class="field-hint">统计加载中…</span>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="100">

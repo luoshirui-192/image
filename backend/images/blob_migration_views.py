@@ -88,12 +88,21 @@ class BlobMigrationSourceListCreateView(APIView):
 
     def get(self, request):
         qs = BlobMigrationSource.objects.all().order_by("-id")
+        include_stats = str(request.query_params.get("include_stats", "0")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         data = []
         for source in qs:
             entry = BlobMigrationSourceSerializer(source).data
-            try:
-                entry["stats"] = count_migration_candidates(source.id)
-            except BlobMigrationError:
+            if include_stats:
+                try:
+                    entry["stats"] = count_migration_candidates(source.id)
+                except BlobMigrationError:
+                    entry["stats"] = None
+            else:
+                # Avoid blocking the whole list on expensive remote COUNT scans.
                 entry["stats"] = None
             data.append(entry)
         return success_response(data)
@@ -113,7 +122,19 @@ class BlobMigrationSourceListCreateView(APIView):
             detail=f"source={source.source_table} blob={source.blob_column}",
         )
         payload = BlobMigrationSourceSerializer(source).data
-        payload["stats"] = count_migration_candidates(source.id)
+        # Stats are optional: a slow COUNT must not make "save" look like it failed.
+        include_stats = str(request.query_params.get("include_stats", "1")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if include_stats:
+            try:
+                payload["stats"] = count_migration_candidates(source.id)
+            except Exception:
+                payload["stats"] = None
+        else:
+            payload["stats"] = None
         return success_response(payload, message="迁移配置已保存", status=201)
 
 
