@@ -304,9 +304,14 @@ def _extra_select_columns(source: BlobMigrationSource) -> list[str]:
 
 
 def _blob_nonempty_sql(conn, blob_quoted: str) -> str:
-    if conn.vendor == "mysql":
-        return f"({blob_quoted} IS NOT NULL AND LENGTH({blob_quoted}) > 0)"
-    return f"({blob_quoted} IS NOT NULL AND length({blob_quoted}) > 0)"
+    """
+    Cheap non-empty check for BLOB columns.
+
+    Avoid LENGTH(blob): on MySQL/SQLite it forces reading the full binary value,
+    which makes COUNT/cursor scans on large tables extremely slow.
+    Empty image BLOBs are rare; IS NOT NULL is sufficient for migration scans.
+    """
+    return f"({blob_quoted} IS NOT NULL)"
 
 
 def _validate_source_config(source: BlobMigrationSource) -> None:
@@ -1090,7 +1095,7 @@ def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dic
         conn = connections[source.db_alias]
         table = _quote_ident(source.source_table)
         extra = validate_where_clause(source.where_clause)
-        # One remote scan instead of N COUNT(*) queries (BLOB LENGTH is expensive).
+        # One table scan, IS NOT NULL only — never LENGTH(blob).
         select_parts = [
             f"SUM(CASE WHEN {_blob_nonempty_sql(conn, _quote_ident(col))} THEN 1 ELSE 0 END)"
             for col in blob_cols

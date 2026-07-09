@@ -81,7 +81,8 @@ def create_migration_job(
         _assert_no_active_job(source_id)
 
     try:
-        stats = count_migration_candidates(source_id)
+        # Fast path: do not block job creation on a full remote table scan.
+        stats = count_migration_candidates(source_id, use_cache=True)
         total_estimate = stats["pending"] if skip_existing else stats["total_with_blob"]
     except Exception:
         logger.warning("count_migration_candidates failed source_id=%s", source_id, exc_info=True)
