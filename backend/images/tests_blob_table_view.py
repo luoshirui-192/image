@@ -182,9 +182,8 @@ class BlobTableViewTestCase(TestCase):
 
     def test_fetch_view_rows_substitutes_path(self):
         payload = fetch_view_rows(self.view.id, offset=0, limit=10)
-        # total is intentionally unknown (-1) to avoid remote COUNT on every page load
-        self.assertEqual(payload["total"], -1)
-        self.assertTrue(payload["has_more"] or len(payload["rows"]) <= 2)
+        self.assertEqual(payload["total"], 2)
+        self.assertFalse(payload["has_more"])
         self.assertEqual(len(payload["rows"]), 2)
         row1 = payload["rows"][0]
         self.assertEqual(row1["title"], "a.png")

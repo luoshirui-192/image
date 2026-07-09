@@ -474,6 +474,14 @@ def fetch_view_rows(
 
         path_mappings = resolve_effective_path_mappings(view, conn, blob_cols)
 
+        row_total = -1
+        if offset == 0:
+            count_sql = f"SELECT COUNT(*) FROM {table}{where_sql}"
+            with conn.cursor() as cursor:
+                cursor.execute(count_sql, where_params)
+                count_row = cursor.fetchone()
+            row_total = int(count_row[0]) if count_row else 0
+
     pk_index = col_names.index(pk) if pk in col_names else 0
     per_row_path_maps: list[dict[str, dict[str, dict]]] | None = None
     legacy_path_map: dict[str, dict[str, dict]] = {}
@@ -523,10 +531,10 @@ def fetch_view_rows(
                 )
         rows.append(item)
 
-    # Avoid a second remote COUNT(*) on every page load — it stalls workers on large tables.
-    # has_more uses "got a full page" as a cheap signal; total stays unknown (-1) unless needed.
-    total = -1
-    has_more = len(rows) >= limit
+    # COUNT only on the first page (offset=0) so UI can show "loaded / total" without
+    # scanning on every infinite-scroll append.
+    total = row_total if offset == 0 else -1
+    has_more = len(rows) >= limit if total < 0 else (offset + len(rows)) < total
     BlobTableView.objects.filter(pk=view.id).update(last_viewed_at=timezone.now())
 
     return {

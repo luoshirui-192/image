@@ -38,7 +38,7 @@ const activeViewId = ref(null)
 
 const columns = ref([])
 const tableRows = ref([])
-const total = ref(0)
+const total = ref(-1)
 const offset = ref(0)
 const hasMore = ref(false)
 const loadingRows = ref(false)
@@ -805,7 +805,7 @@ async function loadRows({ append = false } = {}) {
   if (!activeViewId.value) {
     columns.value = []
     tableRows.value = []
-    total.value = 0
+    total.value = -1
     hasMore.value = false
     selectedRow.value = null
     return
@@ -838,7 +838,12 @@ async function loadRows({ append = false } = {}) {
       tableRows.value = rows
     }
     offset.value = (append ? offset.value : 0) + rows.length
-    total.value = data.total ?? tableRows.value.length
+    const nextTotal = Number(data.total)
+    if (!Number.isNaN(nextTotal) && nextTotal >= 0) {
+      total.value = nextTotal
+    } else if (!append) {
+      total.value = -1
+    }
     hasMore.value = Boolean(data.has_more)
     if (!append) {
       autoSelectFirstRow()
@@ -937,7 +942,7 @@ watch(activeViewId, (id, oldId) => {
   if (!id) {
     columns.value = []
     tableRows.value = []
-    total.value = 0
+    total.value = -1
     hasMore.value = false
     return
   }
