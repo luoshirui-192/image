@@ -62,6 +62,7 @@ class BlobMigrationSource(models.Model):
     blob_columns = models.TextField(default="")
     source_object_type = models.CharField(max_length=20, default="table")
     path_lookup_table = models.CharField(max_length=64, default="")
+    blob_column_path_mappings = models.TextField(default="")
     name_column = models.CharField(max_length=64, default="")
     suffix_column = models.CharField(max_length=64, default="")
     category_id = models.PositiveIntegerField()

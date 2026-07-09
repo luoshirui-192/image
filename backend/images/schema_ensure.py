@@ -229,6 +229,11 @@ def ensure_blob_pr1_schema() -> None:
         ("blob_migration_source", "blob_columns", "text NOT NULL COMMENT 'JSON BLOB 列数组' AFTER `blob_column`"),
         ("blob_migration_source", "source_object_type", "varchar(20) NOT NULL DEFAULT 'table' AFTER `blob_columns`"),
         ("blob_migration_source", "path_lookup_table", "varchar(64) NOT NULL DEFAULT '' AFTER `source_object_type`"),
+        (
+            "blob_migration_source",
+            "blob_column_path_mappings",
+            "text NOT NULL COMMENT 'JSON 每 BLOB 列路径映射' AFTER `path_lookup_table`",
+        ),
         ("blob_table_view", "database_name", "varchar(64) NOT NULL DEFAULT '' AFTER `db_alias`"),
         ("blob_table_view", "blob_columns", "text NOT NULL COMMENT 'JSON BLOB 列数组' AFTER `blob_column`"),
         ("blob_table_view", "source_object_type", "varchar(20) NOT NULL DEFAULT 'table' AFTER `source_table`"),

@@ -12,7 +12,13 @@ from django.conf import settings
 from django.db import close_old_connections, connections
 from django.utils import timezone
 
-from images.blob_schema_helpers import map_storage_table, parse_blob_columns, serialize_blob_columns
+from images.blob_schema_helpers import (
+    map_storage_table,
+    parse_blob_column_path_mappings,
+    parse_blob_columns,
+    serialize_blob_column_path_mappings,
+    serialize_blob_columns,
+)
 from images.external_db_service import (
     db_alias_session,
     list_database_aliases,
@@ -237,6 +243,60 @@ def _storage_table(source: BlobMigrationSource) -> str:
         raise BlobMigrationError(str(exc)) from exc
 
 
+def _path_mappings(source: BlobMigrationSource) -> list[dict[str, str]]:
+    return parse_blob_column_path_mappings(getattr(source, "blob_column_path_mappings", ""))
+
+
+def _mapping_for_column(source: BlobMigrationSource, blob_column: str) -> dict[str, str] | None:
+    for item in _path_mappings(source):
+        if item.get("view_column") == blob_column:
+            return item
+    return None
+
+
+def _map_target_for_column(
+    source: BlobMigrationSource,
+    row: dict,
+    blob_column: str,
+) -> tuple[str, str, str]:
+    """
+    Resolve (storage_table, source_id, map_column) for image_source_map.
+
+    JOIN views use per-column mappings so each BLOB lands on its base table.
+    """
+    mapping = _mapping_for_column(source, blob_column)
+    if mapping:
+        sid_col = mapping["source_id_column"]
+        if sid_col not in row:
+            raise BlobMigrationError(
+                f"视图行缺少路径映射键列 {sid_col}（BLOB 列 {blob_column}）"
+            )
+        return (
+            mapping["lookup_table"],
+            str(row[sid_col]),
+            mapping.get("source_column") or blob_column,
+        )
+    return _storage_table(source), str(row[source.source_pk_column]), blob_column
+
+
+def _extra_select_columns(source: BlobMigrationSource) -> list[str]:
+    """Columns needed beyond PK/BLOB for filename and per-column path mappings."""
+    cols: list[str] = []
+    seen = {source.source_pk_column, *_source_blob_columns(source)}
+    for candidate in (
+        source.name_column,
+        source.suffix_column,
+        *[m["source_id_column"] for m in _path_mappings(source)],
+    ):
+        name = (candidate or "").strip()
+        if not name or name in seen:
+            continue
+        validate_identifier(name, label="列名")
+        cols.append(name)
+        seen.add(name)
+    return cols
+
+
 def _blob_nonempty_sql(conn, blob_quoted: str) -> str:
     if conn.vendor == "mysql":
         return f"({blob_quoted} IS NOT NULL AND LENGTH({blob_quoted}) > 0)"
@@ -307,30 +367,68 @@ class _MigrationBatchContext:
 
     storage_table: str
     blob_columns: list[str]
-    migrated_keys: set[tuple[str, str]]
+    migrated_keys: set[tuple[str, str, str]]  # (lookup_table, source_id, map_column)
+    path_mappings: list[dict[str, str]]
 
     @classmethod
-    def load(cls, source: BlobMigrationSource, source_ids: list[str]) -> _MigrationBatchContext:
+    def load(cls, source: BlobMigrationSource, light_rows: list[dict]) -> _MigrationBatchContext:
         storage_table = _storage_table(source)
         blob_columns = _source_blob_columns(source)
-        migrated_keys: set[tuple[str, str]] = set()
-        if not source_ids:
-            return cls(storage_table=storage_table, blob_columns=blob_columns, migrated_keys=migrated_keys)
+        path_mappings = _path_mappings(source)
+        migrated_keys: set[tuple[str, str, str]] = set()
+        if not light_rows:
+            return cls(
+                storage_table=storage_table,
+                blob_columns=blob_columns,
+                migrated_keys=migrated_keys,
+                path_mappings=path_mappings,
+            )
 
-        rows = ImageSourceMap.objects.filter(
-            source_table=storage_table,
-            source_id__in=source_ids,
-        ).values_list("source_id", "source_column")
-        for source_id, source_column in rows:
-            col = (source_column or "").strip()
-            if col in blob_columns:
-                migrated_keys.add((str(source_id), col))
-            elif not col and len(blob_columns) == 1:
-                migrated_keys.add((str(source_id), blob_columns[0]))
-        return cls(storage_table=storage_table, blob_columns=blob_columns, migrated_keys=migrated_keys)
+        # Group lookup keys by (lookup_table, map_column) for efficient queries.
+        targets_by_table: dict[str, set[str]] = {}
+        map_columns_by_table: dict[str, set[str]] = {}
+        for light in light_rows:
+            for col in blob_columns:
+                try:
+                    lookup_table, source_id, map_column = _map_target_for_column(source, light, col)
+                except BlobMigrationError:
+                    continue
+                targets_by_table.setdefault(lookup_table, set()).add(source_id)
+                map_columns_by_table.setdefault(lookup_table, set()).add(map_column)
+                if len(blob_columns) == 1:
+                    map_columns_by_table[lookup_table].add("")
 
-    def is_migrated(self, source_id: str, blob_column: str) -> bool:
-        return (source_id, blob_column) in self.migrated_keys
+        for lookup_table, source_ids in targets_by_table.items():
+            cols = list(map_columns_by_table.get(lookup_table) or [])
+            rows = ImageSourceMap.objects.filter(
+                source_table=lookup_table,
+                source_id__in=list(source_ids),
+            )
+            if cols:
+                rows = rows.filter(source_column__in=cols)
+            for source_id, source_column in rows.values_list("source_id", "source_column"):
+                col = (source_column or "").strip()
+                if col:
+                    migrated_keys.add((lookup_table, str(source_id), col))
+                elif len(blob_columns) == 1:
+                    migrated_keys.add((lookup_table, str(source_id), blob_columns[0]))
+
+        return cls(
+            storage_table=storage_table,
+            blob_columns=blob_columns,
+            migrated_keys=migrated_keys,
+            path_mappings=path_mappings,
+        )
+
+    def is_migrated(self, lookup_table: str, source_id: str, map_column: str) -> bool:
+        return (lookup_table, source_id, map_column) in self.migrated_keys
+
+    def is_row_column_migrated(self, source: BlobMigrationSource, row: dict, blob_column: str) -> bool:
+        try:
+            lookup_table, source_id, map_column = _map_target_for_column(source, row, blob_column)
+        except BlobMigrationError:
+            return False
+        return self.is_migrated(lookup_table, source_id, map_column)
 
 
 @dataclass
@@ -378,10 +476,8 @@ def _fetch_source_pks_cursor(
     where_parts, params, pk = _cursor_where_parts(source, conn, after_pk=after_pk)
 
     select_cols = [pk]
-    if source.name_column:
-        select_cols.append(_quote_ident(source.name_column))
-    if source.suffix_column:
-        select_cols.append(_quote_ident(source.suffix_column))
+    for col in _extra_select_columns(source):
+        select_cols.append(_quote_ident(col))
 
     sql = (
         f"SELECT {', '.join(select_cols)} FROM {table} "
@@ -409,10 +505,8 @@ def _fetch_source_rows_by_pks(source: BlobMigrationSource, pk_values: list[str])
     blob_cols = _source_blob_columns(source)
 
     select_cols = [pk] + [_quote_ident(col) for col in blob_cols]
-    if source.name_column:
-        select_cols.append(_quote_ident(source.name_column))
-    if source.suffix_column:
-        select_cols.append(_quote_ident(source.suffix_column))
+    for col in _extra_select_columns(source):
+        select_cols.append(_quote_ident(col))
 
     placeholders = ", ".join(["%s"] * len(pk_values))
     sql = f"SELECT {', '.join(select_cols)} FROM {table} WHERE {pk} IN ({placeholders}) ORDER BY {pk}"
@@ -453,13 +547,13 @@ def _prepare_migration_batch(
             pre_skipped=pre_skipped,
         )
 
-    map_ctx = _MigrationBatchContext.load(source, pk_values)
+    map_ctx = _MigrationBatchContext.load(source, light_rows)
     pks_needing_blob: list[str] = []
     for light in light_rows:
         source_id_str = str(light[pk_col])
         needs_blob = False
         for col in map_ctx.blob_columns:
-            if map_ctx.is_migrated(source_id_str, col):
+            if map_ctx.is_row_column_migrated(source, light, col):
                 pre_skipped.append(
                     MigrationItemResult(
                         source_id=source_id_str,
@@ -507,10 +601,8 @@ def _fetch_source_row_by_pk(source: BlobMigrationSource, pk_value: str) -> dict 
     blob_cols = _source_blob_columns(source)
 
     select_cols = [pk] + [_quote_ident(col) for col in blob_cols]
-    if source.name_column:
-        select_cols.append(_quote_ident(source.name_column))
-    if source.suffix_column:
-        select_cols.append(_quote_ident(source.suffix_column))
+    for col in _extra_select_columns(source):
+        select_cols.append(_quote_ident(col))
 
     sql = f"SELECT {', '.join(select_cols)} FROM {table} WHERE {pk} = %s LIMIT 1"
     with conn.cursor() as cursor:
@@ -522,10 +614,10 @@ def _fetch_source_row_by_pk(source: BlobMigrationSource, pk_value: str) -> dict 
     return dict(zip(columns, raw))
 
 
-def _is_already_migrated(source: BlobMigrationSource, source_id_str: str, blob_column: str) -> bool:
-    storage_table = _storage_table(source)
-    qs = ImageSourceMap.objects.filter(source_table=storage_table, source_id=source_id_str)
-    if qs.filter(source_column=blob_column).exists():
+def _is_already_migrated(source: BlobMigrationSource, row: dict, blob_column: str) -> bool:
+    lookup_table, source_id_str, map_column = _map_target_for_column(source, row, blob_column)
+    qs = ImageSourceMap.objects.filter(source_table=lookup_table, source_id=source_id_str)
+    if qs.filter(source_column=map_column).exists():
         return True
     cols = _source_blob_columns(source)
     if len(cols) == 1 and blob_column == cols[0]:
@@ -543,12 +635,12 @@ def _migrate_single_column(
     skip_existing: bool,
 ) -> MigrationItemResult:
     pk_col = source.source_pk_column
-    source_id_str = str(row[pk_col])
-    storage_table = _storage_table(source)
+    row_pk = str(row[pk_col])
+    lookup_table, map_source_id, map_column = _map_target_for_column(source, row, blob_column)
 
-    if skip_existing and _is_already_migrated(source, source_id_str, blob_column):
+    if skip_existing and _is_already_migrated(source, row, blob_column):
         return MigrationItemResult(
-            source_id=source_id_str,
+            source_id=row_pk,
             source_column=blob_column,
             success=True,
             skipped=True,
@@ -558,7 +650,7 @@ def _migrate_single_column(
         content = _coerce_blob(row.get(blob_column))
         if not content:
             return MigrationItemResult(
-                source_id=source_id_str,
+                source_id=row_pk,
                 source_column=blob_column,
                 success=True,
                 skipped=True,
@@ -567,11 +659,11 @@ def _migrate_single_column(
         name_value = row.get(source.name_column) if source.name_column else None
         suffix_value = row.get(source.suffix_column) if source.suffix_column else None
         filename = _infer_filename(
-            source_id=source_id_str,
+            source_id=map_source_id,
             content=content,
             name_value=str(name_value) if name_value is not None else None,
             suffix_value=str(suffix_value) if suffix_value is not None else None,
-            source_table=source.source_table,
+            source_table=lookup_table,
         )
         if len(_source_blob_columns(source)) > 1:
             stem = Path(filename).stem
@@ -580,7 +672,7 @@ def _migrate_single_column(
 
         if dry_run:
             return MigrationItemResult(
-                source_id=source_id_str,
+                source_id=row_pk,
                 source_column=blob_column,
                 success=True,
                 filename=filename,
@@ -594,14 +686,14 @@ def _migrate_single_column(
             tags=source.tags,
         )
         ImageSourceMap.objects.create(
-            source_table=storage_table,
-            source_id=source_id_str,
-            source_column=blob_column,
+            source_table=lookup_table,
+            source_id=map_source_id,
+            source_column=map_column,
             image_info_id=image.id,
             migrated_at=timezone.now(),
         )
         return MigrationItemResult(
-            source_id=source_id_str,
+            source_id=row_pk,
             source_column=blob_column,
             success=True,
             image_info_id=image.id,
@@ -610,7 +702,7 @@ def _migrate_single_column(
     except DuplicateImageError as exc:
         if dry_run:
             return MigrationItemResult(
-                source_id=source_id_str,
+                source_id=row_pk,
                 source_column=blob_column,
                 success=True,
                 skipped=True,
@@ -619,14 +711,14 @@ def _migrate_single_column(
             )
         existing = exc.existing
         ImageSourceMap.objects.create(
-            source_table=storage_table,
-            source_id=source_id_str,
-            source_column=blob_column,
+            source_table=lookup_table,
+            source_id=map_source_id,
+            source_column=map_column,
             image_info_id=existing.id,
             migrated_at=timezone.now(),
         )
         return MigrationItemResult(
-            source_id=source_id_str,
+            source_id=row_pk,
             source_column=blob_column,
             success=True,
             skipped=True,
@@ -638,11 +730,11 @@ def _migrate_single_column(
         logger.exception(
             "blob migration failed source=%s id=%s column=%s",
             source.source_table,
-            source_id_str,
+            row_pk,
             blob_column,
         )
         return MigrationItemResult(
-            source_id=source_id_str,
+            source_id=row_pk,
             source_column=blob_column,
             success=False,
             error=str(exc),
@@ -656,13 +748,11 @@ def _build_work_units(
     skip_existing: bool,
     map_ctx: _MigrationBatchContext | None,
 ) -> list[tuple[dict, str]]:
-    pk_col = source.source_pk_column
     blob_cols = _source_blob_columns(source)
     work: list[tuple[dict, str]] = []
     for row in blob_rows:
-        source_id_str = str(row[pk_col])
         for col in blob_cols:
-            if skip_existing and map_ctx and map_ctx.is_migrated(source_id_str, col):
+            if skip_existing and map_ctx and map_ctx.is_row_column_migrated(source, row, col):
                 continue
             work.append((row, col))
     return work
@@ -926,16 +1016,40 @@ def count_migration_candidates(source_id: int) -> dict:
     _validate_source_config(source)
     blob_cols = _source_blob_columns(source)
     storage_table = _storage_table(source)
+    path_mappings = _path_mappings(source)
+    mapping_by_col = {m["view_column"]: m for m in path_mappings}
 
-    migrated = ImageSourceMap.objects.filter(
-        source_table=storage_table,
-        source_column__in=blob_cols,
-    ).count()
-    if len(blob_cols) == 1:
-        migrated += ImageSourceMap.objects.filter(
+    migrated = 0
+    if path_mappings:
+        seen_keys: set[tuple[str, str]] = set()
+        for col in blob_cols:
+            mapping = mapping_by_col.get(col)
+            if not mapping:
+                continue
+            key = (mapping["lookup_table"], mapping.get("source_column") or col)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            lookup_table, map_column = key
+            migrated += ImageSourceMap.objects.filter(
+                source_table=lookup_table,
+                source_column=map_column,
+            ).count()
+            if len(blob_cols) == 1:
+                migrated += ImageSourceMap.objects.filter(
+                    source_table=lookup_table,
+                    source_column="",
+                ).count()
+    else:
+        migrated = ImageSourceMap.objects.filter(
             source_table=storage_table,
-            source_column="",
+            source_column__in=blob_cols,
         ).count()
+        if len(blob_cols) == 1:
+            migrated += ImageSourceMap.objects.filter(
+                source_table=storage_table,
+                source_column="",
+            ).count()
 
     with db_alias_session(source.db_alias):
         conn = connections[source.db_alias]
@@ -960,6 +1074,7 @@ def count_migration_candidates(source_id: int) -> dict:
         "blob_columns": blob_cols,
         "source_object_type": source.source_object_type,
         "path_lookup_table": source.path_lookup_table,
+        "blob_column_path_mappings": path_mappings,
         "total_with_blob": total_with_blob,
         "migrated": migrated,
         "pending": max(total_with_blob - migrated, 0),
@@ -1049,6 +1164,11 @@ def create_migration_source(**fields) -> BlobMigrationSource:
         blob_columns=serialize_blob_columns(meta["blob_columns"]),
         source_object_type=meta["source_object_type"],
         path_lookup_table=meta["path_lookup_table"],
+        blob_column_path_mappings=serialize_blob_column_path_mappings(
+            fields.get("blob_column_path_mappings")
+            or meta.get("blob_column_path_mappings")
+            or []
+        ),
         name_column=fields.get("name_column") or "",
         suffix_column=fields.get("suffix_column") or "",
         category_id=fields["category_id"],

@@ -130,7 +130,7 @@ class BlobMigrationSourceSerializer(serializers.Serializer):
         return attrs
 
     def to_representation(self, instance):
-        from images.blob_schema_helpers import parse_blob_columns
+        from images.blob_schema_helpers import parse_blob_column_path_mappings, parse_blob_columns
         from images.models import BlobMigrationSource
 
         if isinstance(instance, BlobMigrationSource):
@@ -143,6 +143,9 @@ class BlobMigrationSourceSerializer(serializers.Serializer):
                 "blob_columns": parse_blob_columns(instance.blob_columns, instance.blob_column),
                 "source_object_type": instance.source_object_type or "table",
                 "path_lookup_table": instance.path_lookup_table or "",
+                "blob_column_path_mappings": parse_blob_column_path_mappings(
+                    instance.blob_column_path_mappings
+                ),
                 "name_column": instance.name_column,
                 "suffix_column": instance.suffix_column,
                 "category_id": instance.category_id,

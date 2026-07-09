@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS blob_migration_source (
     blob_columns TEXT NOT NULL DEFAULT '',
     source_object_type VARCHAR(20) NOT NULL DEFAULT 'table',
     path_lookup_table VARCHAR(64) NOT NULL DEFAULT '',
+    blob_column_path_mappings TEXT NOT NULL DEFAULT '',
     name_column VARCHAR(64) NOT NULL DEFAULT '',
     suffix_column VARCHAR(64) NOT NULL DEFAULT '',
     category_id INTEGER NOT NULL,
@@ -100,6 +101,29 @@ CREATE TABLE IF NOT EXISTS legacy_dual_blob (
 );
 CREATE VIEW IF NOT EXISTS legacy_photos_v AS
     SELECT id, title, photo FROM legacy_photos;
+CREATE TABLE IF NOT EXISTS join_main (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ara_name VARCHAR(64) NOT NULL,
+    match_name VARCHAR(64) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS join_images (
+    fname VARCHAR(64) PRIMARY KEY,
+    image_data BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS join_faces (
+    file_name VARCHAR(64) PRIMARY KEY,
+    image_content BLOB NOT NULL
+);
+CREATE VIEW IF NOT EXISTS join_view AS
+    SELECT
+        m.id AS id,
+        m.ara_name AS ara_name,
+        m.match_name AS match_name,
+        i.image_data AS image_data,
+        f.image_content AS image_content
+    FROM join_main m
+    JOIN join_images i ON i.fname = m.ara_name
+    JOIN join_faces f ON f.file_name = m.match_name;
 CREATE TABLE IF NOT EXISTS blob_migration_job (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id INTEGER NOT NULL,
@@ -268,6 +292,76 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(result.succeeded, 1)
             mapping = ImageSourceMap.objects.get(source_table="legacy_photos", source_id="1")
             self.assertEqual(mapping.source_column, "photo")
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_join_view_migration_maps_per_base_table(self):
+        upload_root = str(self.upload_root)
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM join_faces")
+            cursor.execute("DELETE FROM join_images")
+            cursor.execute("DELETE FROM join_main")
+            cursor.execute(
+                "INSERT INTO join_images (fname, image_data) VALUES (?, ?)",
+                ["ara-1", make_png_bytes()],
+            )
+            cursor.execute(
+                "INSERT INTO join_faces (file_name, image_content) VALUES (?, ?)",
+                ["match-1", make_png_bytes((10, 20, 30))],
+            )
+            cursor.execute(
+                "INSERT INTO join_main (ara_name, match_name) VALUES (?, ?)",
+                ["ara-1", "match-1"],
+            )
+
+        source = create_migration_source(
+            name="join view migrate",
+            source_table="join_view",
+            source_pk_column="id",
+            blob_columns=["image_data", "image_content"],
+            source_object_type="view",
+            path_lookup_table="join_images",
+            blob_column_path_mappings=[
+                {
+                    "view_column": "image_data",
+                    "lookup_table": "join_images",
+                    "source_id_column": "ara_name",
+                    "source_column": "image_data",
+                },
+                {
+                    "view_column": "image_content",
+                    "lookup_table": "join_faces",
+                    "source_id_column": "match_name",
+                    "source_column": "image_content",
+                },
+            ],
+            category_id=1,
+            db_alias="default",
+        )
+
+        with override_settings(UPLOAD_ROOT=upload_root):
+            result = run_blob_migration(source.id, batch_size=10, dry_run=False)
+            self.assertEqual(result.succeeded, 2)
+            self.assertTrue(
+                ImageSourceMap.objects.filter(
+                    source_table="join_images",
+                    source_id="ara-1",
+                    source_column="image_data",
+                ).exists()
+            )
+            self.assertTrue(
+                ImageSourceMap.objects.filter(
+                    source_table="join_faces",
+                    source_id="match-1",
+                    source_column="image_content",
+                ).exists()
+            )
+            stats = count_migration_candidates(source.id)
+            self.assertEqual(stats["pending"], 0)
+
+            # Re-run should skip both columns via per-base-table maps.
+            second = run_blob_migration(source.id, batch_size=10, dry_run=False, skip_existing=True)
+            self.assertEqual(second.skipped, 2)
+            self.assertEqual(second.succeeded, 0)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_skip_existing_on_rerun(self):
