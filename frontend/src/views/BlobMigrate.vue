@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Connection, Plus, Refresh, Search } from '@element-plus/icons-vue'
@@ -30,6 +30,7 @@ import {
 } from '@/api/images'
 
 const router = useRouter()
+const route = useRoute()
 
 const databases = ref([])
 const connections = ref([])
@@ -660,7 +661,28 @@ async function submitCreateCategory() {
 
 onMounted(async () => {
   await Promise.all([loadConnections(), loadDatabases(), loadCategories(), loadSources(), loadJobHistory()])
+  applyRoutePrefill()
 })
+
+function applyRoutePrefill() {
+  const q = route.query || {}
+  if (q.dbAlias) form.dbAlias = String(q.dbAlias)
+  if (q.sourceTable) form.sourceTable = String(q.sourceTable)
+  if (q.objectType === 'view' || q.objectType === 'table') {
+    form.sourceObjectType = String(q.objectType)
+  }
+  if (q.blobColumns) {
+    const cols = String(q.blobColumns)
+      .split(',')
+      .map((c) => c.trim())
+      .filter(Boolean)
+    if (cols.length) {
+      form.blobColumns = cols
+      form.blobColumn = cols[0]
+    }
+  }
+  if (q.sourcePkColumn) form.sourcePkColumn = String(q.sourcePkColumn)
+}
 
 onUnmounted(() => {
   stopJobPolling()

@@ -6,7 +6,10 @@ import { Refresh, VideoPlay, View } from '@element-plus/icons-vue'
 import ImagePreview from '@/components/ImagePreview.vue'
 import SqlEditor from '@/components/SqlEditor.vue'
 import {
+  createBlobMigrationJobApi,
+  createBlobMigrationSourceApi,
   createBlobTableViewApi,
+  createCategoryApi,
   deleteBlobTableViewApi,
   fetchBlobTableViewRowsApi,
   getBlobCatalogObjectApi,
@@ -14,6 +17,7 @@ import {
   listBlobCatalogDatabasesApi,
   listBlobCatalogObjectsApi,
   listBlobTableViewsApi,
+  listCategoriesApi,
 } from '@/api/images'
 import {
   executeSqlApi,
@@ -92,7 +96,18 @@ const createViewForm = reactive({
   sourcePkColumn: 'id',
   blobColumns: [],
   whereClause: '',
+  alsoMigrate: false,
+  startMigration: true,
+  categoryId: null,
+  nameColumn: '',
+  suffixColumn: '',
+  tags: '',
 })
+
+const categories = ref([])
+const categoryDialogVisible = ref(false)
+const categoryDialogSaving = ref(false)
+const newCategoryForm = reactive({ category_name: '', sort: 0 })
 
 const browseContext = computed(() => {
   if (activeView.value) {
@@ -259,6 +274,7 @@ function goMigrateWithCatalog() {
   }
   const obj = selectedCatalogObject.value
   const conn = obj.connection || {}
+  const blobCols = (obj.blobColumns || []).map((item) => item.column).filter(Boolean)
   router.push({
     path: '/blob-migrate',
     query: {
@@ -266,8 +282,50 @@ function goMigrateWithCatalog() {
       sourceTable: obj.label,
       database: obj.database || '',
       objectType: obj.objectType || 'table',
+      blobColumns: blobCols.join(','),
+      sourcePkColumn: createViewForm.sourcePkColumn || 'id',
     },
   })
+}
+
+async function loadCategories() {
+  try {
+    const res = await listCategoriesApi()
+    categories.value = res.data || []
+  } catch {
+    categories.value = []
+  }
+}
+
+function openCreateCategory() {
+  newCategoryForm.category_name = ''
+  newCategoryForm.sort = 0
+  categoryDialogVisible.value = true
+}
+
+async function submitCreateCategory() {
+  const name = newCategoryForm.category_name.trim()
+  if (!name) {
+    ElMessage.warning('请输入分类名称')
+    return
+  }
+  categoryDialogSaving.value = true
+  try {
+    const res = await createCategoryApi({
+      category_name: name,
+      sort: Number(newCategoryForm.sort) || 0,
+    })
+    ElMessage.success('分类已创建')
+    categoryDialogVisible.value = false
+    await loadCategories()
+    if (res.data?.id) {
+      createViewForm.categoryId = res.data.id
+    }
+  } catch (err) {
+    ElMessage.error(err.message || '创建分类失败')
+  } finally {
+    categoryDialogSaving.value = false
+  }
 }
 
 async function openCreateViewDialog() {
@@ -278,6 +336,12 @@ async function openCreateViewDialog() {
   createViewForm.blobColumns = (obj.blobColumns || []).map((item) => item.column)
   createViewForm.whereClause = ''
   createViewForm.sourcePkColumn = 'id'
+  createViewForm.alsoMigrate = false
+  createViewForm.startMigration = true
+  createViewForm.categoryId = null
+  createViewForm.nameColumn = ''
+  createViewForm.suffixColumn = ''
+  createViewForm.tags = ''
   try {
     const res = await getBlobCatalogObjectApi(obj.label, {
       connectionId: conn.connection_id,
@@ -294,6 +358,7 @@ async function openCreateViewDialog() {
   } catch {
     // keep defaults from tree node
   }
+  await loadCategories()
   createViewDialogVisible.value = true
 }
 
@@ -303,25 +368,60 @@ async function submitCreateView() {
     ElMessage.warning('请至少选择一个 BLOB 列')
     return
   }
+  if (createViewForm.alsoMigrate && !createViewForm.categoryId) {
+    ElMessage.warning('请选择迁移目标分类')
+    return
+  }
   const obj = selectedCatalogObject.value
   const conn = obj.connection || {}
+  const sharedPayload = {
+    name: createViewForm.name.trim() || obj.label,
+    db_alias: conn.alias,
+    database_name: obj.database,
+    source_table: obj.label,
+    source_object_type: obj.objectType || 'table',
+    source_pk_column: createViewForm.sourcePkColumn.trim() || 'id',
+    blob_columns: [...createViewForm.blobColumns],
+    where_clause: createViewForm.whereClause.trim(),
+  }
   createViewSaving.value = true
   try {
-    const res = await createBlobTableViewApi({
-      name: createViewForm.name.trim() || obj.label,
-      db_alias: conn.alias,
-      database_name: obj.database,
-      source_table: obj.label,
-      source_object_type: obj.objectType || 'table',
-      source_pk_column: createViewForm.sourcePkColumn.trim() || 'id',
-      blob_columns: [...createViewForm.blobColumns],
-      where_clause: createViewForm.whereClause.trim(),
-    })
-    ElMessage.success(
+    const res = await createBlobTableViewApi(sharedPayload)
+    let message =
       res.data?.blob_column_path_mappings?.length
         ? `配置已创建，已自动解析 ${res.data.blob_column_path_mappings.length} 个 BLOB 列路径映射`
-        : '配置已创建',
-    )
+        : '配置已创建'
+
+    if (createViewForm.alsoMigrate) {
+      const sourceRes = await createBlobMigrationSourceApi({
+        ...sharedPayload,
+        name: `${sharedPayload.name} 迁移`,
+        name_column: createViewForm.nameColumn.trim(),
+        suffix_column: createViewForm.suffixColumn.trim(),
+        category_id: createViewForm.categoryId,
+        tags: createViewForm.tags.trim(),
+      })
+      const stats = sourceRes.data?.stats || {}
+      const pending = Number(stats.pending || 0)
+      const sourceId = sourceRes.data?.id
+      message += `；迁移配置已保存（待迁移 ${pending}）`
+
+      if (createViewForm.startMigration && sourceId && pending > 0) {
+        const jobRes = await createBlobMigrationJobApi({
+          sourceId,
+          batchSize: 100,
+          dryRun: false,
+          skipExisting: true,
+          runAll: true,
+        })
+        const jobId = jobRes.data?.id
+        message += jobId ? `；已启动迁移任务 #${jobId}` : '；已启动迁移任务'
+      } else if (createViewForm.startMigration && pending <= 0) {
+        message += '；无需迁移（已全部完成或无 BLOB）'
+      }
+    }
+
+    ElMessage.success(message)
     createViewDialogVisible.value = false
     await loadViews()
     if (res.data?.id) {
@@ -1037,8 +1137,8 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <el-dialog v-model="createViewDialogVisible" title="从目录创建配置" width="480px">
-      <el-form label-width="100px">
+    <el-dialog v-model="createViewDialogVisible" title="从目录创建配置" width="560px">
+      <el-form label-width="110px">
         <el-form-item label="名称">
           <el-input v-model="createViewForm.name" maxlength="100" />
         </el-form-item>
@@ -1066,10 +1166,69 @@ onUnmounted(() => {
         <el-form-item label="WHERE">
           <el-input v-model="createViewForm.whereClause" placeholder="不含 WHERE 关键字" />
         </el-form-item>
+
+        <el-divider content-position="left">迁移（可选）</el-divider>
+        <el-form-item label="同时配置迁移">
+          <el-switch v-model="createViewForm.alsoMigrate" />
+          <span class="field-hint inline-hint">保存浏览配置的同时创建迁移任务配置</span>
+        </el-form-item>
+        <template v-if="createViewForm.alsoMigrate">
+          <el-form-item label="目标分类" required>
+            <div class="category-row">
+              <el-select
+                v-model="createViewForm.categoryId"
+                filterable
+                clearable
+                placeholder="选择分类"
+                style="flex: 1"
+              >
+                <el-option
+                  v-for="cat in categories"
+                  :key="cat.id"
+                  :label="cat.category_name"
+                  :value="cat.id"
+                />
+              </el-select>
+              <el-button @click="openCreateCategory">新建</el-button>
+            </div>
+          </el-form-item>
+          <el-form-item label="文件名列">
+            <el-input v-model="createViewForm.nameColumn" placeholder="可选，用于生成文件名" maxlength="64" />
+          </el-form-item>
+          <el-form-item label="后缀列">
+            <el-input v-model="createViewForm.suffixColumn" placeholder="可选，如 jpg/png" maxlength="64" />
+          </el-form-item>
+          <el-form-item label="标签">
+            <el-input v-model="createViewForm.tags" placeholder="可选" maxlength="500" />
+          </el-form-item>
+          <el-form-item label="立即开始">
+            <el-switch v-model="createViewForm.startMigration" />
+            <span class="field-hint inline-hint">有待迁移数据时自动启动后台任务</span>
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="createViewDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="createViewSaving" @click="submitCreateView">创建</el-button>
+        <el-button type="primary" :loading="createViewSaving" @click="submitCreateView">
+          {{ createViewForm.alsoMigrate && createViewForm.startMigration ? '创建并开始迁移' : '创建' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="categoryDialogVisible" title="新建分类" width="400px">
+      <el-form label-width="90px">
+        <el-form-item label="分类名称" required>
+          <el-input v-model="newCategoryForm.category_name" maxlength="100" />
+        </el-form-item>
+        <el-form-item label="排序">
+          <el-input-number v-model="newCategoryForm.sort" :min="0" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="categoryDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="categoryDialogSaving" @click="submitCreateCategory">
+          创建
+        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -1327,6 +1486,13 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   line-height: 1.5;
+}
+
+.category-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  align-items: center;
 }
 
 .data-head-actions {
