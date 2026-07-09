@@ -197,7 +197,9 @@ def serialize_migration_job(
         percent = 99.0
 
     source_stats: dict[str, Any] | None = None
-    if include_source_stats:
+    # Avoid expensive remote COUNT while the job is still running (polled every few seconds).
+    should_load_stats = include_source_stats and job.status not in ACTIVE_STATUSES
+    if should_load_stats:
         try:
             source_stats = count_migration_candidates(job.source_id)
         except Exception:

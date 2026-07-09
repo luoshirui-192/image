@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,11 @@ FORBIDDEN_WHERE_RE = re.compile(
 )
 
 BLOB_TYPES_MYSQL = frozenset({"blob", "tinyblob", "mediumblob", "longblob", "binary", "varbinary"})
+
+# Short-lived cache for expensive remote COUNT scans (job polling / source list).
+_STATS_CACHE: dict[tuple, tuple[float, dict]] = {}
+_STATS_CACHE_TTL_SECONDS = 20.0
+_STATS_CACHE_LOCK = Lock()
 
 
 class BlobMigrationError(Exception):
@@ -947,6 +953,7 @@ def execute_migration_job_batches(job: BlobMigrationJob) -> None:
 
     if not job.dry_run:
         BlobMigrationSource.objects.filter(pk=source.pk).update(last_run_at=timezone.now())
+    invalidate_migration_stats_cache(source.id)
 
 
 def retry_failed_rows_for_job(job: BlobMigrationJob) -> None:
@@ -1009,15 +1016,31 @@ def retry_failed_rows_for_job(job: BlobMigrationJob) -> None:
         _update_job_progress(job, increment, last_pk=None)
     if not job.dry_run:
         BlobMigrationSource.objects.filter(pk=source.pk).update(last_run_at=timezone.now())
+    invalidate_migration_stats_cache(source.id)
 
 
-def count_migration_candidates(source_id: int) -> dict:
+def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dict:
     source = _load_source(source_id)
     _validate_source_config(source)
     blob_cols = _source_blob_columns(source)
     storage_table = _storage_table(source)
     path_mappings = _path_mappings(source)
     mapping_by_col = {m["view_column"]: m for m in path_mappings}
+
+    cache_key = (
+        source.id,
+        source.source_table,
+        source.where_clause or "",
+        tuple(blob_cols),
+        source.path_lookup_table or "",
+        getattr(source, "blob_column_path_mappings", "") or "",
+    )
+    now = time.monotonic()
+    if use_cache:
+        with _STATS_CACHE_LOCK:
+            cached = _STATS_CACHE.get(cache_key)
+            if cached and now - cached[0] < _STATS_CACHE_TTL_SECONDS:
+                return dict(cached[1])
 
     migrated = 0
     if path_mappings:
@@ -1055,18 +1078,19 @@ def count_migration_candidates(source_id: int) -> dict:
         conn = connections[source.db_alias]
         table = _quote_ident(source.source_table)
         extra = validate_where_clause(source.where_clause)
-        total_with_blob = 0
-        for col in blob_cols:
-            blob = _quote_ident(col)
-            where_parts = [_blob_nonempty_sql(conn, blob)]
-            if extra:
-                where_parts.append(f"({extra})")
-            sql = f"SELECT COUNT(*) FROM {table} WHERE {' AND '.join(where_parts)}"
-            with conn.cursor() as cursor:
-                cursor.execute(sql)
-                total_with_blob += int(cursor.fetchone()[0])
+        # One remote scan instead of N COUNT(*) queries (BLOB LENGTH is expensive).
+        select_parts = [
+            f"SUM(CASE WHEN {_blob_nonempty_sql(conn, _quote_ident(col))} THEN 1 ELSE 0 END)"
+            for col in blob_cols
+        ]
+        where_sql = f" WHERE ({extra})" if extra else ""
+        sql = f"SELECT {', '.join(select_parts)} FROM {table}{where_sql}"
+        with conn.cursor() as cursor:
+            cursor.execute(sql)
+            row = cursor.fetchone() or ()
+        total_with_blob = sum(int(v or 0) for v in row)
 
-    return {
+    result = {
         "source_id": source.id,
         "source_table": source.source_table,
         "storage_table": storage_table,
@@ -1079,6 +1103,24 @@ def count_migration_candidates(source_id: int) -> dict:
         "migrated": migrated,
         "pending": max(total_with_blob - migrated, 0),
     }
+    if use_cache:
+        with _STATS_CACHE_LOCK:
+            _STATS_CACHE[cache_key] = (now, dict(result))
+            if len(_STATS_CACHE) > 64:
+                oldest = sorted(_STATS_CACHE.items(), key=lambda item: item[1][0])[:16]
+                for key, _ in oldest:
+                    _STATS_CACHE.pop(key, None)
+    return result
+
+
+def invalidate_migration_stats_cache(source_id: int | None = None) -> None:
+    with _STATS_CACHE_LOCK:
+        if source_id is None:
+            _STATS_CACHE.clear()
+            return
+        for key in list(_STATS_CACHE):
+            if key and key[0] == source_id:
+                _STATS_CACHE.pop(key, None)
 
 
 def run_blob_migration(
@@ -1122,6 +1164,7 @@ def run_blob_migration(
 
     if not dry_run:
         BlobMigrationSource.objects.filter(pk=source.pk).update(last_run_at=timezone.now())
+    invalidate_migration_stats_cache(source.id)
 
     return result
 

@@ -513,7 +513,7 @@ function startJobPolling(jobId) {
   refreshActiveJob(jobId).catch(() => {})
   pollTimer.value = setInterval(() => {
     refreshActiveJob(jobId).catch(() => {})
-  }, 2000)
+  }, 3000)
 }
 
 async function startFullMigration() {

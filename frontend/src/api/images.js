@@ -92,15 +92,15 @@ export function listBlobMigrationDatabasesApi() {
 }
 
 export function discoverBlobTablesApi({ dbAlias = 'default' } = {}) {
-  return request.post('/images/blob-migration/discover/', { db_alias: dbAlias })
+  return request.post('/images/blob-migration/discover/', { db_alias: dbAlias }, { timeout: 120000 })
 }
 
 export function listBlobMigrationSourcesApi() {
-  return request.get('/images/blob-migration/sources/')
+  return request.get('/images/blob-migration/sources/', { timeout: 120000 })
 }
 
 export function createBlobMigrationSourceApi(data) {
-  return request.post('/images/blob-migration/sources/', data)
+  return request.post('/images/blob-migration/sources/', data, { timeout: 120000 })
 }
 
 export function deleteBlobMigrationSourceApi(id) {
@@ -118,7 +118,7 @@ export function runBlobMigrationApi({ sourceId, batchSize = 50, dryRun = false, 
 
 export function listBlobMigrationJobsApi({ sourceId } = {}) {
   const params = sourceId != null ? { source_id: sourceId } : undefined
-  return request.get('/images/blob-migration/jobs/', { params })
+  return request.get('/images/blob-migration/jobs/', { params, timeout: 60000 })
 }
 
 export function createBlobMigrationJobApi({
@@ -136,11 +136,11 @@ export function createBlobMigrationJobApi({
     skip_existing: skipExisting,
     run_all: runAll,
     warm_thumbs_after: warmThumbsAfter,
-  })
+  }, { timeout: 120000 })
 }
 
 export function getBlobMigrationJobApi(jobId) {
-  return request.get(`/images/blob-migration/jobs/${jobId}/`)
+  return request.get(`/images/blob-migration/jobs/${jobId}/`, { timeout: 120000 })
 }
 
 export function deleteBlobMigrationJobApi(jobId) {
@@ -224,11 +224,11 @@ export function getBlobCatalogObjectApi(name, { connectionId, dbAlias, database 
 }
 
 export function listBlobTableViewsApi() {
-  return request.get('/images/blob-migration/table-views/')
+  return request.get('/images/blob-migration/table-views/', { timeout: 120000 })
 }
 
 export function createBlobTableViewApi(data) {
-  return request.post('/images/blob-migration/table-views/', data)
+  return request.post('/images/blob-migration/table-views/', data, { timeout: 120000 })
 }
 
 export function updateBlobTableViewApi(id, data) {
