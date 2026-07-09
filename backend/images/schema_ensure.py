@@ -75,6 +75,7 @@ def ensure_migration_tables() -> None:
           `tags` varchar(500) NOT NULL DEFAULT '',
           `where_clause` varchar(500) NOT NULL DEFAULT '',
           `db_alias` varchar(32) NOT NULL DEFAULT 'default',
+          `database_name` varchar(64) NOT NULL DEFAULT '',
           `enabled` tinyint(4) NOT NULL DEFAULT 1,
           `last_run_at` datetime NULL DEFAULT NULL,
           `create_time` datetime NULL DEFAULT NULL,
@@ -234,6 +235,7 @@ def ensure_blob_pr1_schema() -> None:
             "blob_column_path_mappings",
             "text NOT NULL COMMENT 'JSON 每 BLOB 列路径映射' AFTER `path_lookup_table`",
         ),
+        ("blob_migration_source", "database_name", "varchar(64) NOT NULL DEFAULT '' AFTER `db_alias`"),
         ("blob_table_view", "database_name", "varchar(64) NOT NULL DEFAULT '' AFTER `db_alias`"),
         ("blob_table_view", "blob_columns", "text NOT NULL COMMENT 'JSON BLOB 列数组' AFTER `blob_column`"),
         ("blob_table_view", "source_object_type", "varchar(20) NOT NULL DEFAULT 'table' AFTER `source_table`"),
@@ -301,6 +303,15 @@ def ensure_blob_pr1_schema() -> None:
                     ON v.db_alias = CONCAT('external_', c.id)
                 SET v.database_name = c.db_name
                 WHERE v.database_name = ''
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE `blob_migration_source` s
+                INNER JOIN `external_db_connection` c
+                    ON s.db_alias = CONCAT('external_', c.id)
+                SET s.database_name = c.db_name
+                WHERE s.database_name = ''
                 """
             )
     except Exception:

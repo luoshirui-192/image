@@ -70,6 +70,7 @@ class BlobMigrationSource(models.Model):
     tags = models.CharField(max_length=500, default="")
     where_clause = models.CharField(max_length=500, default="")
     db_alias = models.CharField(max_length=32, default="default")
+    database_name = models.CharField(max_length=64, default="")
     enabled = models.SmallIntegerField(default=1)
     last_run_at = models.DateTimeField(null=True, blank=True)
     create_time = models.DateTimeField(null=True, blank=True)

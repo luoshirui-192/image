@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS blob_migration_source (
     tags VARCHAR(500) NOT NULL DEFAULT '',
     where_clause VARCHAR(500) NOT NULL DEFAULT '',
     db_alias VARCHAR(32) NOT NULL DEFAULT 'default',
+    database_name VARCHAR(64) NOT NULL DEFAULT '',
     enabled SMALLINT NOT NULL DEFAULT 1,
     last_run_at DATETIME NULL,
     create_time DATETIME NULL
@@ -411,9 +412,9 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(job.total_estimate, 0)
             finished = execute_migration_job(job.id)
             self.assertEqual(finished.status, BlobMigrationJob.STATUS_COMPLETED)
-            # Worker counts pending=0, then exits without migrating.
-            self.assertEqual(finished.total_estimate, 0)
+            # Already migrated: cursor walk skips existing rows (no new successes).
             self.assertEqual(finished.succeeded, 0)
+            self.assertGreaterEqual(finished.skipped, 1)
 
     @override_settings(UPLOAD_ROOT=None, BLOB_MIGRATION_UPLOAD_WORKERS=1)
     def test_migration_job_runs_to_completion(self):

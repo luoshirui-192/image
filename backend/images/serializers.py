@@ -153,6 +153,7 @@ class BlobMigrationSourceSerializer(serializers.Serializer):
                 "tags": instance.tags,
                 "where_clause": instance.where_clause,
                 "db_alias": instance.db_alias,
+                "database_name": getattr(instance, "database_name", "") or "",
                 "enabled": instance.enabled,
                 "last_run_at": instance.last_run_at,
                 "create_time": instance.create_time,

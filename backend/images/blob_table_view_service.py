@@ -57,6 +57,16 @@ def validate_db_alias(alias: str) -> str:
         raise BlobTableViewError(str(exc)) from exc
 
 
+
+def _view_database_name(view: BlobTableView) -> str | None:
+    value = (getattr(view, "database_name", "") or "").strip()
+    return value or None
+
+
+def _view_db_session(view: BlobTableView):
+    return db_alias_session(view.db_alias, database=_view_database_name(view))
+
+
 def _parse_display_columns(raw: str) -> list[str]:
     value = (raw or "").strip()
     if not value:
@@ -195,7 +205,7 @@ def _resolve_display_columns(view: BlobTableView, remote_cols: list[VirtualColum
 def get_view_schema(view_id: int) -> dict:
     view = _load_view(view_id)
     validate_db_alias(view.db_alias)
-    with db_alias_session(view.db_alias) as alias:
+    with _view_db_session(view) as alias:
         conn = connections[alias]
         remote_cols = _fetch_remote_columns(conn, view.source_table)
         display_cols = _resolve_display_columns(view, remote_cols)
@@ -260,7 +270,7 @@ def count_view_rows(view_id: int) -> int:
     where_sql, where_params = _build_where(view)
     validate_db_alias(view.db_alias)
     table = _quote_ident(view.source_table)
-    with db_alias_session(view.db_alias) as alias:
+    with _view_db_session(view) as alias:
         conn = connections[alias]
         sql = f"SELECT COUNT(*) FROM {table}{where_sql}"
         with conn.cursor() as cursor:
@@ -443,7 +453,7 @@ def fetch_view_rows(
     table = _quote_ident(view.source_table)
     where_sql, where_params = _build_where(view)
 
-    with db_alias_session(view.db_alias) as alias:
+    with _view_db_session(view) as alias:
         conn = connections[alias]
         remote_cols = _fetch_remote_columns(conn, view.source_table)
         display_cols = _resolve_display_columns(view, remote_cols)
@@ -625,7 +635,7 @@ def update_table_view(view_id: int, **fields) -> BlobTableView:
         raise BlobTableViewError("源表与连接配置创建后不可修改，请删除后重建")
 
     validate_db_alias(view.db_alias)
-    with db_alias_session(view.db_alias) as alias:
+    with _view_db_session(view) as alias:
         conn = connections[alias]
         remote_cols = _fetch_remote_columns(conn, view.source_table)
         _resolve_display_columns(view, remote_cols)

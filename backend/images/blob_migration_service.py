@@ -218,6 +218,16 @@ def _discover_blob_tables_on_connection(conn) -> list[dict]:
     raise BlobMigrationError(f"暂不支持 {conn.vendor} 的 BLOB 表发现")
 
 
+def _source_database_name(source: BlobMigrationSource) -> str | None:
+    value = (getattr(source, "database_name", "") or "").strip()
+    return value or None
+
+
+def _source_db_session(source: BlobMigrationSource):
+    """Open the correct remote DB for a migration source (alias + optional database)."""
+    return db_alias_session(source.db_alias, database=_source_database_name(source))
+
+
 def _quote_ident(name: str) -> str:
     return f"`{validate_identifier(name)}`"
 
@@ -538,7 +548,7 @@ def _prepare_migration_batch(
     """Two-phase batch prep: scan PKs first, bulk-check maps, fetch BLOB only when needed."""
     pk_col = source.source_pk_column
 
-    with db_alias_session(source.db_alias):
+    with _source_db_session(source):
         light_rows = _fetch_source_pks_cursor(source, after_pk=after_pk, limit=batch_size)
 
     if not light_rows:
@@ -549,7 +559,7 @@ def _prepare_migration_batch(
     pre_skipped: list[MigrationItemResult] = []
 
     if not skip_existing:
-        with db_alias_session(source.db_alias):
+        with _source_db_session(source):
             blob_rows = _fetch_source_rows_by_pks(source, pk_values)
         return _PreparedMigrationBatch(
             rows_fetched=len(light_rows),
@@ -578,7 +588,7 @@ def _prepare_migration_batch(
         if needs_blob:
             pks_needing_blob.append(source_id_str)
 
-    with db_alias_session(source.db_alias):
+    with _source_db_session(source):
         blob_rows = _fetch_source_rows_by_pks(source, pks_needing_blob)
     return _PreparedMigrationBatch(
         rows_fetched=len(light_rows),
@@ -606,7 +616,6 @@ def _fetch_source_rows_cursor(
 
 
 def _fetch_source_row_by_pk(source: BlobMigrationSource, pk_value: str) -> dict | None:
-    conn = connections[source.db_alias]
     table = _quote_ident(source.source_table)
     pk = _quote_ident(source.source_pk_column)
     blob_cols = _source_blob_columns(source)
@@ -616,10 +625,12 @@ def _fetch_source_row_by_pk(source: BlobMigrationSource, pk_value: str) -> dict 
         select_cols.append(_quote_ident(col))
 
     sql = f"SELECT {', '.join(select_cols)} FROM {table} WHERE {pk} = %s LIMIT 1"
-    with conn.cursor() as cursor:
-        cursor.execute(sql, [pk_value])
-        columns = [col[0] for col in cursor.description]
-        raw = cursor.fetchone()
+    with _source_db_session(source) as alias:
+        conn = connections[alias]
+        with conn.cursor() as cursor:
+            cursor.execute(sql, [pk_value])
+            columns = [col[0] for col in cursor.description]
+            raw = cursor.fetchone()
     if not raw:
         return None
     return dict(zip(columns, raw))
@@ -934,20 +945,16 @@ def _job_migration_work_done(job: BlobMigrationJob) -> bool:
     return done >= total
 
 
-def execute_migration_job_batches(
-    job: BlobMigrationJob,
-    *,
-    estimate_known: bool = True,
-) -> None:
+def execute_migration_job_batches(job: BlobMigrationJob) -> None:
+    """Walk the source cursor until exhausted. Never gate on total_estimate.
+
+    total_estimate is UI-only (filled by the worker). A wrong pending=0 from
+    COUNT must not skip real migration work.
+    """
     source = _load_source(job.source_id)
     _validate_source_config(source)
     batch_size = _max_batch_size(job.batch_size)
-
-    job.refresh_from_db()
-    # Only skip when the worker successfully counted pending as 0.
-    # If counting failed, estimate stays 0 but estimate_known=False — walk the cursor.
-    if estimate_known and bool(job.skip_existing) and int(job.total_estimate or 0) <= 0:
-        return
+    batches_run = 0
 
     while True:
         job.refresh_from_db()
@@ -964,13 +971,49 @@ def execute_migration_job_batches(
             job=job,
         )
         if batch.rows_fetched == 0:
+            if batches_run == 0:
+                try:
+                    with _source_db_session(source) as alias:
+                        conn = connections[alias]
+                        table = _quote_ident(source.source_table)
+                        extra = validate_where_clause(source.where_clause)
+                        where_sql = f" WHERE ({extra})" if extra else ""
+                        with conn.cursor() as cursor:
+                            cursor.execute(f"SELECT COUNT(*) FROM {table}{where_sql}")
+                            table_rows = int((cursor.fetchone() or [0])[0] or 0)
+                            cursor.execute("SELECT DATABASE()")
+                            current_db = str((cursor.fetchone() or [""])[0] or "")
+                    BlobMigrationJob.objects.filter(pk=job.pk).update(
+                        message=(
+                            f"源表扫描无 BLOB 候选行（库={current_db or _source_database_name(source) or source.db_alias} "
+                            f"表={source.source_table} 行数={table_rows} "
+                            f"WHERE={source.where_clause or '无'}）"
+                        )[:500],
+                        updated_at=timezone.now(),
+                    )
+                except Exception:
+                    logger.warning(
+                        "empty-scan diagnostic failed job_id=%s source_id=%s",
+                        job.id,
+                        source.id,
+                        exc_info=True,
+                    )
             break
 
+        batches_run += 1
         _update_job_progress(job, batch, last_pk=batch.last_pk or job.last_pk_cursor)
 
-        if bool(job.skip_existing) and _job_migration_work_done(job):
-            break
+        # If we discover more work than the pre-count, grow the estimate so the UI
+        # does not stick at 0/? or a too-low total.
+        job.refresh_from_db()
+        handled = int(job.succeeded or 0) + int(job.failed or 0) + int(job.skipped or 0)
+        if handled > int(job.total_estimate or 0):
+            BlobMigrationJob.objects.filter(pk=job.pk).update(
+                total_estimate=handled,
+                updated_at=timezone.now(),
+            )
 
+        # Do NOT early-exit on total_estimate — a wrong COUNT must not stop migration.
         if not job.run_all:
             break
 
@@ -992,7 +1035,7 @@ def retry_failed_rows_for_job(job: BlobMigrationJob) -> None:
     batch = MigrationBatchResult(rows_fetched=len(errors))
     increment = MigrationBatchResult()
 
-    with db_alias_session(source.db_alias):
+    with _source_db_session(source):
         for err in errors:
             job.refresh_from_db()
             if job.cancel_requested:
@@ -1097,7 +1140,7 @@ def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dic
                 source_column="",
             ).count()
 
-    with db_alias_session(source.db_alias):
+    with _source_db_session(source):
         conn = connections[source.db_alias]
         table = _quote_ident(source.source_table)
         extra = validate_where_clause(source.where_clause)
@@ -1242,6 +1285,7 @@ def create_migration_source(**fields) -> BlobMigrationSource:
         tags=(fields.get("tags") or "")[:500],
         where_clause=fields.get("where_clause") or "",
         db_alias=db_alias,
+        database_name=db_name,
         enabled=1,
         create_time=timezone.now(),
     )

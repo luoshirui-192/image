@@ -472,36 +472,37 @@ function jobHasFailedRows(job) {
 
 function jobProgressCount(job) {
   if (!job) return 0
+  const handled =
+    Number(job.succeeded || 0) + Number(job.failed || 0) + Number(job.skipped || 0)
   if (['pending', 'running'].includes(job.status)) {
-    // During run: count everything handled so the bar moves even when many rows are skipped.
-    return (
-      Number(job.succeeded || 0) +
-      Number(job.failed || 0) +
-      Number(job.skipped || 0)
-    )
+    return handled
   }
-  if (job.display_done != null) return job.display_done
   const stats = liveStatsForJob(job)
   if (stats) return Number(stats.migrated || 0)
-  return job.progress_count ?? (job.succeeded || 0) + (job.failed || 0)
+  if (job.display_done != null && Number(job.display_done) > 0) return job.display_done
+  return handled || Number(job.progress_count || 0)
 }
 
 function jobProgressTotal(job) {
   if (!job) return 0
+  const estimate = Number(job.total_estimate || 0)
+  const done = jobProgressCount(job)
   if (['pending', 'running'].includes(job.status)) {
-    const estimate = Number(job.total_estimate || 0)
-    // 0 means unknown total — do not fake N/N from processed count.
-    return estimate > 0 ? Math.max(estimate, jobProgressCount(job)) : 0
+    return estimate > 0 ? Math.max(estimate, done) : 0
   }
-  if (job.display_total != null && Number(job.total_estimate || 0) > 0) return job.display_total
   const stats = liveStatsForJob(job)
   if (stats) return Number(stats.total_with_blob || 0)
-  return Number(job.total_estimate || 0)
+  if (estimate > 0) return Math.max(estimate, done)
+  // Completed with no estimate: show done/done instead of 0/?
+  return done > 0 ? done : 0
 }
 
 function formatJobProgress(job) {
   const done = jobProgressCount(job)
   const total = jobProgressTotal(job)
+  if (!total && done === 0) {
+    return job?.status === 'completed' ? '0 / 0（无数据）' : '0 / ?'
+  }
   if (!total) return `${done} / ?`
   const percent = Math.round((100 * done) / total)
   return `${done} / ${total} (${percent}%)`
@@ -515,12 +516,14 @@ function formatLiveProgress(job) {
     if (!total && String(job.message || '').includes('统计')) {
       return `正在统计待迁移数量…（成功 ${job.succeeded || 0} · 跳过 ${job.skipped || 0} · 失败 ${job.failed || 0}）`
     }
-    const totalLabel = total > 0 ? `预估 ${total}` : '总数未知（按游标扫描）'
+    const totalLabel = total > 0 ? `预估 ${total}` : '扫描中'
     return `已处理 ${done} / ${totalLabel}（成功 ${job.succeeded || 0} · 跳过 ${job.skipped || 0} · 失败 ${job.failed || 0}）`
   }
   const stats = liveStatsForJob(job)
-  if (!stats) return formatJobProgress(job)
-  return `已迁移 ${stats.migrated} / 共 ${stats.total_with_blob}（待处理 ${stats.pending}）`
+  if (stats) {
+    return `已迁移 ${stats.migrated} / 共 ${stats.total_with_blob}（待处理 ${stats.pending}）`
+  }
+  return formatJobProgress(job)
 }
 
 function jobProgressPercent(job) {

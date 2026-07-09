@@ -198,21 +198,27 @@ def serialize_migration_job(
     # it saturates workers and freezes the site. Use GET /sources/{id}/?include_stats=1.
     _ = include_source_stats
     progress_count = _job_progress_count(job)
+    handled = int(job.succeeded or 0) + int(job.failed or 0) + int(job.skipped or 0)
     estimate = int(job.total_estimate or 0)
-    # When estimate is unknown (0), keep display_total at 0 so UI can show "已处理 N（总数未知）".
+    # Prefer a real estimate; otherwise fall back to handled so completed jobs never show 0/?.
     if estimate > 0:
-        percent = round(100.0 * progress_count / estimate, 2)
+        display_total = max(estimate, handled)
+    elif job.status not in ACTIVE_STATUSES:
+        display_total = handled
+    else:
+        display_total = 0
+
+    display_done = handled
+    if display_total > 0:
+        percent = round(100.0 * display_done / display_total, 2)
         if job.status in ACTIVE_STATUSES and percent >= 100:
             percent = 99.0
-    elif job.status in ACTIVE_STATUSES:
-        percent = 0.0
+        elif job.status == BlobMigrationJob.STATUS_COMPLETED:
+            percent = 100.0
     elif job.status == BlobMigrationJob.STATUS_COMPLETED:
         percent = 100.0
     else:
         percent = 0.0
-
-    display_total = estimate if estimate > 0 else 0
-    display_done = progress_count
     display_percent = percent
 
     payload: dict[str, Any] = {
@@ -310,7 +316,7 @@ def _warm_thumbnails_after_job(job_id: int) -> None:
         except Exception:
             logger.warning("warm thumb failed path=%s", image.image_path, exc_info=True)
     BlobMigrationJob.objects.filter(pk=job.pk).update(
-        message=f"{job.message or '迁移完成'}；已预热 {warmed} 张缩略图",
+        message=f"{_completion_message(job)}；已预热 {warmed} 张缩略图",
         updated_at=timezone.now(),
     )
 
@@ -338,48 +344,69 @@ def _kick_warm_thumbnails_async(job_id: int) -> None:
     logger.info("kicked warm thumbnails thread job_id=%s", job_id)
 
 
-def _ensure_job_total_estimate(job: BlobMigrationJob) -> tuple[BlobMigrationJob, bool]:
-    """Fill total_estimate in the worker thread (not on HTTP create).
+def _completion_message(job: BlobMigrationJob) -> str:
+    succeeded = int(job.succeeded or 0)
+    skipped = int(job.skipped or 0)
+    failed = int(job.failed or 0)
+    handled = succeeded + skipped + failed
+    estimate = int(job.total_estimate or 0)
+    prior = (job.message or "").strip()
+    # Keep empty-scan diagnostics from the runner.
+    if handled == 0 and prior.startswith("源表扫描"):
+        return prior
+    if handled == 0 and estimate == 0:
+        return "迁移完成：未发现可迁移数据"
+    if estimate > 0:
+        return (
+            f"迁移完成（处理 {handled}/{estimate}："
+            f"成功 {succeeded} · 跳过 {skipped} · 失败 {failed}）"
+        )
+    return f"迁移完成（成功 {succeeded} · 跳过 {skipped} · 失败 {failed}）"
 
-    Returns (job, estimate_known). When estimate_known and total_estimate==0 with
-    skip_existing, the runner may exit immediately as "nothing pending".
-    """
+
+def _ensure_job_total_estimate(job: BlobMigrationJob) -> BlobMigrationJob:
+    """Best-effort fill of total_estimate for progress UI. Never blocks migration logic."""
     if job.retry_failed_only:
-        return job, True
+        return job
     if int(job.total_estimate or 0) > 0:
-        return job, True
+        return job
 
     BlobMigrationJob.objects.filter(pk=job.pk, status=BlobMigrationJob.STATUS_RUNNING).update(
         message="正在统计待迁移数量…",
         updated_at=timezone.now(),
     )
     try:
-        stats = count_migration_candidates(job.source_id, use_cache=True)
+        stats = count_migration_candidates(job.source_id, use_cache=False)
         if bool(job.skip_existing):
             estimate = int(stats.get("pending") or 0)
         else:
             estimate = int(stats.get("total_with_blob") or 0)
+        # Prefer a positive total_with_blob over a suspicious pending=0 when maps exist —
+        # pending can under-count when ImageSourceMap rows don't match remote BLOB rows 1:1.
+        total_with_blob = int(stats.get("total_with_blob") or 0)
+        if bool(job.skip_existing) and estimate <= 0 and total_with_blob > 0:
+            estimate = total_with_blob
     except Exception:
         logger.warning(
-            "count_migration_candidates failed job_id=%s source_id=%s; continuing with unknown total",
+            "count_migration_candidates failed job_id=%s source_id=%s; migrating without estimate",
             job.id,
             job.source_id,
             exc_info=True,
         )
         BlobMigrationJob.objects.filter(pk=job.pk).update(
-            message="统计失败，按游标全表扫描迁移",
+            message="统计未完成，正在按游标迁移…",
             updated_at=timezone.now(),
         )
         job.refresh_from_db()
-        return job, False
+        return job
 
     BlobMigrationJob.objects.filter(pk=job.pk).update(
         total_estimate=max(0, estimate),
-        message=f"迁移进行中（预估 {estimate}）" if estimate > 0 else "无待迁移项",
+        message=f"迁移进行中（预估 {estimate}）" if estimate > 0 else "迁移进行中（预估 0，将扫描确认）",
         updated_at=timezone.now(),
     )
     job.refresh_from_db()
-    return job, True
+    return job
 
 
 def execute_migration_job(job_id: int) -> BlobMigrationJob:
@@ -420,10 +447,11 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
         if job.retry_failed_only:
             retry_failed_rows_for_job(job)
         else:
-            job, estimate_known = _ensure_job_total_estimate(job)
+            job = _ensure_job_total_estimate(job)
             if job.cancel_requested or job.status == BlobMigrationJob.STATUS_CANCELLED:
                 return _load_job(job_id)
-            execute_migration_job_batches(job, estimate_known=estimate_known)
+            # Always walk the cursor — never skip because COUNT said pending=0.
+            execute_migration_job_batches(job)
         job.refresh_from_db()
         if job.cancel_requested or job.status == BlobMigrationJob.STATUS_CANCELLED:
             BlobMigrationJob.objects.filter(pk=job.pk).update(
@@ -434,13 +462,15 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
             )
         elif job.status == BlobMigrationJob.STATUS_RUNNING:
             job.refresh_from_db()
+            done_message = _completion_message(job)
             BlobMigrationJob.objects.filter(pk=job.pk).update(
                 status=BlobMigrationJob.STATUS_COMPLETED,
                 finished_at=timezone.now(),
-                message=job.message or "迁移完成",
+                message=done_message,
                 updated_at=timezone.now(),
             )
-            if job.warm_thumbs_after:
+            job.refresh_from_db()
+            if job.warm_thumbs_after and int(job.succeeded or 0) > 0:
                 _kick_warm_thumbnails_async(job.id)
     except Exception as exc:
         logger.exception("migration job failed id=%s", job_id)
