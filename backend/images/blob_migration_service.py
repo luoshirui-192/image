@@ -934,14 +934,20 @@ def _job_migration_work_done(job: BlobMigrationJob) -> bool:
     return done >= total
 
 
-def execute_migration_job_batches(job: BlobMigrationJob) -> None:
+def execute_migration_job_batches(
+    job: BlobMigrationJob,
+    *,
+    estimate_known: bool = True,
+) -> None:
     source = _load_source(job.source_id)
     _validate_source_config(source)
     batch_size = _max_batch_size(job.batch_size)
 
-    # total_estimate == 0 means "unknown" (we no longer block job create on remote COUNT).
-    # Do not treat it as "nothing pending" — walk the cursor until rows_fetched == 0.
     job.refresh_from_db()
+    # Only skip when the worker successfully counted pending as 0.
+    # If counting failed, estimate stays 0 but estimate_known=False — walk the cursor.
+    if estimate_known and bool(job.skip_existing) and int(job.total_estimate or 0) <= 0:
+        return
 
     while True:
         job.refresh_from_db()

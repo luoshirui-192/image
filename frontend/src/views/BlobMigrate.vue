@@ -512,7 +512,10 @@ function formatLiveProgress(job) {
   if (['pending', 'running'].includes(job.status)) {
     const done = jobProgressCount(job)
     const total = jobProgressTotal(job)
-    const totalLabel = total > 0 ? `预估 ${total}` : '总数未知'
+    if (!total && String(job.message || '').includes('统计')) {
+      return `正在统计待迁移数量…（成功 ${job.succeeded || 0} · 跳过 ${job.skipped || 0} · 失败 ${job.failed || 0}）`
+    }
+    const totalLabel = total > 0 ? `预估 ${total}` : '总数未知（按游标扫描）'
     return `已处理 ${done} / ${totalLabel}（成功 ${job.succeeded || 0} · 跳过 ${job.skipped || 0} · 失败 ${job.failed || 0}）`
   }
   const stats = liveStatsForJob(job)
@@ -1181,7 +1184,7 @@ onUnmounted(() => {
             {{ formatLiveProgress(displayJob) }}
           </p>
           <p v-if="jobInProgress" class="job-message field-hint">
-            大表首批可能较慢；进度按已处理条数更新（含跳过）。总数未知时进度条为滚动态，完成后会自动刷新待处理数。
+            任务开始后会先统计待迁移数量，再按批次迁移；进度条有总数后会显示百分比。
           </p>
           <p v-else-if="displayJob.message" class="job-message">{{ displayJob.message }}</p>
           <div v-if="displayJob.recent_errors?.length && jobHasFailedRows(displayJob)" class="job-errors">

@@ -411,9 +411,9 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(job.total_estimate, 0)
             finished = execute_migration_job(job.id)
             self.assertEqual(finished.status, BlobMigrationJob.STATUS_COMPLETED)
-            # Already migrated: cursor walk skips existing rows, no new successes.
+            # Worker counts pending=0, then exits without migrating.
+            self.assertEqual(finished.total_estimate, 0)
             self.assertEqual(finished.succeeded, 0)
-            self.assertGreaterEqual(finished.skipped, 1)
 
     @override_settings(UPLOAD_ROOT=None, BLOB_MIGRATION_UPLOAD_WORKERS=1)
     def test_migration_job_runs_to_completion(self):
