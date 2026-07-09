@@ -170,8 +170,11 @@ def _compute_eta_seconds(job: BlobMigrationJob) -> int | None:
     rate = progress_count / elapsed
     if rate <= 0:
         return None
-    total = max(int(job.total_estimate or 0), progress_count)
-    remaining = max(0, total - progress_count)
+    estimate = int(job.total_estimate or 0)
+    if estimate <= 0:
+        # Unknown total — cannot estimate remaining time.
+        return None
+    remaining = max(0, estimate - progress_count)
     return int(remaining / rate) if remaining else 0
 
 
@@ -193,12 +196,20 @@ def serialize_migration_job(
     # it saturates workers and freezes the site. Use GET /sources/{id}/?include_stats=1.
     _ = include_source_stats
     progress_count = _job_progress_count(job)
-    total = max(int(job.total_estimate or 0), progress_count)
-    percent = round(100.0 * progress_count / total, 2) if total else 0.0
-    if job.status in ACTIVE_STATUSES and percent >= 100:
-        percent = 99.0
+    estimate = int(job.total_estimate or 0)
+    # When estimate is unknown (0), keep display_total at 0 so UI can show "已处理 N（总数未知）".
+    if estimate > 0:
+        percent = round(100.0 * progress_count / estimate, 2)
+        if job.status in ACTIVE_STATUSES and percent >= 100:
+            percent = 99.0
+    elif job.status in ACTIVE_STATUSES:
+        percent = 0.0
+    elif job.status == BlobMigrationJob.STATUS_COMPLETED:
+        percent = 100.0
+    else:
+        percent = 0.0
 
-    display_total = total
+    display_total = estimate if estimate > 0 else 0
     display_done = progress_count
     display_percent = percent
 

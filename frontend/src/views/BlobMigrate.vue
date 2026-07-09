@@ -460,9 +460,14 @@ function liveStatsForJob(job) {
 }
 
 function jobNeedsRetry(job) {
+  if (!job || ['pending', 'running'].includes(job.status)) return false
   const stats = liveStatsForJob(job)
   if (stats) return Number(stats.pending || 0) > 0
   return Number(job?.failed || 0) > 0
+}
+
+function jobHasFailedRows(job) {
+  return Number(job?.failed || 0) > 0 || Number(job?.error_count || 0) > 0
 }
 
 function jobProgressCount(job) {
@@ -484,18 +489,21 @@ function jobProgressCount(job) {
 function jobProgressTotal(job) {
   if (!job) return 0
   if (['pending', 'running'].includes(job.status)) {
-    return Math.max(Number(job.total_estimate || 0), jobProgressCount(job))
+    const estimate = Number(job.total_estimate || 0)
+    // 0 means unknown total — do not fake N/N from processed count.
+    return estimate > 0 ? Math.max(estimate, jobProgressCount(job)) : 0
   }
-  if (job.display_total != null) return job.display_total
+  if (job.display_total != null && Number(job.total_estimate || 0) > 0) return job.display_total
   const stats = liveStatsForJob(job)
   if (stats) return Number(stats.total_with_blob || 0)
-  return job.total_estimate || 0
+  return Number(job.total_estimate || 0)
 }
 
 function formatJobProgress(job) {
   const done = jobProgressCount(job)
   const total = jobProgressTotal(job)
-  const percent = total ? Math.round((100 * done) / total) : 0
+  if (!total) return `${done} / ?`
+  const percent = Math.round((100 * done) / total)
   return `${done} / ${total} (${percent}%)`
 }
 
@@ -504,7 +512,8 @@ function formatLiveProgress(job) {
   if (['pending', 'running'].includes(job.status)) {
     const done = jobProgressCount(job)
     const total = jobProgressTotal(job)
-    return `已处理 ${done} / 预估 ${total}（成功 ${job.succeeded || 0} · 跳过 ${job.skipped || 0} · 失败 ${job.failed || 0}）`
+    const totalLabel = total > 0 ? `预估 ${total}` : '总数未知'
+    return `已处理 ${done} / ${totalLabel}（成功 ${job.succeeded || 0} · 跳过 ${job.skipped || 0} · 失败 ${job.failed || 0}）`
   }
   const stats = liveStatsForJob(job)
   if (!stats) return formatJobProgress(job)
@@ -533,8 +542,17 @@ async function refreshActiveJob(jobId) {
       stopJobPolling()
       running.value = false
       await Promise.all([loadSources(), loadJobHistoryList()])
+      // One opt-in COUNT after finish — not a fan-out on page load.
+      if (res.data.source_id) {
+        await refreshSourceStats(res.data.source_id)
+      }
       if (res.data.status === 'completed') {
-        ElMessage.success(res.message || '迁移已完成')
+        const pending = Number(sourceById(res.data.source_id)?.stats?.pending ?? -1)
+        if (pending > 0) {
+          ElMessage.warning(`任务结束，仍有 ${pending} 条待迁移`)
+        } else {
+          ElMessage.success(res.message || '迁移已完成')
+        }
       } else if (res.data.status === 'cancelled') {
         ElMessage.warning('迁移任务已取消')
       } else if (res.data.status === 'failed') {
@@ -647,6 +665,12 @@ async function clearJobHistory() {
 
 async function retryFailedJob(job) {
   if (!job?.id) return
+  // If there are failed rows, retry those; otherwise start another full pass for remaining pending.
+  if (!jobHasFailedRows(job)) {
+    runOptions.sourceId = job.source_id
+    await startFullMigration()
+    return
+  }
   try {
     const res = await retryBlobMigrationJobApi({
       parentJobId: job.id,
@@ -1141,7 +1165,8 @@ onUnmounted(() => {
           </div>
           <el-progress
             :percentage="jobProgressPercent(displayJob)"
-            :status="!jobInProgress && Number(liveStatsForJob(displayJob)?.pending ?? displayJob.live_pending ?? 1) <= 0
+            :indeterminate="jobInProgress && !jobProgressTotal(displayJob)"
+            :status="!jobInProgress && Number(liveStatsForJob(displayJob)?.pending ?? 1) <= 0
               ? 'success'
               : displayJob.status === 'failed' && jobNeedsRetry(displayJob)
                 ? 'exception'
@@ -1156,17 +1181,19 @@ onUnmounted(() => {
             {{ formatLiveProgress(displayJob) }}
           </p>
           <p v-if="jobInProgress" class="job-message field-hint">
-            大表首批可能较慢；进度按已处理条数更新（含跳过）。完成后会显示当前已迁移/待处理。
+            大表首批可能较慢；进度按已处理条数更新（含跳过）。总数未知时进度条为滚动态，完成后会自动刷新待处理数。
           </p>
           <p v-else-if="displayJob.message" class="job-message">{{ displayJob.message }}</p>
-          <div v-if="displayJob.recent_errors?.length && jobNeedsRetry(displayJob)" class="job-errors">
+          <div v-if="displayJob.recent_errors?.length && jobHasFailedRows(displayJob)" class="job-errors">
             <div v-for="(err, idx) in displayJob.recent_errors" :key="idx" class="job-error-line">
               {{ err.source_pk }}: {{ err.error }}
             </div>
           </div>
           <div v-if="jobNeedsRetry(displayJob) && !jobInProgress" class="job-actions">
-            <el-button size="small" type="primary" @click="retryFailedJob(displayJob)">继续迁移待处理项</el-button>
-            <el-button size="small" @click="downloadJobErrors(displayJob)">导出错误 CSV</el-button>
+            <el-button size="small" type="primary" @click="retryFailedJob(displayJob)">
+              {{ jobHasFailedRows(displayJob) ? '重试失败项' : '继续迁移待处理项' }}
+            </el-button>
+            <el-button v-if="jobHasFailedRows(displayJob)" size="small" @click="downloadJobErrors(displayJob)">导出错误 CSV</el-button>
           </div>
         </div>
 
@@ -1216,7 +1243,7 @@ onUnmounted(() => {
             <template #default="{ row }">
               <el-button link type="primary" @click="viewJob(row)">查看</el-button>
               <el-button v-if="jobNeedsRetry(row)" link type="primary" @click="retryFailedJob(row)">
-                继续迁移
+                {{ jobHasFailedRows(row) ? '重试失败' : '继续迁移' }}
               </el-button>
               <el-button link type="danger" @click="removeJob(row)">删除</el-button>
             </template>
