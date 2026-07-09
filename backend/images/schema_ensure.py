@@ -308,6 +308,17 @@ def ensure_blob_pr1_schema() -> None:
             cursor.execute(
                 """
                 UPDATE `blob_migration_source` s
+                INNER JOIN `blob_table_view` v
+                    ON s.db_alias = v.db_alias
+                   AND s.source_table = v.source_table
+                SET s.database_name = v.database_name
+                WHERE s.database_name = ''
+                  AND v.database_name <> ''
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE `blob_migration_source` s
                 INNER JOIN `external_db_connection` c
                     ON s.db_alias = CONCAT('external_', c.id)
                 SET s.database_name = c.db_name

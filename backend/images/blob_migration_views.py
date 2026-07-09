@@ -240,7 +240,7 @@ class BlobMigrationJobListCreateView(APIView):
         jobs = list_migration_jobs(source_id=parsed_source, limit=50)
         return success_response(
             [
-                serialize_migration_job(job, include_recent_errors=False, include_source_stats=False)
+                serialize_migration_job(job, include_recent_errors=False)
                 for job in jobs
             ]
         )

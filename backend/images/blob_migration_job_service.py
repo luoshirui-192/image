@@ -16,6 +16,7 @@ from images.blob_migration_service import (
     BlobMigrationError,
     count_migration_candidates,
     execute_migration_job_batches,
+    prepare_migration_source,
     retry_failed_rows_for_job,
 )
 from images.models import BlobMigrationJob, BlobMigrationJobError, BlobMigrationSource
@@ -80,8 +81,7 @@ def create_migration_job(
     else:
         _assert_no_active_job(source_id)
 
-    # Create returns immediately. The worker fills total_estimate before batches so
-    # progress % / ETA / early-exit work without blocking the HTTP request.
+    # HTTP create returns immediately. Worker fills total_estimate for progress UI only.
     total_estimate = 0
     if retry_failed_only and parent_job_id:
         total_estimate = BlobMigrationJobError.objects.filter(job_id=parent_job_id, retried=0).count()
@@ -157,9 +157,36 @@ def list_migration_jobs(*, source_id: int | None = None, limit: int = 50) -> lis
     return list(qs[: max(1, min(limit, 200))])
 
 
+def _job_handled_count(job: BlobMigrationJob) -> int:
+    return int(job.succeeded or 0) + int(job.failed or 0) + int(job.skipped or 0)
+
+
 def _job_progress_count(job: BlobMigrationJob) -> int:
-    """Rows that reduce remaining pending work (success + fail). Skips are shown separately in UI."""
+    """Success + fail rows (excludes skips) — used for ETA."""
     return int(job.succeeded or 0) + int(job.failed or 0)
+
+
+def _job_progress_display(job: BlobMigrationJob) -> tuple[int, int, float]:
+    """Return (done, total, percent) for API responses. total_estimate never gates execution."""
+    handled = _job_handled_count(job)
+    estimate = int(job.total_estimate or 0)
+
+    if job.status in ACTIVE_STATUSES:
+        done = handled
+        total = max(estimate, done) if estimate > 0 else 0
+        if total > 0:
+            percent = min(99.0, round(100.0 * done / total, 2))
+        else:
+            percent = 0.0
+        return done, total, percent
+
+    done = handled
+    total = max(estimate, done) if estimate > 0 else (done if done > 0 else 0)
+    if job.status == BlobMigrationJob.STATUS_COMPLETED:
+        percent = 100.0 if total > 0 or done == 0 else 100.0
+    else:
+        percent = 0.0
+    return done, total, percent
 
 
 def _compute_eta_seconds(job: BlobMigrationJob) -> int | None:
@@ -174,52 +201,18 @@ def _compute_eta_seconds(job: BlobMigrationJob) -> int | None:
         return None
     estimate = int(job.total_estimate or 0)
     if estimate <= 0:
-        # Unknown total — cannot estimate remaining time.
         return None
     remaining = max(0, estimate - progress_count)
     return int(remaining / rate) if remaining else 0
-
-
-def _job_migration_work_done(job: BlobMigrationJob) -> bool:
-    """True when succeeded+failed reached the estimated pending work (skip_existing jobs)."""
-    total = int(job.total_estimate or 0)
-    if total <= 0:
-        return False
-    return _job_progress_count(job) >= total
 
 
 def serialize_migration_job(
     job: BlobMigrationJob,
     *,
     include_recent_errors: bool = True,
-    include_source_stats: bool = False,
 ) -> dict[str, Any]:
-    # include_source_stats is ignored: never attach remote COUNT to job responses —
-    # it saturates workers and freezes the site. Use GET /sources/{id}/?include_stats=1.
-    _ = include_source_stats
     progress_count = _job_progress_count(job)
-    handled = int(job.succeeded or 0) + int(job.failed or 0) + int(job.skipped or 0)
-    estimate = int(job.total_estimate or 0)
-    # Prefer a real estimate; otherwise fall back to handled so completed jobs never show 0/?.
-    if estimate > 0:
-        display_total = max(estimate, handled)
-    elif job.status not in ACTIVE_STATUSES:
-        display_total = handled
-    else:
-        display_total = 0
-
-    display_done = handled
-    if display_total > 0:
-        percent = round(100.0 * display_done / display_total, 2)
-        if job.status in ACTIVE_STATUSES and percent >= 100:
-            percent = 99.0
-        elif job.status == BlobMigrationJob.STATUS_COMPLETED:
-            percent = 100.0
-    elif job.status == BlobMigrationJob.STATUS_COMPLETED:
-        percent = 100.0
-    else:
-        percent = 0.0
-    display_percent = percent
+    display_done, display_total, display_percent = _job_progress_display(job)
 
     payload: dict[str, Any] = {
         "id": job.id,
@@ -247,10 +240,6 @@ def serialize_migration_job(
         "finished_at": job.finished_at.isoformat(sep=" ", timespec="seconds") if job.finished_at else None,
         "updated_at": job.updated_at.isoformat(sep=" ", timespec="seconds") if job.updated_at else None,
         "create_time": job.create_time.isoformat(sep=" ", timespec="seconds") if job.create_time else None,
-        "source_stats": None,
-        "live_migrated": None,
-        "live_pending": None,
-        "live_total": None,
         "display_done": display_done,
         "display_total": display_total,
     }
@@ -364,11 +353,9 @@ def _completion_message(job: BlobMigrationJob) -> str:
     return f"迁移完成（成功 {succeeded} · 跳过 {skipped} · 失败 {failed}）"
 
 
-def _ensure_job_total_estimate(job: BlobMigrationJob) -> BlobMigrationJob:
-    """Best-effort fill of total_estimate for progress UI. Never blocks migration logic."""
-    if job.retry_failed_only:
-        return job
-    if int(job.total_estimate or 0) > 0:
+def _refresh_job_estimate_for_ui(job: BlobMigrationJob) -> BlobMigrationJob:
+    """Best-effort COUNT for the progress bar. Never affects whether batches run."""
+    if job.retry_failed_only or int(job.total_estimate or 0) > 0:
         return job
 
     BlobMigrationJob.objects.filter(pk=job.pk, status=BlobMigrationJob.STATUS_RUNNING).update(
@@ -376,25 +363,21 @@ def _ensure_job_total_estimate(job: BlobMigrationJob) -> BlobMigrationJob:
         updated_at=timezone.now(),
     )
     try:
-        stats = count_migration_candidates(job.source_id, use_cache=False)
+        prepare_migration_source(_load_source(job.source_id))
+        stats = count_migration_candidates(job.source_id, use_cache=True)
         if bool(job.skip_existing):
             estimate = int(stats.get("pending") or 0)
         else:
             estimate = int(stats.get("total_with_blob") or 0)
-        # Prefer a positive total_with_blob over a suspicious pending=0 when maps exist —
-        # pending can under-count when ImageSourceMap rows don't match remote BLOB rows 1:1.
-        total_with_blob = int(stats.get("total_with_blob") or 0)
-        if bool(job.skip_existing) and estimate <= 0 and total_with_blob > 0:
-            estimate = total_with_blob
     except Exception:
         logger.warning(
-            "count_migration_candidates failed job_id=%s source_id=%s; migrating without estimate",
+            "count_migration_candidates failed job_id=%s source_id=%s",
             job.id,
             job.source_id,
             exc_info=True,
         )
         BlobMigrationJob.objects.filter(pk=job.pk).update(
-            message="统计未完成，正在按游标迁移…",
+            message="统计未完成，正在扫描迁移…",
             updated_at=timezone.now(),
         )
         job.refresh_from_db()
@@ -402,7 +385,7 @@ def _ensure_job_total_estimate(job: BlobMigrationJob) -> BlobMigrationJob:
 
     BlobMigrationJob.objects.filter(pk=job.pk).update(
         total_estimate=max(0, estimate),
-        message=f"迁移进行中（预估 {estimate}）" if estimate > 0 else "迁移进行中（预估 0，将扫描确认）",
+        message=f"迁移进行中（预估 {estimate}）" if estimate > 0 else "迁移进行中（扫描确认中）",
         updated_at=timezone.now(),
     )
     job.refresh_from_db()
@@ -445,12 +428,13 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
 
     try:
         if job.retry_failed_only:
+            prepare_migration_source(_load_source(job.source_id))
             retry_failed_rows_for_job(job)
         else:
-            job = _ensure_job_total_estimate(job)
+            prepare_migration_source(_load_source(job.source_id))
+            job = _refresh_job_estimate_for_ui(job)
             if job.cancel_requested or job.status == BlobMigrationJob.STATUS_CANCELLED:
                 return _load_job(job_id)
-            # Always walk the cursor — never skip because COUNT said pending=0.
             execute_migration_job_batches(job)
         job.refresh_from_db()
         if job.cancel_requested or job.status == BlobMigrationJob.STATUS_CANCELLED:

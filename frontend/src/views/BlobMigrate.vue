@@ -451,11 +451,7 @@ function sourceById(sourceId) {
 }
 
 function liveStatsForJob(job) {
-  if (!job) return null
-  if (job.source_stats) return job.source_stats
-  // While a job is running, never fall back to stale source-list stats
-  // (those stay at "migrated 0" until the job finishes and sources reload).
-  if (['pending', 'running'].includes(job.status)) return null
+  if (!job || ['pending', 'running'].includes(job.status)) return null
   return sourceById(job.source_id)?.stats || null
 }
 
@@ -472,38 +468,30 @@ function jobHasFailedRows(job) {
 
 function jobProgressCount(job) {
   if (!job) return 0
-  const handled =
-    Number(job.succeeded || 0) + Number(job.failed || 0) + Number(job.skipped || 0)
-  if (['pending', 'running'].includes(job.status)) {
-    return handled
-  }
-  const stats = liveStatsForJob(job)
-  if (stats) return Number(stats.migrated || 0)
-  if (job.display_done != null && Number(job.display_done) > 0) return job.display_done
-  return handled || Number(job.progress_count || 0)
+  if (job.display_done != null) return Number(job.display_done)
+  return Number(job.succeeded || 0) + Number(job.failed || 0) + Number(job.skipped || 0)
 }
 
 function jobProgressTotal(job) {
   if (!job) return 0
-  const estimate = Number(job.total_estimate || 0)
-  const done = jobProgressCount(job)
-  if (['pending', 'running'].includes(job.status)) {
-    return estimate > 0 ? Math.max(estimate, done) : 0
+  if (job.display_total != null && Number(job.display_total) > 0) {
+    return Number(job.display_total)
   }
   const stats = liveStatsForJob(job)
   if (stats) return Number(stats.total_with_blob || 0)
-  if (estimate > 0) return Math.max(estimate, done)
-  // Completed with no estimate: show done/done instead of 0/?
-  return done > 0 ? done : 0
+  return Number(job.total_estimate || 0)
 }
 
 function formatJobProgress(job) {
   const done = jobProgressCount(job)
   const total = jobProgressTotal(job)
-  if (!total && done === 0) {
-    return job?.status === 'completed' ? '0 / 0（无数据）' : '0 / ?'
+  if (!total) {
+    return ['pending', 'running'].includes(job?.status)
+      ? `${done} / 扫描中`
+      : done > 0
+        ? `${done} / ${done}`
+        : '0 / 0（无数据）'
   }
-  if (!total) return `${done} / ?`
   const percent = Math.round((100 * done) / total)
   return `${done} / ${total} (${percent}%)`
 }
@@ -528,14 +516,24 @@ function formatLiveProgress(job) {
 
 function jobProgressPercent(job) {
   if (!job) return 0
-  if (['pending', 'running'].includes(job.status)) {
-    const done = jobProgressCount(job)
-    const total = jobProgressTotal(job)
-    if (!total) return 0
-    const percent = Math.round((100 * done) / total)
-    return Math.min(99, Math.max(0, percent))
+  if (job.percent != null && !['pending', 'running'].includes(job.status)) {
+    return Math.min(100, Math.round(Number(job.percent)))
   }
-  return Math.min(100, Math.round(job.percent || 0))
+  const done = jobProgressCount(job)
+  const total = jobProgressTotal(job)
+  if (!total) return 0
+  const percent = Math.round((100 * done) / total)
+  return ['pending', 'running'].includes(job.status)
+    ? Math.min(99, Math.max(0, percent))
+    : Math.min(100, Math.max(0, percent))
+}
+
+function jobProgressIndeterminate(job) {
+  return Boolean(
+    job &&
+      ['pending', 'running'].includes(job.status) &&
+      !jobProgressTotal(job),
+  )
 }
 
 async function refreshActiveJob(jobId) {
@@ -1171,7 +1169,7 @@ onUnmounted(() => {
           </div>
           <el-progress
             :percentage="jobProgressPercent(displayJob)"
-            :indeterminate="jobInProgress && !jobProgressTotal(displayJob)"
+            :indeterminate="jobProgressIndeterminate(displayJob)"
             :status="!jobInProgress && Number(liveStatsForJob(displayJob)?.pending ?? 1) <= 0
               ? 'success'
               : displayJob.status === 'failed' && jobNeedsRetry(displayJob)
@@ -1187,7 +1185,7 @@ onUnmounted(() => {
             {{ formatLiveProgress(displayJob) }}
           </p>
           <p v-if="jobInProgress" class="job-message field-hint">
-            任务开始后会先统计待迁移数量，再按批次迁移；进度条有总数后会显示百分比。
+            任务开始后会先统计待迁移数量（仅影响进度条），再按游标批次迁移；大表首批可能较慢。
           </p>
           <p v-else-if="displayJob.message" class="job-message">{{ displayJob.message }}</p>
           <div v-if="displayJob.recent_errors?.length && jobHasFailedRows(displayJob)" class="job-errors">

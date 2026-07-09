@@ -13,8 +13,13 @@ from PIL import Image
 from rest_framework.test import APIClient
 
 from images.blob_migration_job_service import create_migration_job, execute_migration_job, serialize_migration_job
-from images.blob_migration_service import count_migration_candidates, create_migration_source, run_blob_migration
-from images.models import BlobMigrationJob, BlobMigrationSource, ImageInfo, ImageSourceMap
+from images.blob_migration_service import (
+    count_migration_candidates,
+    create_migration_source,
+    prepare_migration_source,
+    run_blob_migration,
+)
+from images.models import BlobMigrationJob, BlobMigrationSource, BlobTableView, ImageInfo, ImageSourceMap
 from users.models import SysUser
 
 SQLITE_TABLES = """
@@ -88,6 +93,25 @@ CREATE TABLE IF NOT EXISTS image_source_map (
     image_info_id INTEGER NOT NULL,
     migrated_at DATETIME NOT NULL,
     UNIQUE(source_table, source_id, source_column)
+);
+CREATE TABLE IF NOT EXISTS blob_table_view (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name VARCHAR(100) NOT NULL DEFAULT '',
+    db_alias VARCHAR(32) NOT NULL DEFAULT 'default',
+    database_name VARCHAR(64) NOT NULL DEFAULT '',
+    source_table VARCHAR(64) NOT NULL,
+    source_object_type VARCHAR(20) NOT NULL DEFAULT 'table',
+    path_lookup_table VARCHAR(64) NOT NULL DEFAULT '',
+    blob_column_path_mappings TEXT NOT NULL DEFAULT '',
+    source_pk_column VARCHAR(64) NOT NULL DEFAULT 'id',
+    blob_column VARCHAR(64) NOT NULL,
+    blob_columns TEXT NOT NULL DEFAULT '',
+    display_columns TEXT NOT NULL DEFAULT '',
+    where_clause VARCHAR(500) NOT NULL DEFAULT '',
+    remark VARCHAR(500) NOT NULL DEFAULT '',
+    last_viewed_at DATETIME NULL,
+    create_time DATETIME NULL,
+    update_time DATETIME NULL
 );
 CREATE TABLE IF NOT EXISTS legacy_photos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,6 +218,7 @@ class BlobMigrationTestCase(TestCase):
         )
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM legacy_photos")
+            cursor.execute("DELETE FROM blob_table_view")
             cursor.execute("DELETE FROM blob_migration_job_error")
             cursor.execute("DELETE FROM blob_migration_job")
             cursor.execute("DELETE FROM image_source_map")
@@ -220,6 +245,32 @@ class BlobMigrationTestCase(TestCase):
             db_alias="default",
             enabled=1,
         )
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_prepare_migration_source_backfills_database_from_table_view(self):
+        BlobTableView.objects.create(
+            name="browse cfg",
+            db_alias="default",
+            database_name="legacy_catalog_db",
+            source_table="legacy_photos",
+            source_pk_column="id",
+            blob_column="photo",
+            create_time=timezone.now(),
+        )
+        source = BlobMigrationSource.objects.create(
+            name="no db name",
+            source_table="legacy_photos",
+            source_pk_column="id",
+            blob_column="photo",
+            category_id=1,
+            db_alias="default",
+            database_name="",
+            enabled=1,
+        )
+        prepared = prepare_migration_source(source)
+        self.assertEqual(prepared.database_name, "legacy_catalog_db")
+        source.refresh_from_db()
+        self.assertEqual(source.database_name, "legacy_catalog_db")
 
     @override_settings(UPLOAD_ROOT=None)
     def test_run_blob_migration_writes_file_and_map(self):
