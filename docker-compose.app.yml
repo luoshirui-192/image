@@ -78,6 +78,8 @@ services:
       context: .
       dockerfile: docker/Dockerfile.backend
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     entrypoint: ["/bin/bash", "/app/docker/maintenance-loop.sh"]
     environment:
       <<: *backend-environment
