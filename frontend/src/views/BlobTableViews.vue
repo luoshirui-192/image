@@ -66,14 +66,10 @@ const selectedRowPreviewItems = computed(() => {
   return rowPreviewCells(selectedRow.value)
 })
 
-const previewableTableRows = computed(() =>
-  tableRows.value.filter((row) => rowPreviewCells(row).length > 0),
-)
-
 const selectedPreviewRowIndex = computed(() => {
   if (!selectedRow.value) return -1
   const key = getRowKey(selectedRow.value)
-  return previewableTableRows.value.findIndex((row) => getRowKey(row) === key)
+  return tableRows.value.findIndex((row) => getRowKey(row) === key)
 })
 
 let previewWheelLocked = false
@@ -635,7 +631,7 @@ function pathCell(row, colName) {
 }
 
 function autoSelectFirstRow() {
-  const row = previewableTableRows.value[0] ?? null
+  const row = tableRows.value[0] ?? null
   selectPreviewRow(row)
 }
 
@@ -648,7 +644,7 @@ function selectPreviewRow(row, { focusPanel = false } = {}) {
 }
 
 function goPrevPreviewRow() {
-  const rows = previewableTableRows.value
+  const rows = tableRows.value
   if (rows.length <= 1) return
   const idx = selectedPreviewRowIndex.value
   if (idx <= 0) return
@@ -656,15 +652,19 @@ function goPrevPreviewRow() {
 }
 
 function goNextPreviewRow() {
-  const rows = previewableTableRows.value
+  const rows = tableRows.value
   if (rows.length <= 1) return
   const idx = selectedPreviewRowIndex.value
-  if (idx < 0 || idx >= rows.length - 1) return
+  if (idx < 0) {
+    selectPreviewRow(rows[0])
+    return
+  }
+  if (idx >= rows.length - 1) return
   selectPreviewRow(rows[idx + 1])
 }
 
 function onPreviewKeydown(event) {
-  if (!previewableTableRows.value.length) return
+  if (!tableRows.value.length) return
   if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
     event.preventDefault()
     goPrevPreviewRow()
@@ -675,7 +675,7 @@ function onPreviewKeydown(event) {
 }
 
 function onPreviewWheel(event) {
-  const rows = previewableTableRows.value
+  const rows = tableRows.value
   if (rows.length <= 1 || previewWheelLocked) return
   if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
   event.preventDefault()
@@ -1205,12 +1205,12 @@ onUnmounted(() => {
                         {{ selectedRowPreviewItems.length }} 张
                       </span>
                       <span
-                        v-if="previewableTableRows.length > 1 && selectedPreviewRowIndex >= 0"
+                        v-if="tableRows.length > 1 && selectedPreviewRowIndex >= 0"
                         class="row-preview-count"
                       >
-                        第 {{ selectedPreviewRowIndex + 1 }} / {{ previewableTableRows.length }} 行
+                        第 {{ selectedPreviewRowIndex + 1 }} / {{ tableRows.length }} 行
                       </span>
-                      <span v-if="previewableTableRows.length > 1" class="row-preview-hint">
+                      <span v-if="tableRows.length > 1" class="row-preview-hint">
                         聚焦后 ↑↓ 或滚轮切换行
                       </span>
                     </div>
@@ -1229,7 +1229,9 @@ onUnmounted(() => {
                         <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
                       </div>
                     </div>
-                    <div v-else class="row-preview-empty">点击表格行，在下方并排预览该行已迁移的图片</div>
+                    <div v-else class="row-preview-empty">
+                      点击表格行切换选中；已迁移的图片会显示在下方（无图/未迁移行仅高亮表格行）
+                    </div>
                   </div>
                 </div>
               </div>
