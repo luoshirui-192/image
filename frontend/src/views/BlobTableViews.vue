@@ -889,12 +889,14 @@ async function removeView(row) {
 function statusTagType(status) {
   if (status === 'migrated') return 'success'
   if (status === 'deleted') return 'danger'
+  if (status === 'no_data') return 'info'
   return 'info'
 }
 
 function statusLabel(status) {
   if (status === 'migrated') return '已迁移'
   if (status === 'deleted') return '已删除'
+  if (status === 'no_data') return '无数据'
   return '未迁移'
 }
 

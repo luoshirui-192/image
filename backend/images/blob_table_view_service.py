@@ -12,6 +12,7 @@ from django.utils import timezone
 from images.blob_migration_service import (
     BLOB_TYPES_MYSQL,
     BlobMigrationError,
+    _lookup_id_column,
     validate_identifier,
     validate_where_clause,
 )
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 PATH_STATUS_PENDING = "pending"
 PATH_STATUS_MIGRATED = "migrated"
 PATH_STATUS_DELETED = "deleted"
+PATH_STATUS_NO_DATA = "no_data"
+
+_BLOB_PRESENCE_BATCH_SIZE = 200
 
 DEFAULT_ROW_LIMIT = 100
 MAX_ROW_LIMIT = 500
@@ -296,6 +300,102 @@ def _serialize_cell(value: Any) -> Any:
     return str(value)
 
 
+def _blob_nonempty_sql(conn, blob_quoted: str) -> str:
+    return f"({blob_quoted} IS NOT NULL AND LENGTH({blob_quoted}) > 0)"
+
+
+def _batch_ids_with_nonempty_blob(
+    conn,
+    *,
+    lookup_table: str,
+    lookup_id_column: str,
+    blob_column: str,
+    lookup_ids: list[str],
+) -> set[str]:
+    if not lookup_ids:
+        return set()
+    table = _quote_ident(lookup_table)
+    id_col = _quote_ident(lookup_id_column)
+    blob_col = _quote_ident(blob_column)
+    nonempty = _blob_nonempty_sql(conn, blob_col)
+    present: set[str] = set()
+    for start in range(0, len(lookup_ids), _BLOB_PRESENCE_BATCH_SIZE):
+        chunk = lookup_ids[start : start + _BLOB_PRESENCE_BATCH_SIZE]
+        placeholders = ", ".join(["%s"] * len(chunk))
+        sql = f"SELECT {id_col} FROM {table} WHERE {id_col} IN ({placeholders}) AND {nonempty}"
+        with conn.cursor() as cursor:
+            cursor.execute(sql, chunk)
+            for row in cursor.fetchall():
+                present.add(str(row[0]))
+    return present
+
+
+def _compute_blob_presence_for_page(
+    conn,
+    *,
+    raw_rows: list[tuple],
+    col_names: list[str],
+    blob_cols: list[str],
+    path_mappings: list[dict[str, str]] | None,
+    pk_column: str,
+    source_table: str,
+) -> list[dict[str, bool]]:
+    """Return per-row flags indicating whether each BLOB column has bytes to migrate."""
+    presence = [{col: False for col in blob_cols} for _ in raw_rows]
+    if not raw_rows:
+        return presence
+
+    if path_mappings:
+        mapping_by_view_col = {m["view_column"]: m for m in path_mappings}
+        for blob_col in blob_cols:
+            mapping = mapping_by_view_col.get(blob_col)
+            if not mapping:
+                continue
+            sid_col = mapping["source_id_column"]
+            if sid_col not in col_names:
+                continue
+            sid_idx = col_names.index(sid_col)
+            lookup_table = mapping["lookup_table"]
+            lookup_id_col = _lookup_id_column(mapping)
+            source_blob_col = (mapping.get("source_column") or blob_col).strip()
+
+            ids_to_check: list[str] = []
+            row_indices: list[int] = []
+            for row_idx, raw in enumerate(raw_rows):
+                sid_val = raw[sid_idx]
+                if sid_val is None:
+                    continue
+                ids_to_check.append(str(sid_val))
+                row_indices.append(row_idx)
+
+            if not ids_to_check:
+                continue
+            present = _batch_ids_with_nonempty_blob(
+                conn,
+                lookup_table=lookup_table,
+                lookup_id_column=lookup_id_col,
+                blob_column=source_blob_col,
+                lookup_ids=ids_to_check,
+            )
+            for row_idx, sid in zip(row_indices, ids_to_check):
+                presence[row_idx][blob_col] = sid in present
+        return presence
+
+    pk = validate_identifier(pk_column, label="主键列")
+    pks = [str(raw[col_names.index(pk)]) for raw in raw_rows]
+    for blob_col in blob_cols:
+        present = _batch_ids_with_nonempty_blob(
+            conn,
+            lookup_table=source_table,
+            lookup_id_column=pk,
+            blob_column=blob_col,
+            lookup_ids=pks,
+        )
+        for row_idx, pk_val in enumerate(pks):
+            presence[row_idx][blob_col] = pk_val in present
+    return presence
+
+
 def _build_path_cell(
     *,
     source_table: str,
@@ -303,10 +403,18 @@ def _build_path_cell(
     path_map: dict[str, dict],
     blob_column: str,
     source_column: str | None = None,
+    has_blob_data: bool = True,
 ) -> dict:
     lookup_key = source_column or blob_column
     meta = path_map.get(lookup_key) or path_map.get(blob_column) or path_map.get("")
     if not meta:
+        if not has_blob_data:
+            return {
+                "display": "无数据",
+                "path": "",
+                "image_info_id": None,
+                "status": PATH_STATUS_NO_DATA,
+            }
         return {
             "display": "未迁移",
             "path": "",
@@ -482,6 +590,16 @@ def fetch_view_rows(
                 count_row = cursor.fetchone()
             row_total = int(count_row[0]) if count_row else 0
 
+        blob_presence = _compute_blob_presence_for_page(
+            conn,
+            raw_rows=raw_rows,
+            col_names=col_names,
+            blob_cols=blob_cols,
+            path_mappings=path_mappings or None,
+            pk_column=pk,
+            source_table=view.source_table,
+        )
+
     pk_index = col_names.index(pk) if pk in col_names else 0
     per_row_path_maps: list[dict[str, dict[str, dict]]] | None = None
     legacy_path_map: dict[str, dict[str, dict]] = {}
@@ -519,6 +637,7 @@ def fetch_view_rows(
                     path_map=row_paths.get(blob_col, {}),
                     blob_column=blob_col,
                     source_column=mapping["source_column"] if mapping else None,
+                    has_blob_data=blob_presence[row_idx].get(blob_col, False),
                 )
         else:
             row_paths = legacy_path_map.get(source_id, {})
@@ -528,6 +647,7 @@ def fetch_view_rows(
                     source_id=source_id,
                     path_map=row_paths,
                     blob_column=blob_col,
+                    has_blob_data=blob_presence[row_idx].get(blob_col, False),
                 )
         rows.append(item)
 

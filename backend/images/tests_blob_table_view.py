@@ -151,6 +151,9 @@ class BlobTableViewTestCase(TestCase):
                 "INSERT INTO legacy_photos (id, title, photo) VALUES (2, 'b.png', ?)",
                 [png],
             )
+            cursor.execute(
+                "INSERT INTO legacy_photos (id, title, photo) VALUES (3, 'empty.png', X'')",
+            )
 
         self.image = ImageInfo.objects.create(
             image_name="a.png",
@@ -182,9 +185,9 @@ class BlobTableViewTestCase(TestCase):
 
     def test_fetch_view_rows_substitutes_path(self):
         payload = fetch_view_rows(self.view.id, offset=0, limit=10)
-        self.assertEqual(payload["total"], 2)
+        self.assertEqual(payload["total"], 3)
         self.assertFalse(payload["has_more"])
-        self.assertEqual(len(payload["rows"]), 2)
+        self.assertEqual(len(payload["rows"]), 3)
         row1 = payload["rows"][0]
         self.assertEqual(row1["title"], "a.png")
         self.assertEqual(row1["photo"]["status"], "migrated")
@@ -193,6 +196,78 @@ class BlobTableViewTestCase(TestCase):
         row2 = payload["rows"][1]
         self.assertEqual(row2["photo"]["status"], "pending")
         self.assertEqual(row2["photo"]["display"], "未迁移")
+
+    def test_empty_blob_shows_no_data(self):
+        payload = fetch_view_rows(self.view.id, offset=0, limit=10)
+        row3 = next(row for row in payload["rows"] if str(row["id"]) == "3")
+        self.assertEqual(row3["photo"]["status"], "no_data")
+        self.assertEqual(row3["photo"]["display"], "无数据")
+
+    def test_join_view_empty_lookup_blob_shows_no_data(self):
+        from images.blob_schema_helpers import serialize_blob_column_path_mappings
+
+        with connection.cursor() as cursor:
+            cursor.execute("DROP TABLE IF EXISTS join_view_rows")
+            cursor.execute("DROP TABLE IF EXISTS join_image_store")
+            cursor.execute(
+                """
+                CREATE TABLE join_view_rows (
+                    id INTEGER PRIMARY KEY,
+                    src_fname VARCHAR(100) NOT NULL DEFAULT '',
+                    src_image_data BLOB
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE join_image_store (
+                    Fname VARCHAR(100) PRIMARY KEY,
+                    image_data BLOB
+                )
+                """
+            )
+            cursor.execute(
+                "INSERT INTO join_view_rows (id, src_fname) VALUES (1, 'missing.jpg')"
+            )
+            cursor.execute(
+                "INSERT INTO join_view_rows (id, src_fname) VALUES (2, 'present.jpg')"
+            )
+            png = make_png_bytes()
+            cursor.execute(
+                "INSERT INTO join_image_store (Fname, image_data) VALUES ('present.jpg', ?)",
+                [png],
+            )
+
+        mappings = serialize_blob_column_path_mappings(
+            [
+                {
+                    "view_column": "src_image_data",
+                    "lookup_table": "join_image_store",
+                    "source_id_column": "src_fname",
+                    "source_column": "image_data",
+                    "lookup_id_column": "Fname",
+                }
+            ]
+        )
+        join_view = BlobTableView.objects.create(
+            name="join view",
+            db_alias="default",
+            source_table="join_view_rows",
+            source_object_type="view",
+            path_lookup_table="join_image_store",
+            blob_column_path_mappings=mappings,
+            source_pk_column="id",
+            blob_column="src_image_data",
+            blob_columns='["src_image_data"]',
+            create_time=timezone.now(),
+            update_time=timezone.now(),
+        )
+        payload = fetch_view_rows(join_view.id, offset=0, limit=10)
+        by_id = {str(row["id"]): row for row in payload["rows"]}
+        self.assertEqual(by_id["1"]["src_image_data"]["status"], "no_data")
+        self.assertEqual(by_id["1"]["src_image_data"]["display"], "无数据")
+        self.assertEqual(by_id["2"]["src_image_data"]["status"], "pending")
+        self.assertEqual(by_id["2"]["src_image_data"]["display"], "未迁移")
 
     def test_api_list_and_rows(self):
         self.client.force_authenticate(user=self.admin)
