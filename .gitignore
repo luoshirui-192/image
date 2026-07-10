@@ -63,7 +63,9 @@ backups/*
 /backup_image_db.sql
 /image_db.sql
 
-# Test / cache
+# Local code walkthrough (generated locally; not in remote)
+docs/code-walkthrough/
+
 .pytest_cache/
 .coverage
 htmlcov/
