@@ -186,7 +186,7 @@ const sqlSimulateContext = computed(() => {
       sourceObjectType: obj.objectType === 'view' ? 'view' : 'table',
     }
   }
-  return { ...base, blobMode: 'placeholder' }
+  return base
 })
 
 const sqlColumnMetaByName = computed(() => sqlColumnMetaMap(sqlResult.value?.column_meta))
@@ -1236,7 +1236,7 @@ onUnmounted(() => {
                           v-for="col in columns"
                           :key="col.name"
                           :prop="col.name"
-                          :label="col.is_path_substitute ? `${col.name}（路径）` : col.name"
+                          :label="col.name"
                           :min-width="col.is_path_substitute ? 200 : 100"
                           show-overflow-tooltip
                         >
@@ -1319,18 +1319,6 @@ onUnmounted(() => {
             </el-tab-pane>
 
             <el-tab-pane label="SQL 查询" name="sql">
-              <div class="sql-context-bar">
-                当前数据源：<code>{{ browseContext.label }}</code>
-                <span v-if="browseContext.database" class="field-hint inline-hint">
-                  （库 {{ browseContext.database }}）
-                </span>
-                <el-tag v-if="sqlSimulateContext.viewId || sqlSimulateContext.sourceTable" size="small" type="success" class="sql-mode-tag">
-                  模拟表模式（BLOB→路径，可预览）
-                </el-tag>
-                <el-tag v-else size="small" type="info" class="sql-mode-tag">
-                  通用模式（BLOB 显示为占位符）
-                </el-tag>
-              </div>
               <div class="sql-editor-wrap">
                 <SqlEditor v-model="sqlText" @execute="handleSqlExecute" />
               </div>
@@ -1341,7 +1329,6 @@ onUnmounted(() => {
                 </el-button>
                 <span v-if="sqlResult" class="sql-meta">
                   {{ sqlResult.row_count }} 行 · {{ sqlResult.elapsed_ms }}ms
-                  <span v-if="sqlResult.simulated"> · 模拟表</span>
                   <span v-if="sqlResult.truncated">（已截断）</span>
                 </span>
               </div>
@@ -1361,7 +1348,7 @@ onUnmounted(() => {
                   v-for="col in sqlResult.columns"
                   :key="col"
                   :prop="col"
-                  :label="sqlIsPathColumn(col) ? `${col}（路径）` : col"
+                  :label="col"
                   :min-width="sqlIsPathColumn(col) ? 200 : 120"
                   show-overflow-tooltip
                 >
@@ -1725,19 +1712,6 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-.sql-context-bar {
-  font-size: 13px;
-  margin-bottom: 8px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.sql-mode-tag {
-  margin-left: 4px;
 }
 
 .sql-preview-panel {

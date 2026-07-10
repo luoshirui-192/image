@@ -10,9 +10,9 @@ from django.conf import settings
 from django.db import connections
 from django.utils import timezone
 
-from sqlquery.cell_format import serialize_sql_cell
+from sqlquery.cell_format import format_blob_placeholder, serialize_sql_cell
 from sqlquery.simulated_sql import try_execute_simulated_sql
-from sqlquery.sql_rewrite import rewrite_select_star_exclude_blobs
+from sqlquery.sql_rewrite import rewrite_sql_for_blob_performance
 from utils.sql_validator import SqlValidationError, validate_sql
 
 logger = logging.getLogger(__name__)
@@ -56,27 +56,46 @@ def resolve_sql_connection_context(
     return SqlConnectionContext(db_alias=alias, database=db_name)
 
 
+def _serialize_sql_row(
+    record: tuple[Any, ...],
+    *,
+    columns: list[str],
+    blob_length_columns: frozenset[str],
+) -> list[Any]:
+    row: list[Any] = []
+    for idx, value in enumerate(record):
+        col = columns[idx] if idx < len(columns) else ""
+        if col in blob_length_columns and isinstance(value, int):
+            row.append(format_blob_placeholder(value))
+        else:
+            row.append(serialize_sql_cell(value))
+    return row
+
+
 def _execute_in_thread(
     sql: str,
     max_rows: int,
     *,
     context: SqlConnectionContext,
     exclude_blob_star: bool = True,
-) -> tuple[list[str], list[list[Any]], bool, str]:
+) -> tuple[list[str], list[list[Any]], bool, str, frozenset[str]]:
     from images.external_db_service import db_alias_session
 
     db_switch = context.database or None
     executed_sql = sql
+    blob_length_columns: frozenset[str] = frozenset()
     with db_alias_session(context.db_alias, database=db_switch):
         connection = connections[context.db_alias]
         connection.close()
 
         if exclude_blob_star and connection.vendor == "mysql":
-            executed_sql, _ = rewrite_select_star_exclude_blobs(
+            rewrite = rewrite_sql_for_blob_performance(
                 sql,
                 conn=connection,
                 database=context.database,
             )
+            executed_sql = rewrite.sql
+            blob_length_columns = rewrite.blob_length_columns
 
         with connection.cursor() as cursor:
             cursor.execute(executed_sql)
@@ -92,7 +111,13 @@ def _execute_in_thread(
                 if not batch:
                     break
                 for record in batch:
-                    rows.append([serialize_sql_cell(v) for v in record])
+                    rows.append(
+                        _serialize_sql_row(
+                            record,
+                            columns=columns,
+                            blob_length_columns=blob_length_columns,
+                        )
+                    )
                     if len(rows) >= max_rows:
                         truncated = True
                         break
@@ -104,7 +129,7 @@ def _execute_in_thread(
                 if extra is not None:
                     truncated = True
 
-    return columns, rows, truncated, executed_sql
+    return columns, rows, truncated, executed_sql, blob_length_columns
 
 
 def execute_select_sql(
@@ -186,7 +211,7 @@ def execute_select_sql(
             exclude_blob_star=exclude_blob_star,
         )
         try:
-            columns, rows, truncated, executed_sql = future.result(timeout=timeout)
+            columns, rows, truncated, executed_sql, _blob_length_cols = future.result(timeout=timeout)
         except FuturesTimeout as exc:
             future.cancel()
             connections.close_all()
@@ -201,6 +226,7 @@ def execute_select_sql(
 
     return {
         "sql": executed_sql,
+        "original_sql": cleaned,
         "columns": columns,
         "column_meta": [{"name": name, "is_path_substitute": False} for name in columns],
         "rows": rows,

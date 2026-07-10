@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import tempfile
+from unittest.mock import patch
 
 from django.contrib.auth.hashers import make_password
 from django.db import connection
@@ -11,7 +12,11 @@ from django.utils import timezone
 from PIL import Image
 from rest_framework.test import APIClient
 
-from images.blob_table_view_service import create_table_view, fetch_view_rows
+from images.blob_table_view_service import (
+    _batch_ids_with_nonempty_blob,
+    create_table_view,
+    fetch_view_rows,
+)
 from images.models import BlobTableView, ImageInfo, ImageSourceMap
 from users.models import SysUser
 
@@ -188,6 +193,8 @@ class BlobTableViewTestCase(TestCase):
         self.assertEqual(payload["total"], 3)
         self.assertFalse(payload["has_more"])
         self.assertEqual(len(payload["rows"]), 3)
+        self.assertIn("SELECT", payload.get("remote_sql") or "")
+        self.assertNotIn("photo", (payload.get("remote_sql") or "").split("FROM", 1)[0])
         row1 = payload["rows"][0]
         self.assertEqual(row1["title"], "a.png")
         self.assertEqual(row1["photo"]["status"], "migrated")
@@ -196,6 +203,29 @@ class BlobTableViewTestCase(TestCase):
         row2 = payload["rows"][1]
         self.assertEqual(row2["photo"]["status"], "pending")
         self.assertEqual(row2["photo"]["display"], "未迁移")
+
+    def test_blob_presence_skips_already_migrated_rows(self):
+        checked_ids: list[str] = []
+
+        def _track_ids(conn, *, lookup_table, lookup_id_column, blob_column, lookup_ids):
+            checked_ids.extend(lookup_ids)
+            return _batch_ids_with_nonempty_blob(
+                conn,
+                lookup_table=lookup_table,
+                lookup_id_column=lookup_id_column,
+                blob_column=blob_column,
+                lookup_ids=lookup_ids,
+            )
+
+        with patch(
+            "images.blob_table_view_service._batch_ids_with_nonempty_blob",
+            side_effect=_track_ids,
+        ):
+            fetch_view_rows(self.view.id, offset=0, limit=10)
+
+        self.assertNotIn("1", checked_ids)
+        self.assertIn("2", checked_ids)
+        self.assertIn("3", checked_ids)
 
     def test_empty_blob_shows_no_data(self):
         payload = fetch_view_rows(self.view.id, offset=0, limit=10)

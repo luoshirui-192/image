@@ -373,6 +373,21 @@ def _augment_select_names(
     return names
 
 
+def _local_blob_mapping_exists(
+    *,
+    blob_col: str,
+    source_column: str | None,
+    path_map: dict[str, dict],
+) -> bool:
+    """True when image_source_map already has an entry for this row/column."""
+    lookup_key = source_column or blob_col
+    return bool(
+        path_map.get(blob_col)
+        or path_map.get(lookup_key)
+        or path_map.get("")
+    )
+
+
 def _compute_blob_presence_for_page(
     conn,
     *,
@@ -382,6 +397,9 @@ def _compute_blob_presence_for_page(
     path_mappings: list[dict[str, str]] | None,
     pk_column: str,
     source_table: str,
+    per_row_path_maps: list[dict[str, dict[str, dict]]] | None = None,
+    legacy_path_map: dict[str, dict[str, dict]] | None = None,
+    pk_index: int = 0,
 ) -> list[dict[str, bool]]:
     """Return per-row flags indicating whether each BLOB column has bytes to migrate."""
     presence = [{col: False for col in blob_cols} for _ in raw_rows]
@@ -408,6 +426,11 @@ def _compute_blob_presence_for_page(
                 sid_val = raw[sid_idx]
                 if sid_val is None:
                     continue
+                if per_row_path_maps is not None:
+                    row_paths = per_row_path_maps[row_idx].get(blob_col, {})
+                    if row_paths:
+                        presence[row_idx][blob_col] = True
+                        continue
                 ids_to_check.append(str(sid_val))
                 row_indices.append(row_idx)
 
@@ -425,16 +448,33 @@ def _compute_blob_presence_for_page(
         return presence
 
     pk = validate_identifier(pk_column, label="主键列")
-    pks = [str(raw[col_names.index(pk)]) for raw in raw_rows]
+    path_map = legacy_path_map or {}
     for blob_col in blob_cols:
+        ids_to_check: list[str] = []
+        row_indices: list[int] = []
+        for row_idx, raw in enumerate(raw_rows):
+            pk_val = str(raw[pk_index])
+            row_paths = path_map.get(pk_val, {})
+            if _local_blob_mapping_exists(
+                blob_col=blob_col,
+                source_column=None,
+                path_map=row_paths,
+            ):
+                presence[row_idx][blob_col] = True
+                continue
+            ids_to_check.append(pk_val)
+            row_indices.append(row_idx)
+
+        if not ids_to_check:
+            continue
         present = _batch_ids_with_nonempty_blob(
             conn,
             lookup_table=source_table,
             lookup_id_column=pk,
             blob_column=blob_col,
-            lookup_ids=pks,
+            lookup_ids=ids_to_check,
         )
-        for row_idx, pk_val in enumerate(pks):
+        for row_idx, pk_val in zip(row_indices, ids_to_check):
             presence[row_idx][blob_col] = pk_val in present
     return presence
 
@@ -642,6 +682,27 @@ def fetch_simulated_table_rows(
                 count_row = cursor.fetchone()
             row_total = int(count_row[0]) if count_row else 0
 
+        pk_index = col_names.index(pk) if pk in col_names else 0
+        per_row_path_maps: list[dict[str, dict[str, dict]]] | None = None
+        legacy_path_map: dict[str, dict[str, dict]] = {}
+        if path_mappings:
+            per_row_path_maps = _load_path_maps_for_mappings(
+                raw_rows=raw_rows,
+                col_names=col_names,
+                mappings=path_mappings,
+                blob_cols=blob_cols,
+                fallback_source_table=view.source_table,
+                fallback_lookup_table=_path_lookup_table(view),
+            )
+        else:
+            source_ids = [str(row[pk_index]) for row in raw_rows]
+            legacy_path_map = _load_path_map(
+                view.source_table,
+                source_ids,
+                blob_columns=blob_cols,
+                path_lookup_table=_path_lookup_table(view),
+            )
+
         blob_presence = _compute_blob_presence_for_page(
             conn,
             raw_rows=raw_rows,
@@ -650,28 +711,12 @@ def fetch_simulated_table_rows(
             path_mappings=path_mappings or None,
             pk_column=pk,
             source_table=view.source_table,
+            per_row_path_maps=per_row_path_maps,
+            legacy_path_map=legacy_path_map,
+            pk_index=pk_index,
         )
 
     pk_index = col_names.index(pk) if pk in col_names else 0
-    per_row_path_maps: list[dict[str, dict[str, dict]]] | None = None
-    legacy_path_map: dict[str, dict[str, dict]] = {}
-    if path_mappings:
-        per_row_path_maps = _load_path_maps_for_mappings(
-            raw_rows=raw_rows,
-            col_names=col_names,
-            mappings=path_mappings,
-            blob_cols=blob_cols,
-            fallback_source_table=view.source_table,
-            fallback_lookup_table=_path_lookup_table(view),
-        )
-    else:
-        source_ids = [str(row[pk_index]) for row in raw_rows]
-        legacy_path_map = _load_path_map(
-            view.source_table,
-            source_ids,
-            blob_columns=blob_cols,
-            path_lookup_table=_path_lookup_table(view),
-        )
 
     rows: list[dict] = []
     for row_idx, raw in enumerate(raw_rows):
@@ -712,6 +757,7 @@ def fetch_simulated_table_rows(
 
     return {
         "view_id": view.pk,
+        "remote_sql": sql,
         "columns": [
             {
                 "name": col.name,

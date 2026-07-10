@@ -156,6 +156,8 @@ def simulated_fetch_to_sql_payload(fetch_result: dict, *, sql: str, started) -> 
 
     return {
         "sql": sql,
+        "original_sql": sql,
+        "remote_sql": fetch_result.get("remote_sql") or "",
         "columns": col_names,
         "column_meta": column_meta,
         "rows": rows_out,

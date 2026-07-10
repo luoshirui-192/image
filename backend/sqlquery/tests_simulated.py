@@ -21,6 +21,21 @@ class SqlCellFormatTestCase(SimpleTestCase):
         self.assertEqual(serialize_sql_cell(cell), cell)
 
 
+class SqlRewriteTestCase(SimpleTestCase):
+    def test_split_select_columns(self):
+        from sqlquery.sql_rewrite import _split_select_columns
+
+        parts = _split_select_columns("id, name, COUNT(*) as cnt")
+        self.assertEqual(parts, ["id", "name", "COUNT(*) as cnt"])
+
+    def test_parse_simple_column(self):
+        from sqlquery.sql_rewrite import _parse_simple_column
+
+        self.assertEqual(_parse_simple_column("`photo`"), ("photo", "photo"))
+        self.assertEqual(_parse_simple_column("t.photo AS p"), ("photo", "p"))
+        self.assertIsNone(_parse_simple_column("COUNT(*)"))
+
+
 class SimulatedSqlParseTestCase(SimpleTestCase):
     def test_parse_limit_and_where(self):
         parsed = parse_simulated_select(
