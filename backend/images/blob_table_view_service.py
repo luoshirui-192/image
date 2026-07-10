@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from django.db import connections
+from django.db.utils import DatabaseError
 from django.utils import timezone
 
 from images.blob_migration_service import (
@@ -323,11 +324,47 @@ def _batch_ids_with_nonempty_blob(
         chunk = lookup_ids[start : start + _BLOB_PRESENCE_BATCH_SIZE]
         placeholders = ", ".join(["%s"] * len(chunk))
         sql = f"SELECT {id_col} FROM {table} WHERE {id_col} IN ({placeholders}) AND {nonempty}"
-        with conn.cursor() as cursor:
-            cursor.execute(sql, chunk)
-            for row in cursor.fetchall():
-                present.add(str(row[0]))
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, chunk)
+                for row in cursor.fetchall():
+                    present.add(str(row[0]))
+        except DatabaseError:
+            logger.warning(
+                "blob presence check failed table=%s id_col=%s blob_col=%s",
+                lookup_table,
+                lookup_id_column,
+                blob_column,
+                exc_info=True,
+            )
+            return set()
     return present
+
+
+def _path_mapping_key_columns(path_mappings: list[dict[str, str]] | None) -> set[str]:
+    cols: set[str] = set()
+    for mapping in path_mappings or []:
+        sid_col = (mapping.get("source_id_column") or "").strip()
+        if sid_col:
+            cols.add(sid_col)
+    return cols
+
+
+def _augment_select_names(
+    select_names: list[str],
+    *,
+    pk: str,
+    path_mappings: list[dict[str, str]] | None,
+    remote_col_names: set[str],
+) -> list[str]:
+    """Ensure PK and path-mapping key columns are always fetched."""
+    names = list(select_names)
+    seen = set(names)
+    for required in [pk, *_path_mapping_key_columns(path_mappings)]:
+        if required and required in remote_col_names and required not in seen:
+            names.append(required)
+            seen.add(required)
+    return names
 
 
 def _compute_blob_presence_for_page(
@@ -535,6 +572,8 @@ def _load_path_maps_for_mappings(
             if not mapping:
                 continue
             sid_col = mapping["source_id_column"]
+            if sid_col not in col_names:
+                continue
             sid_idx = col_names.index(sid_col)
             source_id = str(raw[sid_idx])
             cache_key = (mapping["lookup_table"], mapping["source_column"])
@@ -565,7 +604,16 @@ def fetch_view_rows(
         conn = connections[alias]
         remote_cols = _fetch_remote_columns(conn, view.source_table)
         display_cols = _resolve_display_columns(view, remote_cols)
-        select_names = [c.name for c in display_cols if not c.is_path_substitute]
+        from images.blob_view_path_service import resolve_effective_path_mappings
+
+        path_mappings = resolve_effective_path_mappings(view, conn, blob_cols)
+        remote_col_names = {c.name for c in remote_cols}
+        select_names = _augment_select_names(
+            [c.name for c in display_cols if not c.is_path_substitute],
+            pk=pk,
+            path_mappings=path_mappings or None,
+            remote_col_names=remote_col_names,
+        )
         select_sql = ", ".join(_quote_ident(name) for name in select_names)
         order_sql = _quote_ident(pk)
         sql = (
@@ -577,10 +625,6 @@ def fetch_view_rows(
             cursor.execute(sql, params)
             raw_rows = cursor.fetchall()
             col_names = [col[0] for col in cursor.description]
-
-        from images.blob_view_path_service import resolve_effective_path_mappings
-
-        path_mappings = resolve_effective_path_mappings(view, conn, blob_cols)
 
         row_total = -1
         if offset == 0:

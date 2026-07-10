@@ -183,6 +183,9 @@ class BlobTableViewRowsView(APIView):
             )
         except BlobTableViewError as exc:
             return error_response(str(exc), code=4001, status=400)
+        except Exception:
+            logger.exception("fetch_view_rows failed view_id=%s", pk)
+            return error_response("加载表视图数据失败", code=5001, status=500)
         return success_response(payload)
 
 

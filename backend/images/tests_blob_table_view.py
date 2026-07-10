@@ -269,6 +269,69 @@ class BlobTableViewTestCase(TestCase):
         self.assertEqual(by_id["2"]["src_image_data"]["status"], "pending")
         self.assertEqual(by_id["2"]["src_image_data"]["display"], "未迁移")
 
+    def test_join_view_fetches_mapping_key_column_not_in_display(self):
+        from images.blob_schema_helpers import serialize_blob_column_path_mappings
+
+        with connection.cursor() as cursor:
+            cursor.execute("DROP TABLE IF EXISTS join_view_rows2")
+            cursor.execute("DROP TABLE IF EXISTS join_image_store2")
+            cursor.execute(
+                """
+                CREATE TABLE join_view_rows2 (
+                    id INTEGER PRIMARY KEY,
+                    title VARCHAR(100) NOT NULL DEFAULT '',
+                    src_fname VARCHAR(100) NOT NULL DEFAULT '',
+                    src_image_data BLOB
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE join_image_store2 (
+                    Fname VARCHAR(100) PRIMARY KEY,
+                    image_data BLOB
+                )
+                """
+            )
+            cursor.execute(
+                "INSERT INTO join_view_rows2 (id, title, src_fname) VALUES (1, 'row-a', 'present.jpg')"
+            )
+            png = make_png_bytes()
+            cursor.execute(
+                "INSERT INTO join_image_store2 (Fname, image_data) VALUES ('present.jpg', ?)",
+                [png],
+            )
+
+        mappings = serialize_blob_column_path_mappings(
+            [
+                {
+                    "view_column": "src_image_data",
+                    "lookup_table": "join_image_store2",
+                    "source_id_column": "src_fname",
+                    "source_column": "image_data",
+                    "lookup_id_column": "Fname",
+                }
+            ]
+        )
+        join_view = BlobTableView.objects.create(
+            name="join view no fname display",
+            db_alias="default",
+            source_table="join_view_rows2",
+            source_object_type="view",
+            path_lookup_table="join_image_store2",
+            blob_column_path_mappings=mappings,
+            source_pk_column="id",
+            blob_column="src_image_data",
+            blob_columns='["src_image_data"]',
+            display_columns='["title"]',
+            create_time=timezone.now(),
+            update_time=timezone.now(),
+        )
+        payload = fetch_view_rows(join_view.id, offset=0, limit=10)
+        row = payload["rows"][0]
+        self.assertEqual(row["title"], "row-a")
+        self.assertEqual(row["src_image_data"]["status"], "pending")
+
     def test_api_list_and_rows(self):
         self.client.force_authenticate(user=self.admin)
         res = self.client.get("/api/images/blob-migration/table-views/")
