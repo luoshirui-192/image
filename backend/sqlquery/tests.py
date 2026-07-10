@@ -6,6 +6,8 @@ from django.db import connection
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from sqlquery.cell_format import serialize_sql_cell
+from sqlquery.exceptions import SqlExecutionError
 from sqlquery.services import execute_select_sql, resolve_sql_connection_context
 from users.models import SysUser
 
@@ -52,6 +54,7 @@ class SqlQueryServiceTestCase(TestCase):
         self.assertEqual(result["columns"], ["cnt"])
         self.assertEqual(result["row_count"], 1)
         self.assertEqual(result["db_alias"], "default")
+        self.assertFalse(result.get("simulated"))
 
     def test_api_execute_with_db_alias(self):
         self.client.force_authenticate(user=self.user)

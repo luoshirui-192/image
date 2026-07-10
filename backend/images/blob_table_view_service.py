@@ -284,10 +284,16 @@ def count_view_rows(view_id: int) -> int:
     return int(row[0]) if row else 0
 
 
-def _build_where(view: BlobTableView) -> tuple[str, list[Any]]:
+def _build_where(view: BlobTableView, extra_where: str = "") -> tuple[str, list[Any]]:
+    parts: list[str] = []
     clause = validate_where_clause(view.where_clause)
     if clause:
-        return f" WHERE {clause}", []
+        parts.append(f"({clause})")
+    extra = validate_where_clause(extra_where)
+    if extra:
+        parts.append(f"({extra})")
+    if parts:
+        return f" WHERE {' AND '.join(parts)}", []
     return "", []
 
 
@@ -583,13 +589,15 @@ def _load_path_maps_for_mappings(
     return row_maps
 
 
-def fetch_view_rows(
-    view_id: int,
+def fetch_simulated_table_rows(
+    view: BlobTableView,
     *,
     offset: int = 0,
     limit: int = DEFAULT_ROW_LIMIT,
+    extra_where: str = "",
+    touch_last_viewed: bool = True,
 ) -> dict:
-    view = _load_view(view_id)
+    """Fetch paginated rows with BLOB columns replaced by path cells (no BLOB bytes)."""
     if offset < 0:
         raise BlobTableViewError("offset 不能为负数")
     limit = min(max(1, limit), MAX_ROW_LIMIT)
@@ -598,7 +606,7 @@ def fetch_view_rows(
     pk = validate_identifier(view.source_pk_column, label="主键列")
     blob_cols = _view_blob_columns(view)
     table = _quote_ident(view.source_table)
-    where_sql, where_params = _build_where(view)
+    where_sql, where_params = _build_where(view, extra_where)
 
     with _view_db_session(view) as alias:
         conn = connections[alias]
@@ -699,10 +707,11 @@ def fetch_view_rows(
     # scanning on every infinite-scroll append.
     total = row_total if offset == 0 else -1
     has_more = len(rows) >= limit if total < 0 else (offset + len(rows)) < total
-    BlobTableView.objects.filter(pk=view.id).update(last_viewed_at=timezone.now())
+    if touch_last_viewed and view.pk:
+        BlobTableView.objects.filter(pk=view.id).update(last_viewed_at=timezone.now())
 
     return {
-        "view_id": view.id,
+        "view_id": view.pk,
         "columns": [
             {
                 "name": col.name,
@@ -717,6 +726,78 @@ def fetch_view_rows(
         "total": total,
         "has_more": has_more,
     }
+
+
+def fetch_view_rows(
+    view_id: int,
+    *,
+    offset: int = 0,
+    limit: int = DEFAULT_ROW_LIMIT,
+) -> dict:
+    view = _load_view(view_id)
+    return fetch_simulated_table_rows(view, offset=offset, limit=limit)
+
+
+def build_ephemeral_table_view(
+    *,
+    db_alias: str,
+    database_name: str,
+    source_table: str,
+    blob_columns: list[str],
+    source_pk_column: str = "id",
+    source_object_type: str | None = None,
+    path_lookup_table: str = "",
+    blob_column_path_mappings: list[dict[str, str]] | str | None = None,
+    where_clause: str = "",
+) -> BlobTableView:
+    """In-memory view config for catalog SQL simulation (not persisted)."""
+    from images.blob_view_path_service import BlobViewPathError, resolve_source_metadata
+
+    validate_db_alias(db_alias)
+    table = validate_identifier(source_table, label="源表名")
+    pk = validate_identifier(source_pk_column or "id", label="主键列")
+    cols = [validate_identifier(c, label="BLOB 列") for c in blob_columns if (c or "").strip()]
+    if not cols:
+        raise BlobTableViewError("至少需要一个 BLOB 列")
+
+    initial_db = (database_name or "").strip()
+    with db_alias_session(db_alias, database=initial_db or None) as alias:
+        conn = connections[alias]
+        db_name = initial_db or str(conn.settings_dict.get("NAME") or "").strip()
+        try:
+            meta = resolve_source_metadata(
+                conn,
+                database=db_name,
+                object_name=table,
+                object_type=source_object_type,
+                path_lookup_table=path_lookup_table or None,
+                blob_columns=cols,
+            )
+        except BlobViewPathError as exc:
+            raise BlobTableViewError(str(exc)) from exc
+
+    mappings_raw = blob_column_path_mappings
+    if isinstance(mappings_raw, list):
+        mappings_serialized = serialize_blob_column_path_mappings(mappings_raw)
+    elif isinstance(mappings_raw, str):
+        mappings_serialized = mappings_raw
+    else:
+        mappings_serialized = serialize_blob_column_path_mappings(meta.get("blob_column_path_mappings") or [])
+
+    return BlobTableView(
+        name=f"{table} SQL",
+        db_alias=db_alias,
+        database_name=db_name,
+        source_table=table,
+        source_pk_column=pk,
+        blob_column=meta["blob_column"],
+        blob_columns=serialize_blob_columns(meta["blob_columns"]),
+        source_object_type=meta["source_object_type"],
+        path_lookup_table=meta.get("path_lookup_table") or "",
+        blob_column_path_mappings=mappings_serialized,
+        where_clause=validate_where_clause(where_clause),
+        display_columns="",
+    )
 
 
 def create_table_view(

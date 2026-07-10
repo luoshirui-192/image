@@ -4,40 +4,27 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from dataclasses import dataclass
-from datetime import date, datetime, time
-from decimal import Decimal
 from typing import Any
 
 from django.conf import settings
 from django.db import connections
 from django.utils import timezone
 
+from sqlquery.cell_format import serialize_sql_cell
+from sqlquery.simulated_sql import try_execute_simulated_sql
+from sqlquery.sql_rewrite import rewrite_select_star_exclude_blobs
 from utils.sql_validator import SqlValidationError, validate_sql
 
 logger = logging.getLogger(__name__)
 
 
-class SqlExecutionError(Exception):
-    """Raised when SQL execution fails or times out."""
-
+from sqlquery.exceptions import SqlExecutionError
 
 @dataclass
 class SqlConnectionContext:
     db_alias: str
     database: str
     connection_id: int | None = None
-
-
-def _serialize_cell(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, (datetime, date, time)):
-        return value.isoformat(sep=" ", timespec="seconds") if isinstance(value, datetime) else value.isoformat()
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return bytes(value).decode("utf-8", errors="replace")
-    return value
 
 
 def resolve_sql_connection_context(
@@ -74,16 +61,25 @@ def _execute_in_thread(
     max_rows: int,
     *,
     context: SqlConnectionContext,
-) -> tuple[list[str], list[list[Any]], bool]:
+    exclude_blob_star: bool = True,
+) -> tuple[list[str], list[list[Any]], bool, str]:
     from images.external_db_service import db_alias_session
 
     db_switch = context.database or None
+    executed_sql = sql
     with db_alias_session(context.db_alias, database=db_switch):
         connection = connections[context.db_alias]
         connection.close()
 
+        if exclude_blob_star and connection.vendor == "mysql":
+            executed_sql, _ = rewrite_select_star_exclude_blobs(
+                sql,
+                conn=connection,
+                database=context.database,
+            )
+
         with connection.cursor() as cursor:
-            cursor.execute(sql)
+            cursor.execute(executed_sql)
             if cursor.description is None:
                 raise SqlExecutionError("查询未返回结果集")
 
@@ -96,7 +92,7 @@ def _execute_in_thread(
                 if not batch:
                     break
                 for record in batch:
-                    rows.append([_serialize_cell(v) for v in record])
+                    rows.append([serialize_sql_cell(v) for v in record])
                     if len(rows) >= max_rows:
                         truncated = True
                         break
@@ -108,7 +104,7 @@ def _execute_in_thread(
                 if extra is not None:
                     truncated = True
 
-    return columns, rows, truncated
+    return columns, rows, truncated, executed_sql
 
 
 def execute_select_sql(
@@ -117,15 +113,53 @@ def execute_select_sql(
     db_alias: str | None = None,
     connection_id: int | None = None,
     database: str | None = None,
+    view_id: int | None = None,
+    source_table: str | None = None,
+    source_pk_column: str | None = None,
+    blob_columns: list[str] | None = None,
+    source_object_type: str | None = None,
+    path_lookup_table: str | None = None,
+    blob_mode: str = "path",
 ) -> dict[str, Any]:
     """
-    Validate and execute a SELECT query against default or external database.
+    Validate and execute a SELECT query.
+
+    When blob_mode=path and a simulated table context is provided, uses the same
+    optimized path as「表数据」browse (no BLOB bytes over the wire).
     """
     require_where = getattr(settings, "SQL_REQUIRE_WHERE_FOR_SELECT_STAR", False)
     cleaned = validate_sql(
         sql,
         require_where_for_select_star=require_where,
     )
+
+    mode = (blob_mode or "path").strip().lower()
+    if mode not in {"path", "placeholder", "raw"}:
+        raise SqlExecutionError("blob_mode 无效，应为 path / placeholder / raw")
+
+    started = timezone.now()
+
+    if mode == "path":
+        try:
+            simulated = try_execute_simulated_sql(
+                cleaned,
+                view_id=view_id,
+                db_alias=db_alias,
+                connection_id=connection_id,
+                database=database,
+                source_table=source_table,
+                source_pk_column=source_pk_column,
+                blob_columns=blob_columns,
+                source_object_type=source_object_type,
+                path_lookup_table=path_lookup_table,
+            )
+        except SqlExecutionError:
+            raise
+        except Exception as exc:
+            logger.exception("simulated SQL failed")
+            raise SqlExecutionError(str(exc)) from exc
+        if simulated is not None:
+            return simulated
 
     try:
         context = resolve_sql_connection_context(
@@ -140,12 +174,19 @@ def execute_select_sql(
 
     max_rows = settings.SQL_MAX_ROWS
     timeout = settings.SQL_QUERY_TIMEOUT
-    started = timezone.now()
+
+    exclude_blob_star = mode != "raw"
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_execute_in_thread, cleaned, max_rows, context=context)
+        future = executor.submit(
+            _execute_in_thread,
+            cleaned,
+            max_rows,
+            context=context,
+            exclude_blob_star=exclude_blob_star,
+        )
         try:
-            columns, rows, truncated = future.result(timeout=timeout)
+            columns, rows, truncated, executed_sql = future.result(timeout=timeout)
         except FuturesTimeout as exc:
             future.cancel()
             connections.close_all()
@@ -159,12 +200,15 @@ def execute_select_sql(
     elapsed_ms = int((timezone.now() - started).total_seconds() * 1000)
 
     return {
-        "sql": cleaned,
+        "sql": executed_sql,
         "columns": columns,
+        "column_meta": [{"name": name, "is_path_substitute": False} for name in columns],
         "rows": rows,
         "row_count": len(rows),
         "truncated": truncated,
         "elapsed_ms": elapsed_ms,
+        "simulated": False,
+        "blob_mode": mode if mode != "path" else "placeholder",
         "db_alias": context.db_alias,
         "database": context.database,
         "connection_id": context.connection_id,

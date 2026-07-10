@@ -25,7 +25,10 @@ import {
   executeSqlApi,
   findPathColumn,
   formatCellValue,
+  isPathCellValue,
+  pathCellDisplay,
   rowsToRecords,
+  sqlColumnMetaMap,
   validateSqlApi,
 } from '@/api/sql'
 import { highlightAndScrollTableRow } from '@/utils/tableScroll'
@@ -101,6 +104,7 @@ const sqlExecuting = ref(false)
 const sqlValidating = ref(false)
 const sqlResult = ref(null)
 const sqlError = ref('')
+const sqlSelectedRow = ref(null)
 
 const migrationSources = ref([])
 const selectionMigrationStats = ref(null)
@@ -163,6 +167,30 @@ const browseContext = computed(() => {
   }
 })
 
+const sqlSimulateContext = computed(() => {
+  const base = { ...browseContext.value, blobMode: 'path' }
+  if (activeView.value?.id) {
+    return { ...base, viewId: activeView.value.id }
+  }
+  const saved = savedViewForSelection.value
+  if (saved?.id) {
+    return { ...base, viewId: saved.id }
+  }
+  const obj = selectedCatalogObject.value
+  if (obj?.nodeType === 'object') {
+    return {
+      ...base,
+      sourceTable: obj.label,
+      sourcePkColumn: 'id',
+      blobColumns: (obj.blobColumns || []).map((c) => c.column),
+      sourceObjectType: obj.objectType === 'view' ? 'view' : 'table',
+    }
+  }
+  return { ...base, blobMode: 'placeholder' }
+})
+
+const sqlColumnMetaByName = computed(() => sqlColumnMetaMap(sqlResult.value?.column_meta))
+
 const sqlTableData = computed(() => {
   if (!sqlResult.value) return []
   return rowsToRecords(sqlResult.value.columns, sqlResult.value.rows)
@@ -171,6 +199,34 @@ const sqlTableData = computed(() => {
 const sqlPathColumn = computed(() => {
   if (!sqlResult.value) return null
   return findPathColumn(sqlResult.value.columns, sqlResult.value.rows)
+})
+
+function sqlIsPathColumn(colName) {
+  return Boolean(sqlColumnMetaByName.value[colName]?.is_path_substitute)
+}
+
+function sqlPathCell(row, colName) {
+  const value = row[colName]
+  if (isPathCellValue(value)) return value
+  return null
+}
+
+function sqlFormatCell(row, colName) {
+  return pathCellDisplay(row[colName])
+}
+
+const sqlSelectedPreviewItems = computed(() => {
+  const row = sqlSelectedRow.value
+  if (!row || !sqlResult.value) return []
+  return (sqlResult.value.columns || [])
+    .filter((col) => sqlIsPathColumn(col) || sqlPathCell(row, col))
+    .map((col) => {
+      const cell = sqlPathCell(row, col)
+      return cell?.image_info_id
+        ? { column: col, cell, title: cell.path || cell.display || col }
+        : null
+    })
+    .filter(Boolean)
 })
 
 function catalogNodeLabel(data) {
@@ -603,7 +659,7 @@ async function handleSqlValidate() {
   sqlValidating.value = true
   sqlError.value = ''
   try {
-    await validateSqlApi(sql, browseContext.value)
+    await validateSqlApi(sql, sqlSimulateContext.value)
     ElMessage.success('SQL 校验通过')
   } catch (err) {
     sqlError.value = err.message || '校验失败'
@@ -621,8 +677,9 @@ async function handleSqlExecute() {
   sqlExecuting.value = true
   sqlError.value = ''
   try {
-    const res = await executeSqlApi(sql, browseContext.value)
+    const res = await executeSqlApi(sql, sqlSimulateContext.value)
     sqlResult.value = res.data
+    sqlSelectedRow.value = sqlTableData.value[0] || null
   } catch (err) {
     sqlResult.value = null
     sqlError.value = err.message || '执行失败'
@@ -736,6 +793,10 @@ function rowPreviewCells(row) {
 
 function openPreview(pathCellValue, row) {
   if (!pathCellValue?.image_info_id) return
+  if (rightTab.value === 'sql') {
+    sqlSelectedRow.value = row
+    return
+  }
   selectPreviewRow(row, { focusPanel: true })
 }
 
@@ -1263,6 +1324,12 @@ onUnmounted(() => {
                 <span v-if="browseContext.database" class="field-hint inline-hint">
                   （库 {{ browseContext.database }}）
                 </span>
+                <el-tag v-if="sqlSimulateContext.viewId || sqlSimulateContext.sourceTable" size="small" type="success" class="sql-mode-tag">
+                  模拟表模式（BLOB→路径，可预览）
+                </el-tag>
+                <el-tag v-else size="small" type="info" class="sql-mode-tag">
+                  通用模式（BLOB 显示为占位符）
+                </el-tag>
               </div>
               <div class="sql-editor-wrap">
                 <SqlEditor v-model="sqlText" @execute="handleSqlExecute" />
@@ -1274,6 +1341,7 @@ onUnmounted(() => {
                 </el-button>
                 <span v-if="sqlResult" class="sql-meta">
                   {{ sqlResult.row_count }} 行 · {{ sqlResult.elapsed_ms }}ms
+                  <span v-if="sqlResult.simulated"> · 模拟表</span>
                   <span v-if="sqlResult.truncated">（已截断）</span>
                 </span>
               </div>
@@ -1284,22 +1352,67 @@ onUnmounted(() => {
                 size="small"
                 border
                 stripe
+                highlight-current-row
                 max-height="420"
                 class="sql-result-table"
+                @row-click="(row) => { sqlSelectedRow = row }"
               >
                 <el-table-column
                   v-for="col in sqlResult.columns"
                   :key="col"
                   :prop="col"
-                  :label="col"
-                  min-width="120"
+                  :label="sqlIsPathColumn(col) ? `${col}（路径）` : col"
+                  :min-width="sqlIsPathColumn(col) ? 200 : 120"
                   show-overflow-tooltip
                 >
                   <template #default="{ row }">
-                    {{ formatCellValue(row[col]) }}
+                    <template v-if="sqlIsPathColumn(col) || sqlPathCell(row, col)">
+                      <div class="path-cell">
+                        <el-tag
+                          :type="statusTagType(sqlPathCell(row, col)?.status)"
+                          size="small"
+                          class="path-tag"
+                        >
+                          {{ statusLabel(sqlPathCell(row, col)?.status) }}
+                        </el-tag>
+                        <span class="path-text">{{ sqlFormatCell(row, col) }}</span>
+                        <el-button
+                          v-if="sqlPathCell(row, col)?.image_info_id"
+                          link
+                          type="primary"
+                          size="small"
+                          @click.stop="openPreview(sqlPathCell(row, col), row)"
+                        >
+                          预览
+                        </el-button>
+                      </div>
+                    </template>
+                    <template v-else>
+                      {{ formatCellValue(row[col]) }}
+                    </template>
                   </template>
                 </el-table-column>
               </el-table>
+              <div v-if="sqlSelectedPreviewItems.length" class="row-preview-panel sql-preview-panel">
+                <div class="row-preview-head">
+                  <span>SQL 结果预览</span>
+                </div>
+                <div class="row-preview-strip">
+                  <div
+                    v-for="item in sqlSelectedPreviewItems"
+                    :key="item.column"
+                    class="row-preview-card"
+                  >
+                    <div class="row-preview-label">{{ item.column }}</div>
+                    <ImagePreview
+                      :image-id="item.cell.image_info_id"
+                      :image-path="item.cell.path"
+                      :size="120"
+                    />
+                    <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
+                  </div>
+                </div>
+              </div>
               <el-empty v-else-if="!sqlExecuting" description="执行 SELECT 后在此显示结果" />
             </el-tab-pane>
           </el-tabs>
@@ -1617,6 +1730,18 @@ onUnmounted(() => {
 .sql-context-bar {
   font-size: 13px;
   margin-bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sql-mode-tag {
+  margin-left: 4px;
+}
+
+.sql-preview-panel {
+  margin-top: 12px;
 }
 
 .sql-editor-wrap {

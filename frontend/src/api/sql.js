@@ -1,19 +1,25 @@
 import request from './request'
 
-export function executeSqlApi(sql, context = {}) {
-  const payload = { sql }
+function appendSimulateContext(payload, context = {}) {
   if (context.dbAlias) payload.db_alias = context.dbAlias
   if (context.connectionId != null) payload.connection_id = context.connectionId
   if (context.database) payload.database = context.database
-  return request.post('/sql/execute/', payload, { timeout: 60000 })
+  if (context.viewId != null) payload.view_id = context.viewId
+  if (context.sourceTable) payload.source_table = context.sourceTable
+  if (context.sourcePkColumn) payload.source_pk_column = context.sourcePkColumn
+  if (context.blobColumns?.length) payload.blob_columns = context.blobColumns
+  if (context.sourceObjectType) payload.source_object_type = context.sourceObjectType
+  if (context.pathLookupTable) payload.path_lookup_table = context.pathLookupTable
+  if (context.blobMode) payload.blob_mode = context.blobMode
+  return payload
+}
+
+export function executeSqlApi(sql, context = {}) {
+  return request.post('/sql/execute/', appendSimulateContext({ sql }, context), { timeout: 60000 })
 }
 
 export function validateSqlApi(sql, context = {}) {
-  const payload = { sql }
-  if (context.dbAlias) payload.db_alias = context.dbAlias
-  if (context.connectionId != null) payload.connection_id = context.connectionId
-  if (context.database) payload.database = context.database
-  return request.post('/sql/validate/', payload)
+  return request.post('/sql/validate/', appendSimulateContext({ sql }, context))
 }
 
 export function listSqlTemplatesApi() {
@@ -43,6 +49,17 @@ export function isImagePathValue(value) {
   const text = String(value).trim().replace(/\\/g, '/')
   if (!text.startsWith('upload/')) return false
   return IMAGE_EXT_PATTERN.test(text)
+}
+
+/** Path cell object from simulated SQL / table browse API. */
+export function isPathCellValue(value) {
+  return value != null && typeof value === 'object' && 'display' in value
+}
+
+export function pathCellDisplay(value) {
+  if (isPathCellValue(value)) return value.display || '—'
+  if (value == null) return '—'
+  return String(value)
 }
 
 /**
@@ -100,7 +117,16 @@ export function rowsToRecords(columns, rows) {
 }
 
 export function formatCellValue(value) {
-  if (value == null) return ''
+  if (value == null) return '—'
+  if (isPathCellValue(value)) return value.display || '—'
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
+}
+
+export function sqlColumnMetaMap(columnMeta = []) {
+  const map = {}
+  for (const item of columnMeta || []) {
+    if (item?.name) map[item.name] = item
+  }
+  return map
 }
