@@ -97,7 +97,7 @@ def _upload_workers() -> int:
 
     if connection.vendor == "sqlite":
         return 1
-    workers = int(getattr(settings, "BLOB_MIGRATION_UPLOAD_WORKERS", 2))
+    workers = int(getattr(settings, "BLOB_MIGRATION_UPLOAD_WORKERS", 3))
     return max(1, min(workers, 8))
 
 
