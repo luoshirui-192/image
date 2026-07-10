@@ -147,6 +147,7 @@ def ensure_migration_tables() -> None:
           `batch_size` int(10) UNSIGNED NOT NULL DEFAULT 50,
           `warm_thumbs_after` tinyint(4) NOT NULL DEFAULT 0,
           `cancel_requested` tinyint(4) NOT NULL DEFAULT 0,
+          `pause_requested` tinyint(4) NOT NULL DEFAULT 0,
           `total_estimate` int(10) UNSIGNED NOT NULL DEFAULT 0,
           `processed` int(10) UNSIGNED NOT NULL DEFAULT 0,
           `succeeded` int(10) UNSIGNED NOT NULL DEFAULT 0,
@@ -266,6 +267,13 @@ def ensure_blob_pr1_schema() -> None:
                     "ALTER TABLE `blob_migration_job_error` "
                     "ADD COLUMN `source_column` varchar(64) NOT NULL DEFAULT '' "
                     "COMMENT 'BLOB 列名' AFTER `source_pk`"
+                )
+
+            if not _mysql_column_exists(cursor, "blob_migration_job", "pause_requested"):
+                cursor.execute(
+                    "ALTER TABLE `blob_migration_job` "
+                    "ADD COLUMN `pause_requested` tinyint(4) NOT NULL DEFAULT 0 "
+                    "COMMENT '1=请求暂停' AFTER `cancel_requested`"
                 )
 
             cursor.execute(

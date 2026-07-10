@@ -110,6 +110,14 @@ def _job_cancelled(job_id: int) -> bool:
     return BlobMigrationJob.objects.filter(pk=job_id, cancel_requested=1).exists()
 
 
+def _job_pause_requested(job_id: int) -> bool:
+    return BlobMigrationJob.objects.filter(pk=job_id, pause_requested=1).exists()
+
+
+def _job_stop_requested(job_id: int) -> bool:
+    return _job_cancelled(job_id) or _job_pause_requested(job_id)
+
+
 def _record_job_error(
     job_id: int,
     *,
@@ -1192,7 +1200,7 @@ def _run_migration_batch_cursor(
 
         if workers <= 1:
             for row, col in work_units:
-                if job and _job_cancelled(job.id):
+                if job and _job_stop_requested(job.id):
                     break
                 item = _migrate_work_unit(
                     source, row, col, actor=actor, dry_run=dry_run, conn_alias=alias
@@ -1228,7 +1236,7 @@ def _run_migration_batch_cursor(
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {pool.submit(_task, row, col): (row, col) for row, col in work_units}
                 for future in as_completed(futures):
-                    if job and _job_cancelled(job.id):
+                    if job and _job_stop_requested(job.id):
                         break
                     item = future.result()
                     with lock:
@@ -1313,6 +1321,8 @@ def execute_migration_job_batches(job: BlobMigrationJob) -> None:
         job.refresh_from_db()
         if job.cancel_requested:
             return
+        if job.pause_requested:
+            return
 
         batch, _ = _run_migration_batch_cursor(
             source,
@@ -1358,6 +1368,8 @@ def retry_failed_rows_for_job(job: BlobMigrationJob) -> None:
         for err in errors:
             job.refresh_from_db()
             if job.cancel_requested:
+                break
+            if job.pause_requested:
                 break
 
             row = _fetch_source_row_by_pk(source, err.source_pk)

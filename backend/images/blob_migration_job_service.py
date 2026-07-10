@@ -108,11 +108,16 @@ def create_migration_job(
 
 def cancel_migration_job(job_id: int) -> BlobMigrationJob:
     job = _load_job(job_id)
-    if job.status in {BlobMigrationJob.STATUS_COMPLETED, BlobMigrationJob.STATUS_FAILED, BlobMigrationJob.STATUS_CANCELLED}:
+    if job.status in {
+        BlobMigrationJob.STATUS_COMPLETED,
+        BlobMigrationJob.STATUS_FAILED,
+        BlobMigrationJob.STATUS_CANCELLED,
+    }:
         raise JobServiceError("任务已结束，无法取消")
     now = timezone.now()
     BlobMigrationJob.objects.filter(pk=job.pk).update(
         cancel_requested=1,
+        pause_requested=0,
         status=BlobMigrationJob.STATUS_CANCELLED,
         finished_at=now,
         message="用户请求取消",
@@ -120,6 +125,76 @@ def cancel_migration_job(job_id: int) -> BlobMigrationJob:
     )
     job.refresh_from_db()
     return job
+
+
+def _pause_completion_message(job: BlobMigrationJob) -> str:
+    succeeded = int(job.succeeded or 0)
+    skipped = int(job.skipped or 0)
+    failed = int(job.failed or 0)
+    handled = succeeded + skipped + failed
+    return (
+        f"已暂停（已处理 {handled}：成功 {succeeded} · 跳过 {skipped} · 失败 {failed}）"
+    )
+
+
+def pause_migration_job(job_id: int) -> BlobMigrationJob:
+    job = _load_job(job_id)
+    if job.status not in {BlobMigrationJob.STATUS_PENDING, BlobMigrationJob.STATUS_RUNNING}:
+        raise JobServiceError("只能暂停排队中或进行中的任务")
+    now = timezone.now()
+    if job.status == BlobMigrationJob.STATUS_PENDING:
+        BlobMigrationJob.objects.filter(pk=job.pk).update(
+            status=BlobMigrationJob.STATUS_PAUSED,
+            pause_requested=0,
+            cancel_requested=0,
+            message="已暂停（尚未开始）",
+            updated_at=now,
+        )
+    else:
+        BlobMigrationJob.objects.filter(pk=job.pk).update(
+            pause_requested=1,
+            cancel_requested=0,
+            message="正在暂停…",
+            updated_at=now,
+        )
+    job.refresh_from_db()
+    return job
+
+
+def resume_migration_job(job_id: int) -> BlobMigrationJob:
+    job = _load_job(job_id)
+    if job.status != BlobMigrationJob.STATUS_PAUSED:
+        raise JobServiceError("只能继续已暂停的任务")
+    _assert_no_active_job(job.source_id, exclude_job_id=job.id)
+    now = timezone.now()
+    BlobMigrationJob.objects.filter(pk=job.pk).update(
+        status=BlobMigrationJob.STATUS_PENDING,
+        pause_requested=0,
+        cancel_requested=0,
+        message="已排队，等待继续…",
+        updated_at=now,
+    )
+    job.refresh_from_db()
+    return job
+
+
+def reclaim_orphaned_migration_jobs(*, reason: str = "服务重启，已自动暂停") -> int:
+    """Mark running jobs as paused after container restart (worker thread is gone)."""
+    now = timezone.now()
+    running = list(
+        BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_RUNNING).only("id", "succeeded", "skipped", "failed")
+    )
+    if not running:
+        return 0
+    for job in running:
+        BlobMigrationJob.objects.filter(pk=job.pk).update(
+            status=BlobMigrationJob.STATUS_PAUSED,
+            pause_requested=0,
+            cancel_requested=0,
+            message=f"{reason}；{_pause_completion_message(job)}"[:500],
+            updated_at=now,
+        )
+    return len(running)
 
 
 def delete_migration_job(job_id: int) -> None:
@@ -226,6 +301,7 @@ def serialize_migration_job(
         "batch_size": job.batch_size,
         "warm_thumbs_after": bool(job.warm_thumbs_after),
         "cancel_requested": bool(job.cancel_requested),
+        "pause_requested": bool(job.pause_requested),
         "total_estimate": job.total_estimate,
         "progress_count": progress_count,
         "processed": job.processed,
@@ -493,6 +569,14 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
                 status=BlobMigrationJob.STATUS_CANCELLED,
                 finished_at=timezone.now(),
                 message=job.message or "已取消",
+                updated_at=timezone.now(),
+            )
+        elif job.pause_requested or job.status == BlobMigrationJob.STATUS_PAUSED:
+            job.refresh_from_db()
+            BlobMigrationJob.objects.filter(pk=job.pk).update(
+                status=BlobMigrationJob.STATUS_PAUSED,
+                pause_requested=0,
+                message=_pause_completion_message(job),
                 updated_at=timezone.now(),
             )
         elif job.status == BlobMigrationJob.STATUS_RUNNING:

@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS blob_migration_job (
     batch_size INTEGER NOT NULL DEFAULT 50,
     warm_thumbs_after SMALLINT NOT NULL DEFAULT 0,
     cancel_requested SMALLINT NOT NULL DEFAULT 0,
+    pause_requested SMALLINT NOT NULL DEFAULT 0,
     total_estimate INTEGER NOT NULL DEFAULT 0,
     processed INTEGER NOT NULL DEFAULT 0,
     succeeded INTEGER NOT NULL DEFAULT 0,
@@ -551,6 +552,46 @@ class BlobMigrationTestCase(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["data"]["status"], "cancelled")
         self.assertTrue(res.json()["data"]["cancel_requested"])
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_api_pause_and_resume_pending_job(self):
+        self.client.force_authenticate(user=self.admin)
+        job = create_migration_job(
+            source_id=self.source.id,
+            created_by="blob_admin",
+            batch_size=10,
+            run_all=True,
+        )
+        pause_res = self.client.post(f"/api/images/blob-migration/jobs/{job.id}/pause/")
+        self.assertEqual(pause_res.status_code, 200)
+        self.assertEqual(pause_res.json()["data"]["status"], "paused")
+
+        resume_res = self.client.post(f"/api/images/blob-migration/jobs/{job.id}/resume/")
+        self.assertEqual(resume_res.status_code, 200)
+        self.assertEqual(resume_res.json()["data"]["status"], "pending")
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_reclaim_orphaned_running_job(self):
+        from images.blob_migration_job_service import reclaim_orphaned_migration_jobs
+
+        job = create_migration_job(
+            source_id=self.source.id,
+            created_by="blob_admin",
+            batch_size=10,
+            run_all=True,
+        )
+        BlobMigrationJob.objects.filter(pk=job.id).update(
+            status=BlobMigrationJob.STATUS_RUNNING,
+            succeeded=10,
+            skipped=2,
+            processed=12,
+        )
+        count = reclaim_orphaned_migration_jobs(reason="测试重启")
+        self.assertEqual(count, 1)
+        job.refresh_from_db()
+        self.assertEqual(job.status, BlobMigrationJob.STATUS_PAUSED)
+        self.assertIn("测试重启", job.message)
+        self.assertIn("已暂停", job.message)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_api_delete_finished_job(self):

@@ -172,6 +172,14 @@ export function cancelBlobMigrationJobApi(jobId) {
   return request.post(`/images/blob-migration/jobs/${jobId}/cancel/`)
 }
 
+export function pauseBlobMigrationJobApi(jobId) {
+  return request.post(`/images/blob-migration/jobs/${jobId}/pause/`)
+}
+
+export function resumeBlobMigrationJobApi(jobId) {
+  return request.post(`/images/blob-migration/jobs/${jobId}/resume/`)
+}
+
 export function retryBlobMigrationJobApi({ parentJobId, batchSize = 50, dryRun = false, warmThumbsAfter = true }) {
   return request.post('/images/blob-migration/jobs/retry/', {
     parent_job_id: parentJobId,

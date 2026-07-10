@@ -167,6 +167,7 @@ class ExternalDbConnection(models.Model):
 class BlobMigrationJob(models.Model):
     STATUS_PENDING = "pending"
     STATUS_RUNNING = "running"
+    STATUS_PAUSED = "paused"
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
     STATUS_CANCELLED = "cancelled"
@@ -181,6 +182,7 @@ class BlobMigrationJob(models.Model):
     batch_size = models.PositiveIntegerField(default=50)
     warm_thumbs_after = models.SmallIntegerField(default=0)
     cancel_requested = models.SmallIntegerField(default=0)
+    pause_requested = models.SmallIntegerField(default=0)
     total_estimate = models.PositiveIntegerField(default=0)
     processed = models.PositiveIntegerField(default=0)
     succeeded = models.PositiveIntegerField(default=0)

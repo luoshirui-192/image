@@ -11,6 +11,8 @@ import {
   createExternalDbConnectionApi,
   createBlobMigrationJobApi,
   cancelBlobMigrationJobApi,
+  pauseBlobMigrationJobApi,
+  resumeBlobMigrationJobApi,
   clearBlobMigrationJobHistoryApi,
   deleteBlobMigrationJobApi,
   deleteBlobMigrationSourceApi,
@@ -439,6 +441,7 @@ function jobStatusLabel(status) {
   const labels = {
     pending: '排队中',
     running: '进行中',
+    paused: '已暂停',
     completed: '已完成',
     failed: '失败',
     cancelled: '已取消',
@@ -542,6 +545,12 @@ async function refreshActiveJob(jobId) {
     const res = await getBlobMigrationJobApi(jobId)
     if (seq !== jobRefreshSeq.value || !res?.data) return
     setActiveJob(res.data)
+    if (res.data.status === 'paused') {
+      stopJobPolling()
+      running.value = false
+      await loadJobHistoryList()
+      return
+    }
     if (['completed', 'failed', 'cancelled'].includes(res.data.status)) {
       stopJobPolling()
       running.value = false
@@ -602,7 +611,7 @@ async function startFullMigration() {
       warmThumbsAfter: runOptions.warmThumbsAfter,
     })
     setActiveJob(res.data)
-    ElMessage.success(res.message || '全量迁移任务已创建')
+    ElMessage.success(res.message || '全量迁移任务已创建，scheduler 约 10 秒内开始')
     startJobPolling(res.data.id)
     await loadJobHistory()
   } catch (err) {
@@ -622,6 +631,36 @@ async function cancelActiveJob() {
     await loadJobHistory()
   } catch (err) {
     ElMessage.error(err.message || '取消失败')
+  }
+}
+
+async function pauseActiveJob() {
+  if (!activeJob.value?.id) return
+  try {
+    const res = await pauseBlobMigrationJobApi(activeJob.value.id)
+    setActiveJob(res.data)
+    if (res.data.status === 'paused') {
+      stopJobPolling()
+      running.value = false
+    }
+    ElMessage.success(res.message || '已请求暂停')
+    await loadJobHistory()
+  } catch (err) {
+    ElMessage.error(err.message || '暂停失败')
+  }
+}
+
+async function resumePausedJob(job) {
+  if (!job?.id) return
+  try {
+    const res = await resumeBlobMigrationJobApi(job.id)
+    setActiveJob(res.data)
+    running.value = true
+    ElMessage.success(res.message || '已排队，scheduler 将继续执行')
+    startJobPolling(job.id)
+    await loadJobHistory()
+  } catch (err) {
+    ElMessage.error(err.message || '继续失败')
   }
 }
 
@@ -718,6 +757,15 @@ const jobInProgress = computed(
     ['pending', 'running'].includes(activeJob.value.status) &&
     !activeJob.value.cancel_requested,
 )
+
+const jobCanPause = computed(
+  () =>
+    activeJob.value &&
+    ['pending', 'running'].includes(activeJob.value.status) &&
+    !activeJob.value.pause_requested,
+)
+
+const jobIsPaused = computed(() => activeJob.value?.status === 'paused')
 
 const clearableJobCount = computed(() => jobHistory.value.length)
 
@@ -1160,7 +1208,9 @@ onUnmounted(() => {
               <el-icon><Refresh /></el-icon>
               开始全量迁移
             </el-button>
-            <el-button v-if="jobInProgress" type="warning" plain @click="cancelActiveJob">取消</el-button>
+            <el-button v-if="jobCanPause" type="warning" plain @click="pauseActiveJob">暂停</el-button>
+            <el-button v-if="jobInProgress" type="danger" plain @click="cancelActiveJob">取消</el-button>
+            <el-button v-if="jobIsPaused" type="primary" @click="resumePausedJob(displayJob)">继续迁移</el-button>
           </el-form-item>
         </el-form>
 
@@ -1187,7 +1237,10 @@ onUnmounted(() => {
             {{ formatLiveProgress(displayJob) }}
           </p>
           <p v-if="jobInProgress" class="job-message field-hint">
-            任务开始后会先统计待迁移数量（仅影响进度条），再按游标批次迁移；大表首批可能较慢。
+            任务由 scheduler 执行；更新部署前请先点「暂停」。首批可能较慢（预取 BLOB 期间进度暂不动）。
+          </p>
+          <p v-else-if="jobIsPaused" class="job-message field-hint">
+            任务已暂停，可安全更新 backend/scheduler，完成后点「继续迁移」。
           </p>
           <p v-else-if="displayJob.message" class="job-message">{{ displayJob.message }}</p>
           <div v-if="displayJob.recent_errors?.length && jobHasFailedRows(displayJob)" class="job-errors">
@@ -1195,8 +1248,11 @@ onUnmounted(() => {
               {{ err.source_pk }}: {{ err.error }}
             </div>
           </div>
-          <div v-if="jobNeedsRetry(displayJob) && !jobInProgress" class="job-actions">
-            <el-button size="small" type="primary" @click="retryFailedJob(displayJob)">
+          <div v-if="(jobNeedsRetry(displayJob) || jobIsPaused) && !jobInProgress" class="job-actions">
+            <el-button v-if="jobIsPaused" size="small" type="primary" @click="resumePausedJob(displayJob)">
+              继续迁移
+            </el-button>
+            <el-button v-else size="small" type="primary" @click="retryFailedJob(displayJob)">
               {{ jobHasFailedRows(displayJob) ? '重试失败项' : '继续迁移待处理项' }}
             </el-button>
             <el-button v-if="jobHasFailedRows(displayJob)" size="small" @click="downloadJobErrors(displayJob)">导出错误 CSV</el-button>
@@ -1248,7 +1304,8 @@ onUnmounted(() => {
           <el-table-column label="操作" width="220">
             <template #default="{ row }">
               <el-button link type="primary" @click="viewJob(row)">查看</el-button>
-              <el-button v-if="jobNeedsRetry(row)" link type="primary" @click="retryFailedJob(row)">
+              <el-button v-if="row.status === 'paused'" link type="primary" @click="resumePausedJob(row)">继续</el-button>
+              <el-button v-else-if="jobNeedsRetry(row)" link type="primary" @click="retryFailedJob(row)">
                 {{ jobHasFailedRows(row) ? '重试失败' : '继续迁移' }}
               </el-button>
               <el-button link type="danger" @click="removeJob(row)">删除</el-button>

@@ -42,6 +42,9 @@ print("[scheduler] database not ready", file=sys.stderr)
 sys.exit(1)
 PY
 
+echo "==> reclaim orphaned migration jobs"
+python manage.py reclaim_blob_migration_jobs || true
+
 run_maintenance() {
   echo "==> $(date -Iseconds) run_scheduled_maintenance"
   python manage.py run_scheduled_maintenance

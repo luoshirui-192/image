@@ -22,6 +22,8 @@ from images.blob_migration_views import (
     BlobMigrationJobDetailView,
     BlobMigrationJobErrorsExportView,
     BlobMigrationJobListCreateView,
+    BlobMigrationJobPauseView,
+    BlobMigrationJobResumeView,
     BlobMigrationJobRetryView,
     BlobMigrationRunView,
     BlobMigrationSourceDetailView,
@@ -57,6 +59,8 @@ urlpatterns = [
     path("blob-migration/jobs/clear/", BlobMigrationJobClearView.as_view(), name="blob-migration-jobs-clear"),
     path("blob-migration/jobs/<int:pk>/", BlobMigrationJobDetailView.as_view(), name="blob-migration-job-detail"),
     path("blob-migration/jobs/<int:pk>/cancel/", BlobMigrationJobCancelView.as_view(), name="blob-migration-job-cancel"),
+    path("blob-migration/jobs/<int:pk>/pause/", BlobMigrationJobPauseView.as_view(), name="blob-migration-job-pause"),
+    path("blob-migration/jobs/<int:pk>/resume/", BlobMigrationJobResumeView.as_view(), name="blob-migration-job-resume"),
     path(
         "blob-migration/jobs/<int:pk>/errors/export/",
         BlobMigrationJobErrorsExportView.as_view(),

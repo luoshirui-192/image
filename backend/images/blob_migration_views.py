@@ -13,8 +13,9 @@ from images.blob_migration_job_service import (
     create_migration_job,
     delete_migration_job,
     export_job_errors_csv,
-    kick_migration_job_async,
     list_migration_jobs,
+    pause_migration_job,
+    resume_migration_job,
     serialize_migration_job,
 )
 from images.blob_migration_service import (
@@ -268,10 +269,9 @@ class BlobMigrationJobListCreateView(APIView):
             "blob_migration_job",
             detail=f"job_id={job.id} source_id={job.source_id} run_all={job.run_all}",
         )
-        kick_migration_job_async(job.id)
         return success_response(
             serialize_migration_job(job),
-            message="迁移任务已创建，正在后台执行",
+            message="迁移任务已创建，scheduler 将自动开始（约 10 秒内）",
             status=201,
         )
 
@@ -333,6 +333,37 @@ class BlobMigrationJobCancelView(APIView):
         return success_response(serialize_migration_job(job), message="已请求取消")
 
 
+@extend_schema(tags=["blob-migration"])
+class BlobMigrationJobPauseView(APIView):
+    """POST /api/images/blob-migration/jobs/{id}/pause/"""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def post(self, request, pk: int):
+        try:
+            job = pause_migration_job(pk)
+        except JobServiceError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        write_operate_log(request, "blob_migration_job_pause", detail=f"job_id={job.id}")
+        message = "已暂停" if job.status == BlobMigrationJob.STATUS_PAUSED else "正在暂停…"
+        return success_response(serialize_migration_job(job), message=message)
+
+
+@extend_schema(tags=["blob-migration"])
+class BlobMigrationJobResumeView(APIView):
+    """POST /api/images/blob-migration/jobs/{id}/resume/"""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def post(self, request, pk: int):
+        try:
+            job = resume_migration_job(pk)
+        except JobServiceError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        write_operate_log(request, "blob_migration_job_resume", detail=f"job_id={job.id}")
+        return success_response(serialize_migration_job(job), message="已排队，scheduler 将继续执行")
+
+
 @extend_schema(tags=["blob-migration"], request=BlobMigrationJobRetrySerializer)
 class BlobMigrationJobRetryView(APIView):
     """POST /api/images/blob-migration/jobs/retry/ — retry failed rows from a prior job."""
@@ -366,8 +397,7 @@ class BlobMigrationJobRetryView(APIView):
             "blob_migration_job_retry",
             detail=f"job_id={job.id} parent={parent.id}",
         )
-        kick_migration_job_async(job.id)
-        return success_response(serialize_migration_job(job), message="重试任务已创建，正在后台执行", status=201)
+        return success_response(serialize_migration_job(job), message="重试任务已创建，scheduler 将自动开始", status=201)
 
 
 @extend_schema(tags=["blob-migration"])
