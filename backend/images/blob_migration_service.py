@@ -86,6 +86,12 @@ class MigrationRunResult:
     items: list[MigrationItemResult] = field(default_factory=list)
 
 
+def _close_worker_connections() -> None:
+    """Release Django default and dynamically registered external DB connections."""
+    close_old_connections()
+    connections.close_all()
+
+
 def _upload_workers() -> int:
     from django.db import connection
 
@@ -520,6 +526,8 @@ def _fetch_blob_from_lookup_table(
     source: BlobMigrationSource,
     mapping: dict[str, str],
     row: dict,
+    *,
+    conn_alias: str | None = None,
 ) -> bytes | None:
     """Read BLOB bytes from the mapped base table when the view column is NULL."""
     lookup_table = (mapping.get("lookup_table") or "").strip()
@@ -538,24 +546,36 @@ def _fetch_blob_from_lookup_table(
     blob = _quote_ident(blob_col)
     id_col = _quote_ident(lookup_id_col)
     sql = f"SELECT {blob} FROM {table} WHERE {id_col} = %s LIMIT 1"
-    with _source_db_session(source) as alias:
-        conn = _remote_connection(alias)
+
+    def _read(conn) -> bytes | None:
         with conn.cursor() as cursor:
             cursor.execute(sql, [lookup_id_val])
             raw = cursor.fetchone()
-    if not raw:
-        return None
-    return _coerce_blob(raw[0])
+        if not raw:
+            return None
+        return _coerce_blob(raw[0])
+
+    if conn_alias:
+        return _read(_remote_connection(conn_alias))
+
+    with _source_db_session(source) as alias:
+        return _read(_remote_connection(alias))
 
 
-def _blob_bytes_for_column(source: BlobMigrationSource, row: dict, blob_column: str) -> bytes | None:
+def _blob_bytes_for_column(
+    source: BlobMigrationSource,
+    row: dict,
+    blob_column: str,
+    *,
+    conn_alias: str | None = None,
+) -> bytes | None:
     content = _coerce_blob(row.get(blob_column))
     if content:
         return content
     mapping = _mapping_for_column(source, blob_column)
     if not mapping:
         return None
-    return _fetch_blob_from_lookup_table(source, mapping, row)
+    return _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
 
 
 def _validate_source_config(source: BlobMigrationSource) -> None:
@@ -784,59 +804,63 @@ def _prepare_migration_batch(
     after_pk: str,
     batch_size: int,
     skip_existing: bool,
+    conn_alias: str | None = None,
 ) -> _PreparedMigrationBatch:
     """Two-phase batch prep: scan PKs first, bulk-check maps, fetch BLOB only when needed."""
     pk_col = source.source_pk_column
 
-    with _source_db_session(source) as alias:
+    def _load_batch(alias: str) -> _PreparedMigrationBatch:
         light_rows = _fetch_source_pks_cursor(source, conn_alias=alias, after_pk=after_pk, limit=batch_size)
+        if not light_rows:
+            return _PreparedMigrationBatch(rows_fetched=0, last_pk=after_pk, blob_rows=[], pre_skipped=[])
 
-    if not light_rows:
-        return _PreparedMigrationBatch(rows_fetched=0, last_pk=after_pk, blob_rows=[], pre_skipped=[])
+        last_pk = str(light_rows[-1][pk_col])
+        pk_values = [str(row[pk_col]) for row in light_rows]
+        pre_skipped: list[MigrationItemResult] = []
 
-    last_pk = str(light_rows[-1][pk_col])
-    pk_values = [str(row[pk_col]) for row in light_rows]
-    pre_skipped: list[MigrationItemResult] = []
-
-    if not skip_existing:
-        with _source_db_session(source) as alias:
+        if not skip_existing:
             blob_rows = _fetch_source_rows_by_pks(source, pk_values, conn_alias=alias)
+            return _PreparedMigrationBatch(
+                rows_fetched=len(light_rows),
+                last_pk=last_pk,
+                blob_rows=blob_rows,
+                pre_skipped=pre_skipped,
+            )
+
+        map_ctx = _MigrationBatchContext.load(source, light_rows)
+        pks_needing_blob: list[str] = []
+        for light in light_rows:
+            source_id_str = str(light[pk_col])
+            needs_blob = False
+            for col in map_ctx.blob_columns:
+                if map_ctx.is_row_column_migrated(source, light, col):
+                    pre_skipped.append(
+                        MigrationItemResult(
+                            source_id=source_id_str,
+                            source_column=col,
+                            success=True,
+                            skipped=True,
+                        )
+                    )
+                else:
+                    needs_blob = True
+            if needs_blob:
+                pks_needing_blob.append(source_id_str)
+
+        blob_rows = _fetch_source_rows_by_pks(source, pks_needing_blob, conn_alias=alias)
         return _PreparedMigrationBatch(
             rows_fetched=len(light_rows),
             last_pk=last_pk,
             blob_rows=blob_rows,
             pre_skipped=pre_skipped,
+            map_ctx=map_ctx,
         )
 
-    map_ctx = _MigrationBatchContext.load(source, light_rows)
-    pks_needing_blob: list[str] = []
-    for light in light_rows:
-        source_id_str = str(light[pk_col])
-        needs_blob = False
-        for col in map_ctx.blob_columns:
-            if map_ctx.is_row_column_migrated(source, light, col):
-                pre_skipped.append(
-                    MigrationItemResult(
-                        source_id=source_id_str,
-                        source_column=col,
-                        success=True,
-                        skipped=True,
-                    )
-                )
-            else:
-                needs_blob = True
-        if needs_blob:
-            pks_needing_blob.append(source_id_str)
+    if conn_alias:
+        return _load_batch(conn_alias)
 
     with _source_db_session(source) as alias:
-        blob_rows = _fetch_source_rows_by_pks(source, pks_needing_blob, conn_alias=alias)
-    return _PreparedMigrationBatch(
-        rows_fetched=len(light_rows),
-        last_pk=last_pk,
-        blob_rows=blob_rows,
-        pre_skipped=pre_skipped,
-        map_ctx=map_ctx,
-    )
+        return _load_batch(alias)
 
 
 def _fetch_source_rows_cursor(
@@ -913,6 +937,8 @@ def _migrate_single_column(
     actor: str,
     dry_run: bool,
     skip_existing: bool,
+    conn_alias: str | None = None,
+    content: bytes | None = None,
 ) -> MigrationItemResult:
     pk_col = source.source_pk_column
     row_pk = str(row[pk_col])
@@ -927,7 +953,8 @@ def _migrate_single_column(
         )
 
     try:
-        content = _blob_bytes_for_column(source, row, blob_column)
+        if content is None:
+            content = _blob_bytes_for_column(source, row, blob_column, conn_alias=conn_alias)
         if not content:
             return MigrationItemResult(
                 source_id=row_pk,
@@ -1043,6 +1070,8 @@ def _migrate_work_unit(
     *,
     actor: str,
     dry_run: bool,
+    conn_alias: str | None = None,
+    content: bytes | None = None,
 ) -> MigrationItemResult:
     return _migrate_single_column(
         source,
@@ -1051,6 +1080,8 @@ def _migrate_work_unit(
         actor=actor,
         dry_run=dry_run,
         skip_existing=False,
+        conn_alias=conn_alias,
+        content=content,
     )
 
 
@@ -1125,69 +1156,88 @@ def _run_migration_batch_cursor(
     batch = MigrationBatchResult()
     items: list[MigrationItemResult] = []
 
-    prepared = _prepare_migration_batch(
-        source,
-        after_pk=after_pk,
-        batch_size=batch_size,
-        skip_existing=skip_existing,
-    )
-    batch.rows_fetched = prepared.rows_fetched
-    if not prepared.rows_fetched:
-        return batch, items
+    with _source_db_session(source) as alias:
+        prepared = _prepare_migration_batch(
+            source,
+            after_pk=after_pk,
+            batch_size=batch_size,
+            skip_existing=skip_existing,
+            conn_alias=alias,
+        )
+        batch.rows_fetched = prepared.rows_fetched
+        if not prepared.rows_fetched:
+            return batch, items
 
-    batch.last_pk = prepared.last_pk
-    for item in prepared.pre_skipped:
-        _record_batch_item(batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap)
-
-    # Flush pre-skipped counts early so the UI moves before BLOB I/O starts.
-    if job and batch.processed:
-        _update_job_progress(job, batch, last_pk=prepared.last_pk)
-        batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
-
-    work_units = _build_work_units(
-        source,
-        prepared.blob_rows,
-        skip_existing=skip_existing,
-        map_ctx=prepared.map_ctx,
-    )
-    if not work_units:
-        return batch, items
-
-    workers = 1 if dry_run else _upload_workers()
-    flush_every = 5
-
-    if workers <= 1:
-        for row, col in work_units:
-            if job and _job_cancelled(job.id):
-                break
-            item = _migrate_work_unit(source, row, col, actor=actor, dry_run=dry_run)
+        batch.last_pk = prepared.last_pk
+        for item in prepared.pre_skipped:
             _record_batch_item(batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap)
-            if job and batch.processed >= flush_every:
-                _update_job_progress(job, batch, last_pk=prepared.last_pk)
-                batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
-    else:
-        lock = Lock()
 
-        def _task(row: dict, col: str) -> MigrationItemResult:
-            close_old_connections()
-            try:
-                return _migrate_work_unit(source, row, col, actor=actor, dry_run=dry_run)
-            finally:
-                close_old_connections()
+        # Flush pre-skipped counts early so the UI moves before BLOB I/O starts.
+        if job and batch.processed:
+            _update_job_progress(job, batch, last_pk=prepared.last_pk)
+            batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_task, row, col): (row, col) for row, col in work_units}
-            for future in as_completed(futures):
+        work_units = _build_work_units(
+            source,
+            prepared.blob_rows,
+            skip_existing=skip_existing,
+            map_ctx=prepared.map_ctx,
+        )
+        if not work_units:
+            return batch, items
+
+        workers = 1 if dry_run else _upload_workers()
+        flush_every = 5
+        pk_col = source.source_pk_column
+
+        if workers <= 1:
+            for row, col in work_units:
                 if job and _job_cancelled(job.id):
                     break
-                item = future.result()
-                with lock:
-                    _record_batch_item(
-                        batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap
+                item = _migrate_work_unit(
+                    source, row, col, actor=actor, dry_run=dry_run, conn_alias=alias
+                )
+                _record_batch_item(batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap)
+                if job and batch.processed >= flush_every:
+                    _update_job_progress(job, batch, last_pk=prepared.last_pk)
+                    batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
+        else:
+            blob_cache: dict[tuple[str, str], bytes | None] = {}
+            for row, col in work_units:
+                key = (str(row[pk_col]), col)
+                if key not in blob_cache:
+                    blob_cache[key] = _blob_bytes_for_column(source, row, col, conn_alias=alias)
+
+            lock = Lock()
+
+            def _task(row: dict, col: str) -> MigrationItemResult:
+                _close_worker_connections()
+                try:
+                    key = (str(row[pk_col]), col)
+                    return _migrate_work_unit(
+                        source,
+                        row,
+                        col,
+                        actor=actor,
+                        dry_run=dry_run,
+                        content=blob_cache.get(key),
                     )
-                    if job and batch.processed >= flush_every:
-                        _update_job_progress(job, batch, last_pk=prepared.last_pk)
-                        batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
+                finally:
+                    _close_worker_connections()
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_task, row, col): (row, col) for row, col in work_units}
+                for future in as_completed(futures):
+                    if job and _job_cancelled(job.id):
+                        break
+                    item = future.result()
+                    with lock:
+                        _record_batch_item(
+                            batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap
+                        )
+                        if job and batch.processed >= flush_every:
+                            _update_job_progress(job, batch, last_pk=prepared.last_pk)
+                            batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
 
     return batch, items
 
