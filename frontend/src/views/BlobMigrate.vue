@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { callWithRetry } from '@/utils/callWithRetry'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Connection, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import {
@@ -109,7 +110,7 @@ function dbOptionLabel(db) {
 
 async function loadConnections() {
   try {
-    const res = await listExternalDbConnectionsApi()
+    const res = await callWithRetry(() => listExternalDbConnectionsApi())
     connections.value = res.data || []
   } catch {
     connections.value = []
@@ -118,7 +119,7 @@ async function loadConnections() {
 
 async function loadDatabases() {
   try {
-    const res = await listBlobMigrationDatabasesApi()
+    const res = await callWithRetry(() => listBlobMigrationDatabasesApi())
     databases.value = res.data || []
     if (!databases.value.some((d) => d.alias === form.dbAlias) && databases.value.length) {
       form.dbAlias = databases.value[0].alias
@@ -214,7 +215,7 @@ function useConnection(row) {
 
 async function loadCategories() {
   try {
-    const res = await listCategoriesApi()
+    const res = await callWithRetry(() => listCategoriesApi())
     categories.value = res.data || []
   } catch {
     categories.value = []
@@ -223,13 +224,11 @@ async function loadCategories() {
 
 async function loadSources() {
   try {
-    const res = await listBlobMigrationSourcesApi({ includeStats: false })
+    const res = await callWithRetry(() => listBlobMigrationSourcesApi({ includeStats: false }))
     sources.value = res.data || []
     if (!runOptions.sourceId && sources.value.length) {
       runOptions.sourceId = sources.value[0].id
     }
-    // Do NOT fan-out per-source COUNT queries here — that saturates gunicorn workers
-    // and freezes the whole site on large remote tables.
   } catch (err) {
     sources.value = []
     ElMessage.error(err.message || '加载迁移配置失败')
@@ -379,7 +378,7 @@ async function removeSource(id) {
 
 async function loadJobHistoryList() {
   try {
-    const res = await listBlobMigrationJobsApi()
+    const res = await callWithRetry(() => listBlobMigrationJobsApi())
     jobHistory.value = res.data || []
   } catch {
     jobHistory.value = []

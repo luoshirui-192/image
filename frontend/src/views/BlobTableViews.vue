@@ -32,6 +32,8 @@ import {
   validateSqlApi,
 } from '@/api/sql'
 import { highlightAndScrollTableRow } from '@/utils/tableScroll'
+import { callWithRetry } from '@/utils/callWithRetry'
+import { readBrowseUiState, writeBrowseUiState } from '@/utils/browseUiState'
 
 const route = useRoute()
 
@@ -95,7 +97,7 @@ let previewWheelLocked = false
 
 const loadingCatalog = ref(false)
 const selectedCatalogObject = ref(null)
-const viewsVersion = ref(0)
+const pendingRestorePk = ref('')
 
 const rightTab = ref('browse')
 
@@ -297,7 +299,7 @@ async function loadCatalogTree(root, resolve) {
   loadingCatalog.value = true
   try {
     if (root.level === 0) {
-      const res = await listBlobCatalogConnectionsApi()
+      const res = await callWithRetry(() => listBlobCatalogConnectionsApi())
       const items = res.data || []
       resolve(
         items.map((conn) => ({
@@ -317,7 +319,7 @@ async function loadCatalogTree(root, resolve) {
       const params = conn.connection_id != null
         ? { connectionId: conn.connection_id }
         : { dbAlias: conn.alias }
-      const res = await listBlobCatalogDatabasesApi(params)
+      const res = await callWithRetry(() => listBlobCatalogDatabasesApi(params))
       resolve(
         (res.data?.databases || []).map((db) => ({
           id: `db:${conn.alias}:${db.name}`,
@@ -338,7 +340,7 @@ async function loadCatalogTree(root, resolve) {
         database: data.database,
         ...(conn.connection_id != null ? { connectionId: conn.connection_id } : { dbAlias: conn.alias }),
       }
-      const res = await listBlobCatalogObjectsApi(params)
+      const res = await callWithRetry(() => listBlobCatalogObjectsApi(params))
       resolve(
         (res.data?.objects || []).map((obj) => ({
           id: `obj:${conn.alias}:${data.database}:${obj.name}`,
@@ -367,6 +369,7 @@ function onCatalogNodeClick(data) {
   if (data.nodeType === 'database') {
     selectedCatalogObject.value = null
     activeViewId.value = null
+    persistBrowseUiState()
     return
   }
   if (data.nodeType !== 'object') return
@@ -379,11 +382,12 @@ function onCatalogNodeClick(data) {
   } else {
     activeViewId.value = null
   }
+  persistBrowseUiState()
 }
 
 async function loadMigrationSources() {
   try {
-    const res = await listBlobMigrationSourcesApi({ includeStats: false })
+    const res = await callWithRetry(() => listBlobMigrationSourcesApi({ includeStats: false }))
     migrationSources.value = res.data || []
   } catch {
     migrationSources.value = []
@@ -711,6 +715,7 @@ function autoSelectFirstRow() {
 function selectPreviewRow(row, { focusPanel = false } = {}) {
   selectedRow.value = row
   syncTableCurrentRow(row)
+  persistBrowseUiState()
   if (focusPanel) {
     nextTick(() => rowPreviewPanelRef.value?.focus())
   }
@@ -870,12 +875,48 @@ function unbindTableScroll() {
   }
 }
 
+function persistBrowseUiState() {
+  writeBrowseUiState({
+    activeViewId: activeViewId.value,
+    rightTab: rightTab.value,
+    selectedPk: rowIdentityKey(selectedRow.value),
+    catalog: selectedCatalogObject.value
+      ? {
+          id: selectedCatalogObject.value.id,
+          label: selectedCatalogObject.value.label,
+          database: selectedCatalogObject.value.database,
+          objectType: selectedCatalogObject.value.objectType,
+          blobColumns: selectedCatalogObject.value.blobColumns || [],
+          nodeType: 'object',
+          connection: selectedCatalogObject.value.connection || {},
+        }
+      : null,
+  })
+}
+
+function restoreBrowseUiState() {
+  const saved = readBrowseUiState()
+  if (!saved) return
+
+  if (saved.catalog?.nodeType === 'object') {
+    selectedCatalogObject.value = saved.catalog
+  }
+  if (saved.rightTab === 'sql' || saved.rightTab === 'browse') {
+    rightTab.value = saved.rightTab
+  }
+  if (saved.selectedPk) {
+    pendingRestorePk.value = saved.selectedPk
+  }
+  if (saved.activeViewId && views.value.some((v) => v.id === saved.activeViewId)) {
+    activeViewId.value = saved.activeViewId
+  }
+}
+
 async function loadViews() {
   loadingViews.value = true
   try {
-    const res = await listBlobTableViewsApi()
+    const res = await callWithRetry(() => listBlobTableViewsApi())
     views.value = res.data || []
-    viewsVersion.value += 1
     if (activeViewId.value && !views.value.some((v) => v.id === activeViewId.value)) {
       activeViewId.value = null
     }
@@ -898,6 +939,10 @@ async function loadRows({ append = false } = {}) {
   }
 
   const seq = ++rowsLoadSeq
+  const restorePk = !append ? (pendingRestorePk.value || rowIdentityKey(selectedRow.value)) : ''
+  if (!append) {
+    pendingRestorePk.value = ''
+  }
 
   if (append) {
     if (!hasMore.value || loadingMore.value || loadingRows.value) return
@@ -932,7 +977,12 @@ async function loadRows({ append = false } = {}) {
     }
     hasMore.value = Boolean(data.has_more)
     if (!append) {
-      autoSelectFirstRow()
+      if (restorePk) {
+        const found = tableRows.value.find((row) => rowIdentityKey(row) === restorePk)
+        selectPreviewRow(found ?? tableRows.value[0] ?? null)
+      } else {
+        autoSelectFirstRow()
+      }
     }
   } catch (err) {
     if (seq !== rowsLoadSeq) return
@@ -1020,15 +1070,21 @@ watch(tableRows, () => {
 watch(activeViewId, (id, oldId) => {
   if (!browseReady.value || id === oldId) return
   unbindTableScroll()
-  selectedRow.value = null
   if (!id) {
     columns.value = []
     tableRows.value = []
     total.value = -1
     hasMore.value = false
+    selectedRow.value = null
+    persistBrowseUiState()
     return
   }
+  if (oldId) {
+    pendingRestorePk.value = ''
+    selectedRow.value = null
+  }
   void loadRows({ append: false })
+  persistBrowseUiState()
 })
 
 watch(
@@ -1071,8 +1127,14 @@ watch(savedViewForSelection, (view) => {
 })
 
 watch(rightTab, (tab) => {
+  persistBrowseUiState()
   if (tab === 'browse') {
     setupTableViewport()
+    nextTick(() => {
+      if (selectedRow.value) {
+        syncTableCurrentRow(selectedRow.value)
+      }
+    })
   }
 })
 
@@ -1081,6 +1143,7 @@ onMounted(async () => {
 
   browseReady.value = false
   await Promise.all([loadViews(), loadMigrationSources()])
+  restoreBrowseUiState()
 
   const routeViewId = Number(route.query.viewId)
   if (routeViewId && !Number.isNaN(routeViewId) && views.value.some((v) => v.id === routeViewId)) {
@@ -1091,6 +1154,7 @@ onMounted(async () => {
   if (activeViewId.value) {
     await loadRows({ append: false })
   }
+  persistBrowseUiState()
 })
 
 onUnmounted(() => {
@@ -1112,13 +1176,12 @@ onUnmounted(() => {
         <aside class="view-list-panel">
           <div class="panel-head">
             <span>数据库目录</span>
-            <el-button link type="primary" :loading="loadingViews" @click="loadViews">
+            <el-button link type="primary" :loading="loadingViews" title="刷新已保存配置" @click="loadViews">
               <el-icon><Refresh /></el-icon>
             </el-button>
           </div>
           <div class="catalog-tree-wrap">
             <el-tree
-              :key="`catalog-${viewsVersion}`"
               lazy
               :load="loadCatalogTree"
               node-key="id"
@@ -1302,9 +1365,11 @@ onUnmounted(() => {
                       >
                         <div class="row-preview-label">{{ item.column }}</div>
                         <ImagePreview
+                          :key="`${item.cell.image_info_id}-${item.column}`"
                           :image-id="item.cell.image_info_id"
                           :image-path="item.cell.path"
                           :size="112"
+                          :lazy="false"
                         />
                         <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
                       </div>
@@ -1392,9 +1457,11 @@ onUnmounted(() => {
                   >
                     <div class="row-preview-label">{{ item.column }}</div>
                     <ImagePreview
+                      :key="`${item.cell.image_info_id}-${item.column}`"
                       :image-id="item.cell.image_info_id"
                       :image-path="item.cell.path"
                       :size="120"
+                      :lazy="false"
                     />
                     <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
                   </div>
