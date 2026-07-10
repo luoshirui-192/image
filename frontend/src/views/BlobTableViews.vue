@@ -68,9 +68,25 @@ const selectedRowPreviewItems = computed(() => {
 
 const selectedPreviewRowIndex = computed(() => {
   if (!selectedRow.value) return -1
-  const key = getRowKey(selectedRow.value)
-  return tableRows.value.findIndex((row) => getRowKey(row) === key)
+  return tableRows.value.indexOf(selectedRow.value)
 })
+
+function rowIdentityKey(row) {
+  const pk = activeView.value?.source_pk_column
+  if (pk && row?.[pk] != null) return String(row[pk])
+  const imgId = getRowImageInfoId(row)
+  if (imgId) return `img:${imgId}`
+  return ''
+}
+
+function getRowKey(row) {
+  const idx = tableRows.value.indexOf(row)
+  const base = rowIdentityKey(row)
+  if (idx >= 0) {
+    return base ? `${base}#${idx}` : `row#${idx}`
+  }
+  return base || JSON.stringify(row)
+}
 
 let previewWheelLocked = false
 
@@ -651,16 +667,25 @@ function goPrevPreviewRow() {
   selectPreviewRow(rows[idx - 1])
 }
 
-function goNextPreviewRow() {
+async function goNextPreviewRow() {
   const rows = tableRows.value
-  if (rows.length <= 1) return
+  if (!rows.length) return
   const idx = selectedPreviewRowIndex.value
   if (idx < 0) {
     selectPreviewRow(rows[0])
     return
   }
-  if (idx >= rows.length - 1) return
-  selectPreviewRow(rows[idx + 1])
+  if (idx < rows.length - 1) {
+    selectPreviewRow(rows[idx + 1])
+    return
+  }
+  if (!hasMore.value || loadingMore.value) return
+  const prevLen = rows.length
+  await loadRows({ append: true })
+  const nextRows = tableRows.value
+  if (nextRows.length > prevLen) {
+    selectPreviewRow(nextRows[idx + 1])
+  }
 }
 
 function onPreviewKeydown(event) {
@@ -670,7 +695,7 @@ function onPreviewKeydown(event) {
     goPrevPreviewRow()
   } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
     event.preventDefault()
-    goNextPreviewRow()
+    void goNextPreviewRow()
   }
 }
 
@@ -684,7 +709,7 @@ function onPreviewWheel(event) {
     previewWheelLocked = false
   }, 200)
   if (event.deltaY > 0) {
-    goNextPreviewRow()
+    void goNextPreviewRow()
   } else if (event.deltaY < 0) {
     goPrevPreviewRow()
   }
@@ -920,18 +945,12 @@ function syncTableCurrentRow(row) {
   highlightAndScrollTableRow(
     tableRef,
     row,
-    (a, b) => getRowKey(a) === getRowKey(b),
+    (a, b) => a === b,
   )
 }
 
-function getRowKey(row) {
-  const pk = activeView.value?.source_pk_column
-  if (pk && row?.[pk] != null) return String(row[pk])
-  return getRowImageInfoId(row) ?? JSON.stringify(row)
-}
-
 watch(tableRows, () => {
-  if (selectedRow.value && !tableRows.value.some((row) => getRowKey(row) === getRowKey(selectedRow.value))) {
+  if (selectedRow.value && !tableRows.value.includes(selectedRow.value)) {
     selectedRow.value = null
   }
   setupTableViewport()
@@ -1210,8 +1229,8 @@ onUnmounted(() => {
                       >
                         第 {{ selectedPreviewRowIndex + 1 }} / {{ tableRows.length }} 行
                       </span>
-                      <span v-if="tableRows.length > 1" class="row-preview-hint">
-                        聚焦后 ↑↓ 或滚轮切换行
+                      <span v-if="tableRows.length > 1 || hasMore" class="row-preview-hint">
+                        聚焦后 ↑↓ 或滚轮切换行（到底部会自动加载下一页）
                       </span>
                     </div>
                     <div v-if="selectedRowPreviewItems.length" class="row-preview-strip">
