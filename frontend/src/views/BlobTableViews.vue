@@ -52,10 +52,13 @@ const loadingMore = ref(false)
 
 const tableRef = ref(null)
 const tableWrapRef = ref(null)
+const browseHBarRef = ref(null)
 const rowPreviewPanelRef = ref(null)
 const tableHeight = ref(520)
 let tableScrollEl = null
 let resizeObserver = null
+let sqlHScrollLock = false
+let browseHScrollLock = false
 
 const PAGE_SIZE = 80
 const SCROLL_LOAD_DISTANCE = 120
@@ -111,6 +114,7 @@ const sqlTableData = ref([])
 const sqlSelectedRow = ref(null)
 const sqlTableRef = ref(null)
 const sqlTableWrapRef = ref(null)
+const sqlHBarRef = ref(null)
 const sqlPreviewPanelRef = ref(null)
 
 const migrationSources = ref([])
@@ -214,17 +218,19 @@ const browseTableInnerStyle = computed(() => {
     (sum, col) => sum + (col.is_path_substitute ? 200 : 100),
     0,
   )
-  return { width: `${Math.max(width, 100)}px` }
+  const px = `${Math.max(width, 100)}px`
+  return { width: px, minWidth: px }
 })
 
-const sqlTableSizeStyle = computed(() => {
+const sqlTableInnerStyle = computed(() => {
   const cols = sqlResult.value?.columns
-  if (!cols?.length) return { width: '100%' }
+  if (!cols?.length) return { minWidth: '100%' }
   const width = cols.reduce(
-    (sum, col) => sum + (sqlColumnWidth(col)),
+    (sum, col) => sum + sqlColumnWidth(col),
     0,
   )
-  return { width: `${Math.max(width, 100)}px` }
+  const px = `${Math.max(width, 100)}px`
+  return { width: px, minWidth: px }
 })
 
 function sqlColumnWidth(colName) {
@@ -962,6 +968,54 @@ function syncTableHeight() {
   syncBrowseTableHeight()
 }
 
+function syncScrollLeft(from, to) {
+  if (!from || !to) return
+  if (from.scrollLeft !== to.scrollLeft) {
+    to.scrollLeft = from.scrollLeft
+  }
+}
+
+function onSqlTableScroll(event) {
+  if (sqlHScrollLock) return
+  sqlHScrollLock = true
+  syncScrollLeft(event.target, sqlHBarRef.value)
+  requestAnimationFrame(() => {
+    sqlHScrollLock = false
+  })
+}
+
+function onSqlHBarScroll(event) {
+  if (sqlHScrollLock) return
+  sqlHScrollLock = true
+  syncScrollLeft(event.target, sqlTableWrapRef.value)
+  requestAnimationFrame(() => {
+    sqlHScrollLock = false
+  })
+}
+
+function onBrowseTableScroll(event) {
+  if (browseHScrollLock) return
+  browseHScrollLock = true
+  syncScrollLeft(event.target, browseHBarRef.value)
+  requestAnimationFrame(() => {
+    browseHScrollLock = false
+  })
+}
+
+function onBrowseHBarScroll(event) {
+  if (browseHScrollLock) return
+  browseHScrollLock = true
+  syncScrollLeft(event.target, tableWrapRef.value)
+  requestAnimationFrame(() => {
+    browseHScrollLock = false
+  })
+}
+
+function resetSqlHorizontalScroll() {
+  if (sqlTableWrapRef.value) sqlTableWrapRef.value.scrollLeft = 0
+  if (sqlHBarRef.value) sqlHBarRef.value.scrollLeft = 0
+}
+
 function layoutTableRefs() {
   tableRef.value?.doLayout?.()
   sqlTableRef.value?.doLayout?.()
@@ -1262,6 +1316,7 @@ watch(tableRows, () => {
 
 watch(sqlTableData, () => {
   if (rightTab.value === 'sql') {
+    resetSqlHorizontalScroll()
     setupSqlTableViewport()
   }
 })
@@ -1506,29 +1561,31 @@ onUnmounted(() => {
 
                 <div class="table-panel">
                   <div class="browse-result-list-wrap">
-                    <div
-                      ref="tableWrapRef"
-                      v-loading="loadingRows && !tableRows.length"
-                      class="browse-result-list-scroll"
-                      tabindex="0"
-                      @keydown="onPreviewKeydown"
-                    >
-                      <template v-if="columns.length">
-                        <div class="table-h-scroll-inner" :style="browseTableInnerStyle">
-                          <el-table
-                            ref="tableRef"
-                            :data="tableRows"
-                            :height="tableHeight"
-                            :fit="false"
-                            size="small"
-                            border
-                            stripe
-                            highlight-current-row
-                            :row-key="getRowKey"
-                            class="data-table data-table--wide compact-table"
-                            empty-text="无数据"
-                            @row-click="onTableRowClick"
-                          >
+                    <div class="result-table-area">
+                      <div
+                        ref="tableWrapRef"
+                        v-loading="loadingRows && !tableRows.length"
+                        class="browse-result-list-scroll"
+                        tabindex="0"
+                        @scroll="onBrowseTableScroll"
+                        @keydown="onPreviewKeydown"
+                      >
+                        <template v-if="columns.length">
+                          <div class="table-h-scroll-inner" :style="browseTableInnerStyle">
+                            <el-table
+                              ref="tableRef"
+                              :data="tableRows"
+                              :height="tableHeight"
+                              :fit="false"
+                              size="small"
+                              border
+                              stripe
+                              highlight-current-row
+                              :row-key="getRowKey"
+                              class="data-table data-table--wide compact-table"
+                              empty-text="无数据"
+                              @row-click="onTableRowClick"
+                            >
                         <el-table-column
                           v-for="col in columns"
                           :key="col.name"
@@ -1563,9 +1620,18 @@ onUnmounted(() => {
                           </template>
                         </el-table-column>
                           </el-table>
-                        </div>
-                      </template>
-                      <el-empty v-else-if="!loadingRows" description="无数据" />
+                          </div>
+                        </template>
+                        <el-empty v-else-if="!loadingRows" description="无数据" />
+                      </div>
+                      <div
+                        v-if="columns.length"
+                        ref="browseHBarRef"
+                        class="result-h-scrollbar"
+                        @scroll="onBrowseHBarScroll"
+                      >
+                        <div class="result-h-scrollbar-inner" :style="browseTableInnerStyle" />
+                      </div>
                     </div>
                     <div v-if="loadingMore" class="load-more-hint">加载更多…</div>
                     <div v-else-if="tableRows.length && !hasMore" class="load-more-hint muted">已全部加载</div>
@@ -1639,25 +1705,27 @@ onUnmounted(() => {
 
                 <div v-if="sqlTableData.length" class="table-panel sql-results-panel">
                   <div class="sql-result-list-wrap">
-                    <div
-                      ref="sqlTableWrapRef"
-                      class="sql-result-list-scroll"
-                      tabindex="0"
-                      @keydown="onSqlPreviewKeydown"
-                    >
-                      <el-table
-                        ref="sqlTableRef"
-                        :data="sqlTableData"
-                        :style="sqlTableSizeStyle"
-                        :fit="false"
-                        size="small"
-                        border
-                        stripe
-                        highlight-current-row
-                        :row-key="getSqlRowKey"
-                        class="data-table data-table--wide compact-table"
-                        @row-click="onSqlTableRowClick"
+                    <div class="result-table-area">
+                      <div
+                        ref="sqlTableWrapRef"
+                        class="sql-result-list-scroll"
+                        tabindex="0"
+                        @scroll="onSqlTableScroll"
+                        @keydown="onSqlPreviewKeydown"
                       >
+                        <div class="table-h-scroll-inner" :style="sqlTableInnerStyle">
+                          <el-table
+                            ref="sqlTableRef"
+                            :data="sqlTableData"
+                            :fit="false"
+                            size="small"
+                            border
+                            stripe
+                            highlight-current-row
+                            :row-key="getSqlRowKey"
+                            class="data-table data-table--wide compact-table"
+                            @row-click="onSqlTableRowClick"
+                          >
                         <el-table-column
                           v-for="col in sqlResult.columns"
                           :key="col"
@@ -1692,8 +1760,17 @@ onUnmounted(() => {
                               {{ formatCellValue(row[col]) }}
                             </template>
                           </template>
-                        </el-table-column>
-                      </el-table>
+                          </el-table-column>
+                          </el-table>
+                        </div>
+                      </div>
+                      <div
+                        ref="sqlHBarRef"
+                        class="result-h-scrollbar"
+                        @scroll="onSqlHBarScroll"
+                      >
+                        <div class="result-h-scrollbar-inner" :style="sqlTableInnerStyle" />
+                      </div>
                     </div>
                   </div>
 
@@ -2208,17 +2285,26 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
+.result-table-area {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
 .browse-result-list-scroll {
   flex: 1;
   min-width: 0;
   min-height: 180px;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: auto;
   overscroll-behavior: contain;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
   outline: none;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
 .sql-result-list-scroll {
@@ -2227,22 +2313,39 @@ onUnmounted(() => {
   min-height: 180px;
   overflow: auto;
   overscroll-behavior: contain;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
   outline: none;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
 .sql-result-list-scroll::-webkit-scrollbar,
 .browse-result-list-scroll::-webkit-scrollbar {
-  width: 10px;
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.result-h-scrollbar {
+  flex-shrink: 0;
+  height: 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-top: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-lighter);
+  scrollbar-width: thin;
+}
+
+.result-h-scrollbar::-webkit-scrollbar {
   height: 12px;
 }
 
-.sql-result-list-scroll::-webkit-scrollbar-thumb,
-.browse-result-list-scroll::-webkit-scrollbar-thumb {
+.result-h-scrollbar::-webkit-scrollbar-thumb {
   border-radius: 6px;
   background: var(--el-border-color-darker);
+}
+
+.result-h-scrollbar-inner {
+  height: 1px;
 }
 
 .sql-result-list-scroll:focus,
@@ -2255,13 +2358,28 @@ onUnmounted(() => {
   display: none !important;
 }
 
+.sql-result-list-scroll :deep(.el-table__inner-wrapper),
+.browse-result-list-scroll :deep(.el-table__inner-wrapper) {
+  overflow: visible !important;
+}
+
 .sql-result-list-scroll :deep(.el-table__body-wrapper),
-.sql-result-list-scroll :deep(.el-table__header-wrapper) {
+.sql-result-list-scroll :deep(.el-table__header-wrapper),
+.browse-result-list-scroll :deep(.el-table__header-wrapper) {
   overflow: visible !important;
 }
 
 .browse-result-list-scroll :deep(.el-table__body-wrapper) {
   overflow-x: visible !important;
+}
+
+.result-table-area .table-h-scroll-inner {
+  width: max-content;
+  min-width: 100%;
+}
+
+.result-table-area .table-h-scroll-inner :deep(.el-table) {
+  width: 100% !important;
 }
 
 .row-preview-panel {
@@ -2429,8 +2547,8 @@ onUnmounted(() => {
 
 .data-table--wide :deep(.el-table__header table),
 .data-table--wide :deep(.el-table__body table) {
-  width: auto !important;
-  table-layout: auto;
+  width: 100% !important;
+  table-layout: fixed !important;
 }
 
 .compact-table :deep(.el-table__cell) {
