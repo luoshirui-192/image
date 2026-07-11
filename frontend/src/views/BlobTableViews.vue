@@ -1635,7 +1635,7 @@ onUnmounted(() => {
                         stripe
                         highlight-current-row
                         :row-key="getSqlRowKey"
-                        class="sql-result-table compact-table"
+                        class="data-table compact-table"
                         @row-click="onSqlTableRowClick"
                       >
                         <el-table-column
@@ -2059,6 +2059,8 @@ onUnmounted(() => {
 
 .sql-results-panel {
   margin-top: 8px;
+  flex: 1;
+  min-height: 0;
 }
 
 .sql-editor-wrap {
@@ -2082,10 +2084,6 @@ onUnmounted(() => {
 
 .sql-error {
   margin-bottom: 8px;
-}
-
-.sql-result-table {
-  width: 100%;
 }
 
 .inline-hint {
@@ -2286,6 +2284,15 @@ onUnmounted(() => {
   box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
 }
 
+.table-viewport :deep(.el-scrollbar__bar.is-vertical) {
+  width: 10px;
+  right: 0;
+}
+
+.table-viewport :deep(.el-scrollbar__bar.is-horizontal) {
+  height: 10px;
+}
+
 .data-table {
   width: 100%;
 }
@@ -2312,15 +2319,6 @@ onUnmounted(() => {
   position: sticky;
   top: 0;
   z-index: 2;
-}
-
-.data-table :deep(.el-scrollbar__bar.is-vertical) {
-  width: 10px;
-  right: 0;
-}
-
-.data-table :deep(.el-scrollbar__bar.is-horizontal) {
-  height: 10px;
 }
 
 .path-cell {
