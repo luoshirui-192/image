@@ -211,22 +211,27 @@ const sqlPathColumn = computed(() => {
 
 const browseTableInnerStyle = computed(() => {
   if (!columns.value.length) return {}
-  const minWidth = columns.value.reduce(
+  const width = columns.value.reduce(
     (sum, col) => sum + (col.is_path_substitute ? 200 : 100),
     0,
   )
-  return { minWidth: `${Math.max(minWidth, 100)}px` }
+  return { width: `${Math.max(width, 100)}px` }
 })
 
-const sqlTableInnerStyle = computed(() => {
+const sqlTableSizeStyle = computed(() => {
   const cols = sqlResult.value?.columns
-  if (!cols?.length) return {}
-  const minWidth = cols.reduce(
-    (sum, col) => sum + (sqlIsPathColumn(col) ? 200 : 120),
+  if (!cols?.length) return { width: '100%' }
+  const width = cols.reduce(
+    (sum, col) => sum + (sqlColumnWidth(col)),
     0,
   )
-  return { minWidth: `${Math.max(minWidth, 100)}px` }
+  return { width: `${Math.max(width, 100)}px` }
 })
+
+function sqlColumnWidth(colName) {
+  if (sqlIsPathColumn(colName) || sqlPathColumn.value === colName) return 200
+  return 120
+}
 
 function sqlIsPathColumn(colName) {
   return Boolean(sqlColumnMetaByName.value[colName]?.is_path_substitute)
@@ -1542,7 +1547,7 @@ onUnmounted(() => {
                             stripe
                             highlight-current-row
                             :row-key="getRowKey"
-                            class="data-table compact-table"
+                            class="data-table data-table--wide compact-table"
                             empty-text="无数据"
                             @row-click="onTableRowClick"
                           >
@@ -1658,22 +1663,22 @@ onUnmounted(() => {
                   <div class="table-main">
                     <div
                       ref="sqlTableWrapRef"
-                      class="table-viewport table-viewport--native-scroll-x"
+                      class="table-viewport table-viewport--native-scroll"
+                      :style="{ maxHeight: `${sqlTableHeight}px` }"
                       tabindex="0"
                       @keydown="onSqlPreviewKeydown"
                     >
-                      <div class="table-h-scroll-inner" :style="sqlTableInnerStyle">
                       <el-table
                         ref="sqlTableRef"
                         :data="sqlTableData"
-                        :height="sqlTableHeight"
+                        :style="sqlTableSizeStyle"
                         :fit="false"
                         size="small"
                         border
                         stripe
                         highlight-current-row
                         :row-key="getSqlRowKey"
-                        class="data-table compact-table"
+                        class="data-table data-table--wide compact-table"
                         @row-click="onSqlTableRowClick"
                       >
                         <el-table-column
@@ -1712,7 +1717,6 @@ onUnmounted(() => {
                           </template>
                         </el-table-column>
                       </el-table>
-                      </div>
                     </div>
                   </div>
 
@@ -2326,11 +2330,20 @@ onUnmounted(() => {
   scrollbar-width: thin;
 }
 
-.table-viewport--native-scroll-x::-webkit-scrollbar {
+.table-viewport--native-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.table-viewport--native-scroll-x::-webkit-scrollbar,
+.table-viewport--native-scroll::-webkit-scrollbar {
+  width: 10px;
   height: 12px;
 }
 
-.table-viewport--native-scroll-x::-webkit-scrollbar-thumb {
+.table-viewport--native-scroll-x::-webkit-scrollbar-thumb,
+.table-viewport--native-scroll::-webkit-scrollbar-thumb {
   border-radius: 6px;
   background: var(--el-border-color-darker);
 }
@@ -2341,8 +2354,14 @@ onUnmounted(() => {
   height: 100%;
 }
 
-.table-viewport--native-scroll-x :deep(.el-scrollbar__bar.is-horizontal) {
+.table-viewport--native-scroll-x :deep(.el-scrollbar__bar.is-horizontal),
+.table-viewport--native-scroll :deep(.el-scrollbar__bar.is-horizontal) {
   display: none !important;
+}
+
+.table-viewport--native-scroll :deep(.el-table__body-wrapper),
+.table-viewport--native-scroll :deep(.el-table__header-wrapper) {
+  overflow: visible !important;
 }
 
 .table-viewport:focus {
@@ -2357,6 +2376,17 @@ onUnmounted(() => {
 
 .data-table {
   width: 100%;
+}
+
+.data-table--wide {
+  width: auto !important;
+  max-width: none !important;
+}
+
+.data-table--wide :deep(.el-table__header table),
+.data-table--wide :deep(.el-table__body table) {
+  width: auto !important;
+  table-layout: auto;
 }
 
 .compact-table :deep(.el-table__cell) {
