@@ -78,8 +78,9 @@ const selectedPreviewRowIndex = computed(() => {
 })
 
 function rowIdentityKey(row) {
+  if (!row) return ''
   const pk = activeView.value?.source_pk_column
-  if (pk && row?.[pk] != null) return String(row[pk])
+  if (pk && row[pk] != null) return String(row[pk])
   const imgId = getRowImageInfoId(row)
   if (imgId) return `img:${imgId}`
   return ''
@@ -215,12 +216,14 @@ function sqlIsPathColumn(colName) {
 }
 
 function sqlPathCell(row, colName) {
+  if (!row) return null
   const value = row[colName]
   if (isPathCellValue(value)) return value
   return null
 }
 
 function sqlFormatCell(row, colName) {
+  if (!row) return '—'
   return pathCellDisplay(row[colName])
 }
 
@@ -755,6 +758,7 @@ async function handleSqlExecute() {
 }
 
 function formatCell(row, colName) {
+  if (!row) return '—'
   const value = row[colName]
   if (value && typeof value === 'object' && 'display' in value) {
     return value.display
@@ -764,6 +768,7 @@ function formatCell(row, colName) {
 }
 
 function pathCell(row, colName) {
+  if (!row) return null
   const value = row[colName]
   if (value && typeof value === 'object') return value
   return null
@@ -1243,6 +1248,7 @@ function blobColumnName() {
 }
 
 function getRowImageInfoId(row) {
+  if (!row) return null
   for (const col of blobColumnNames()) {
     const cell = pathCell(row, col)
     if (cell?.image_info_id) return cell.image_info_id
