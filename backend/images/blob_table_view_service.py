@@ -318,9 +318,10 @@ def _batch_ids_with_nonempty_blob(
     lookup_id_column: str,
     blob_column: str,
     lookup_ids: list[str],
-) -> set[str]:
+) -> tuple[set[str], bool]:
+    """Return (ids with non-empty blob, check_succeeded)."""
     if not lookup_ids:
-        return set()
+        return set(), True
     table = _quote_ident(lookup_table)
     id_col = _quote_ident(lookup_id_column)
     blob_col = _quote_ident(blob_column)
@@ -343,8 +344,73 @@ def _batch_ids_with_nonempty_blob(
                 blob_column,
                 exc_info=True,
             )
-            return set()
-    return present
+            return set(), False
+    return present, True
+
+
+def _apply_presence_lookup_result(
+    presence: list[dict[str, bool]],
+    *,
+    blob_col: str,
+    row_indices: list[int],
+    lookup_ids: list[str],
+    present: set[str],
+    check_ok: bool,
+) -> None:
+    """Mark blob presence; failed remote checks default to pending (not 无数据)."""
+    if not check_ok:
+        for row_idx in row_indices:
+            presence[row_idx][blob_col] = True
+        return
+    for row_idx, sid in zip(row_indices, lookup_ids):
+        presence[row_idx][blob_col] = sid in present
+
+
+def _presence_via_pk_on_table(
+    conn,
+    *,
+    presence: list[dict[str, bool]],
+    raw_rows: list[tuple],
+    col_names: list[str],
+    blob_col: str,
+    pk_column: str,
+    pk_index: int,
+    source_table: str,
+    legacy_path_map: dict[str, dict[str, dict]] | None,
+) -> None:
+    """Fallback: check blob bytes on source_table using the view PK column."""
+    ids_to_check: list[str] = []
+    row_indices: list[int] = []
+    path_map = legacy_path_map or {}
+    for row_idx, raw in enumerate(raw_rows):
+        pk_val = str(raw[pk_index])
+        row_paths = path_map.get(pk_val, {})
+        if _local_blob_mapping_exists(
+            blob_col=blob_col,
+            source_column=None,
+            path_map=row_paths,
+        ):
+            presence[row_idx][blob_col] = True
+            continue
+        ids_to_check.append(pk_val)
+        row_indices.append(row_idx)
+    if not ids_to_check:
+        return
+    present, check_ok = _batch_ids_with_nonempty_blob(
+        conn,
+        lookup_table=source_table,
+        lookup_id_column=pk_column,
+        blob_column=blob_col,
+        lookup_ids=ids_to_check,
+    )
+    _apply_presence_lookup_result(
+        presence,
+        blob_col=blob_col,
+        row_indices=row_indices,
+        lookup_ids=ids_to_check,
+        present=present,
+        check_ok=check_ok,
+    )
 
 
 def _path_mapping_key_columns(path_mappings: list[dict[str, str]] | None) -> set[str]:
@@ -408,12 +474,29 @@ def _compute_blob_presence_for_page(
 
     if path_mappings:
         mapping_by_view_col = {m["view_column"]: m for m in path_mappings}
+        pk = validate_identifier(pk_column, label="主键列")
         for blob_col in blob_cols:
             mapping = mapping_by_view_col.get(blob_col)
             if not mapping:
                 continue
             sid_col = mapping["source_id_column"]
             if sid_col not in col_names:
+                logger.warning(
+                    "path mapping key column missing from SELECT: %s (blob=%s)",
+                    sid_col,
+                    blob_col,
+                )
+                _presence_via_pk_on_table(
+                    conn,
+                    presence=presence,
+                    raw_rows=raw_rows,
+                    col_names=col_names,
+                    blob_col=blob_col,
+                    pk_column=pk,
+                    pk_index=pk_index,
+                    source_table=source_table,
+                    legacy_path_map=legacy_path_map,
+                )
                 continue
             sid_idx = col_names.index(sid_col)
             lookup_table = mapping["lookup_table"]
@@ -427,8 +510,13 @@ def _compute_blob_presence_for_page(
                 if sid_val is None:
                     continue
                 if per_row_path_maps is not None:
-                    row_paths = per_row_path_maps[row_idx].get(blob_col, {})
-                    if row_paths:
+                    inner = per_row_path_maps[row_idx].get(blob_col, {})
+                    source_column = mapping.get("source_column") if mapping else None
+                    if _local_blob_mapping_exists(
+                        blob_col=blob_col,
+                        source_column=source_column,
+                        path_map=inner,
+                    ):
                         presence[row_idx][blob_col] = True
                         continue
                 ids_to_check.append(str(sid_val))
@@ -436,15 +524,21 @@ def _compute_blob_presence_for_page(
 
             if not ids_to_check:
                 continue
-            present = _batch_ids_with_nonempty_blob(
+            present, check_ok = _batch_ids_with_nonempty_blob(
                 conn,
                 lookup_table=lookup_table,
                 lookup_id_column=lookup_id_col,
                 blob_column=source_blob_col,
                 lookup_ids=ids_to_check,
             )
-            for row_idx, sid in zip(row_indices, ids_to_check):
-                presence[row_idx][blob_col] = sid in present
+            _apply_presence_lookup_result(
+                presence,
+                blob_col=blob_col,
+                row_indices=row_indices,
+                lookup_ids=ids_to_check,
+                present=present,
+                check_ok=check_ok,
+            )
         return presence
 
     pk = validate_identifier(pk_column, label="主键列")
@@ -467,15 +561,21 @@ def _compute_blob_presence_for_page(
 
         if not ids_to_check:
             continue
-        present = _batch_ids_with_nonempty_blob(
+        present, check_ok = _batch_ids_with_nonempty_blob(
             conn,
             lookup_table=source_table,
             lookup_id_column=pk,
             blob_column=blob_col,
             lookup_ids=ids_to_check,
         )
-        for row_idx, pk_val in zip(row_indices, ids_to_check):
-            presence[row_idx][blob_col] = pk_val in present
+        _apply_presence_lookup_result(
+            presence,
+            blob_col=blob_col,
+            row_indices=row_indices,
+            lookup_ids=ids_to_check,
+            present=present,
+            check_ok=check_ok,
+        )
     return presence
 
 
@@ -565,6 +665,32 @@ def _load_path_map(
     return result
 
 
+def _mapping_source_ids(
+    *,
+    raw_rows: list[tuple],
+    col_names: list[str],
+    sid_col: str,
+    pk_index: int,
+    blob_col: str,
+) -> tuple[list[str], bool]:
+    """Resolve source_id values for path-map lookup; fall back to PK when key column missing."""
+    if sid_col in col_names:
+        sid_idx = col_names.index(sid_col)
+        return (
+            list({str(row[sid_idx]) for row in raw_rows if row[sid_idx] is not None}),
+            True,
+        )
+    logger.warning(
+        "path mapping key column missing from SELECT: %s (blob=%s); using PK fallback",
+        sid_col,
+        blob_col,
+    )
+    return (
+        list({str(row[pk_index]) for row in raw_rows}),
+        False,
+    )
+
+
 def _load_path_maps_for_mappings(
     *,
     raw_rows: list[tuple],
@@ -573,6 +699,7 @@ def _load_path_maps_for_mappings(
     blob_cols: list[str],
     fallback_source_table: str,
     fallback_lookup_table: str,
+    pk_index: int = 0,
 ) -> list[dict[str, dict[str, dict]]]:
     """Return per-row path maps keyed by view BLOB column name."""
     if not mappings:
@@ -584,10 +711,15 @@ def _load_path_maps_for_mappings(
         if view_col not in blob_cols:
             continue
         sid_col = mapping["source_id_column"]
-        if sid_col not in col_names:
+        source_ids, _ = _mapping_source_ids(
+            raw_rows=raw_rows,
+            col_names=col_names,
+            sid_col=sid_col,
+            pk_index=pk_index,
+            blob_col=view_col,
+        )
+        if not source_ids:
             continue
-        sid_idx = col_names.index(sid_col)
-        source_ids = list({str(row[sid_idx]) for row in raw_rows})
         cache_key = (mapping["lookup_table"], mapping["source_column"])
         if cache_key not in path_cache:
             path_cache[cache_key] = _load_path_map(
@@ -618,10 +750,10 @@ def _load_path_maps_for_mappings(
             if not mapping:
                 continue
             sid_col = mapping["source_id_column"]
-            if sid_col not in col_names:
-                continue
-            sid_idx = col_names.index(sid_col)
-            source_id = str(raw[sid_idx])
+            if sid_col in col_names:
+                source_id = str(raw[col_names.index(sid_col)])
+            else:
+                source_id = str(raw[pk_index])
             cache_key = (mapping["lookup_table"], mapping["source_column"])
             inner = path_cache.get(cache_key, {}).get(source_id, {})
             row_paths[blob_col] = inner
@@ -693,6 +825,7 @@ def fetch_simulated_table_rows(
                 blob_cols=blob_cols,
                 fallback_source_table=view.source_table,
                 fallback_lookup_table=_path_lookup_table(view),
+                pk_index=pk_index,
             )
         else:
             source_ids = [str(row[pk_index]) for row in raw_rows]

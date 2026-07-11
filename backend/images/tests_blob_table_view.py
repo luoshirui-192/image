@@ -227,6 +227,26 @@ class BlobTableViewTestCase(TestCase):
         self.assertIn("2", checked_ids)
         self.assertIn("3", checked_ids)
 
+    def test_blob_presence_db_error_defaults_to_pending(self):
+        from images.blob_table_view_service import _compute_blob_presence_for_page
+
+        with patch(
+            "images.blob_table_view_service._batch_ids_with_nonempty_blob",
+            return_value=(set(), False),
+        ):
+            presence = _compute_blob_presence_for_page(
+                None,
+                raw_rows=[(2, b"png")],
+                col_names=["id", "photo"],
+                blob_cols=["photo"],
+                path_mappings=None,
+                pk_column="id",
+                source_table="legacy_photos",
+                legacy_path_map={},
+                pk_index=0,
+            )
+        self.assertTrue(presence[0]["photo"])
+
     def test_empty_blob_shows_no_data(self):
         payload = fetch_view_rows(self.view.id, offset=0, limit=10)
         row3 = next(row for row in payload["rows"] if str(row["id"]) == "3")

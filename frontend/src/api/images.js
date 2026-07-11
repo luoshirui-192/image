@@ -32,12 +32,22 @@ export async function fetchImageBlob(path, { id, thumb = true, signal } = {}) {
   }
 
   const task = (async () => {
-    const res = await fetch(`${API_BASE}${endpoint}?${params}`, {
+    const requestOnce = () => fetch(`${API_BASE}${endpoint}?${params}`, {
       headers: {
         Authorization: `Bearer ${auth.accessToken}`,
       },
       signal,
     })
+
+    let res = await requestOnce()
+    if (res.status === 401 && auth.refreshToken) {
+      try {
+        await auth.refreshAccessToken()
+        res = await requestOnce()
+      } catch {
+        throw new Error('图片加载失败')
+      }
+    }
 
     if (!res.ok) {
       let message = '图片加载失败'

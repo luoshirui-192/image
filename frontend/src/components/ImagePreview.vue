@@ -2,9 +2,10 @@
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Picture } from '@element-plus/icons-vue'
 import { fetchImageBlob } from '@/api/images'
+import { callWithRetry } from '@/utils/callWithRetry'
 
 const props = defineProps({
-  imageId: { type: Number, default: null },
+  imageId: { type: [Number, String], default: null },
   imagePath: { type: String, default: '' },
   size: { type: Number, default: 80 },
   fit: { type: String, default: 'cover' },
@@ -60,16 +61,23 @@ async function loadPreview() {
     return
   }
 
+  const imageId = props.imageId != null && props.imageId !== ''
+    ? Number(props.imageId)
+    : null
+
   loading.value = true
   abortController = new AbortController()
   const signal = abortController.signal
 
   try {
-    const blob = await fetchImageBlob(props.imagePath, {
-      id: props.imageId,
-      thumb: props.thumb,
-      signal,
-    })
+    const blob = await callWithRetry(
+      () => fetchImageBlob(props.imagePath, {
+        id: Number.isFinite(imageId) ? imageId : null,
+        thumb: props.thumb,
+        signal,
+      }),
+      { attempts: 3, delayMs: 300 },
+    )
     if (signal.aborted) return
     objectUrl = URL.createObjectURL(blob)
     src.value = objectUrl

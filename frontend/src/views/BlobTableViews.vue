@@ -786,10 +786,14 @@ function rowPreviewCells(row) {
   return blobColumnNames()
     .map((col) => {
       const cell = pathCell(row, col)
-      if (!cell?.image_info_id || cell.status !== 'migrated') return null
+      const imageId = cell?.image_info_id
+      if (imageId == null || imageId === '' || cell?.status !== 'migrated') return null
       return {
         column: col,
-        cell,
+        cell: {
+          ...cell,
+          image_info_id: Number(imageId),
+        },
         title: cell.path || cell.display || col,
       }
     })
@@ -1037,6 +1041,10 @@ function statusLabel(status) {
 }
 
 function blobColumnNames() {
+  const fromApi = columns.value
+    .filter((col) => col.is_path_substitute)
+    .map((col) => col.name)
+  if (fromApi.length) return fromApi
   return blobColumnsFromView(activeView.value)
 }
 
