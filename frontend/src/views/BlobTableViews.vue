@@ -18,6 +18,7 @@ import {
   listBlobCatalogObjectsApi,
   listBlobMigrationSourcesApi,
   listBlobTableViewsApi,
+  updateBlobTableViewApi,
   getBlobMigrationSourceApi,
   listCategoriesApi,
 } from '@/api/images'
@@ -262,12 +263,52 @@ function catalogObjectKey(data) {
 function findSavedViewForCatalogNode(data) {
   if (!data || data.nodeType !== 'object') return null
   const key = catalogObjectKey(data)
-  return views.value.find((view) => viewCatalogKey(view) === key) || null
+  const exact = views.value.find((view) => viewCatalogKey(view) === key)
+  if (exact) return exact
+  const conn = data.connection || {}
+  return views.value.find((view) =>
+    (view.db_alias || '') === (conn.alias || '')
+    && (view.source_table || '') === (data.label || '')
+    && (view.source_object_type || 'table') === (data.objectType || 'table')
+    && !(view.database_name || '').trim()) || null
+}
+
+async function ensureSavedViewDatabaseMatchesCatalog(view, catalogDatabase) {
+  const catalogDb = (catalogDatabase || '').trim()
+  if (!view?.id || !catalogDb) return view
+  const savedDb = (view.database_name || '').trim()
+  if (savedDb === catalogDb) return view
+  try {
+    const res = await updateBlobTableViewApi(view.id, { database_name: catalogDb })
+    const updated = res.data
+    if (updated) {
+      const idx = views.value.findIndex((item) => item.id === view.id)
+      if (idx >= 0) {
+        views.value[idx] = { ...views.value[idx], ...updated }
+      }
+    }
+    const message = savedDb
+      ? `已将配置的库名从「${savedDb}」同步为「${catalogDb}」`
+      : `已自动补全配置的库名为「${catalogDb}」`
+    ElMessage.info(message)
+    return updated || view
+  } catch (err) {
+    ElMessage.warning(err.message || '同步库名失败，请删除配置后从目录重新创建')
+    return view
+  }
 }
 
 const savedViewForSelection = computed(() => {
   if (!selectedCatalogObject.value) return null
   return findSavedViewForCatalogNode(selectedCatalogObject.value)
+})
+
+const catalogDatabaseMismatch = computed(() => {
+  if (!activeView.value || !selectedCatalogObject.value) return ''
+  const catalogDb = (selectedCatalogObject.value.database || '').trim()
+  const viewDb = (activeView.value.database_name || '').trim()
+  if (!catalogDb || !viewDb || catalogDb === viewDb) return ''
+  return `左侧目录为「${catalogDb}」，当前配置库名为「${viewDb || '（空）'}」`
 })
 
 function viewMigrationKey(view) {
@@ -380,11 +421,16 @@ function onCatalogNodeClick(data) {
     return
   }
   if (data.nodeType !== 'object') return
+  void onCatalogObjectSelected(data)
+}
+
+async function onCatalogObjectSelected(data) {
   selectedCatalogObject.value = data
   sqlText.value = `SELECT * FROM \`${data.label}\` LIMIT 80`
   const saved = findSavedViewForCatalogNode(data)
   if (saved) {
-    activeViewId.value = saved.id
+    const synced = await ensureSavedViewDatabaseMatchesCatalog(saved, data.database)
+    activeViewId.value = synced?.id ?? saved.id
     rightTab.value = 'browse'
   } else {
     activeViewId.value = null
@@ -1000,13 +1046,15 @@ async function loadViews() {
   }
 }
 
-async function loadRows({ append = false } = {}) {
+async function loadRows({ append = false, includeTotal = !append } = {}) {
   if (!activeViewId.value) {
     columns.value = []
     tableRows.value = []
     total.value = -1
     hasMore.value = false
     selectedRow.value = null
+    loadingRows.value = false
+    loadingMore.value = false
     return
   }
 
@@ -1026,10 +1074,11 @@ async function loadRows({ append = false } = {}) {
   }
 
   try {
-    const res = await fetchBlobTableViewRowsApi(activeViewId.value, {
+    const res = await callWithRetry(() => fetchBlobTableViewRowsApi(activeViewId.value, {
       offset: append ? offset.value : 0,
       limit: PAGE_SIZE,
-    })
+      includeTotal,
+    }))
     if (seq !== rowsLoadSeq) return
 
     const data = res.data || {}
@@ -1055,6 +1104,9 @@ async function loadRows({ append = false } = {}) {
       } else {
         autoSelectFirstRow()
       }
+      if (!includeTotal && tableRows.value.length) {
+        void loadRowTotal(seq)
+      }
     }
   } catch (err) {
     if (seq !== rowsLoadSeq) return
@@ -1068,6 +1120,25 @@ async function loadRows({ append = false } = {}) {
     loadingRows.value = false
     loadingMore.value = false
     setupTableViewport()
+  }
+}
+
+async function loadRowTotal(expectedSeq) {
+  if (!activeViewId.value || expectedSeq !== rowsLoadSeq) return
+  try {
+    const res = await fetchBlobTableViewRowsApi(activeViewId.value, {
+      offset: 0,
+      limit: 1,
+      includeTotal: true,
+    })
+    if (expectedSeq !== rowsLoadSeq) return
+    const nextTotal = Number(res.data?.total)
+    if (!Number.isNaN(nextTotal) && nextTotal >= 0) {
+      total.value = nextTotal
+      hasMore.value = tableRows.value.length < nextTotal
+    }
+  } catch {
+    // total is optional; ignore background count failures
   }
 }
 
@@ -1161,6 +1232,9 @@ watch(activeViewId, (id, oldId) => {
   if (!browseReady.value || id === oldId) return
   unbindTableScroll()
   if (!id) {
+    rowsLoadSeq += 1
+    loadingRows.value = false
+    loadingMore.value = false
     columns.value = []
     tableRows.value = []
     total.value = -1
@@ -1234,6 +1308,17 @@ onMounted(async () => {
   browseReady.value = false
   await Promise.all([loadViews(), loadMigrationSources()])
   restoreBrowseUiState()
+
+  const catalog = selectedCatalogObject.value
+  if (catalog?.nodeType === 'object') {
+    const saved = findSavedViewForCatalogNode(catalog)
+    if (saved) {
+      await ensureSavedViewDatabaseMatchesCatalog(saved, catalog.database)
+      if (!activeViewId.value) {
+        activeViewId.value = saved.id
+      }
+    }
+  }
 
   const routeViewId = Number(route.query.viewId)
   if (routeViewId && !Number.isNaN(routeViewId) && views.value.some((v) => v.id === routeViewId)) {
@@ -1345,11 +1430,21 @@ onUnmounted(() => {
           <el-tabs v-model="rightTab" class="right-tabs">
             <el-tab-pane label="表数据" name="browse">
               <div v-if="activeView" class="browse-pane">
+                <el-alert
+                  v-if="catalogDatabaseMismatch"
+                  type="warning"
+                  :closable="false"
+                  show-icon
+                  class="browse-db-mismatch"
+                  :title="catalogDatabaseMismatch"
+                  description="表数据按已保存配置的库名查询。请重新点击左侧目录中的表，或删除配置后重建。"
+                />
                 <div class="data-head">
                   <div>
                     <h3>{{ activeView.source_table }}</h3>
                     <p class="field-hint">
                       {{ activeView.db_label || activeView.db_alias }} /
+                      {{ activeView.database_name || '（默认库）' }} /
                       {{ activeView.source_table }} · PK {{ activeView.source_pk_column }} ·
                       BLOB → {{ blobColumnNames().join(', ') }}
                       <span v-if="activeView.where_clause"> · WHERE {{ activeView.where_clause }}</span>
@@ -1892,6 +1987,11 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.browse-db-mismatch {
+  margin-bottom: 12px;
+  flex-shrink: 0;
 }
 
 .sql-preview-panel {

@@ -180,6 +180,7 @@ class BlobTableViewRowsView(APIView):
                 pk,
                 offset=data.get("offset", 0),
                 limit=data.get("limit", 100),
+                include_total=data.get("include_total", True),
             )
         except BlobTableViewError as exc:
             return error_response(str(exc), code=4001, status=400)

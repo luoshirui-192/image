@@ -326,6 +326,7 @@ class BlobTableViewCreateSerializer(serializers.Serializer):
 
 class BlobTableViewUpdateSerializer(serializers.Serializer):
     name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    database_name = serializers.CharField(required=False, allow_blank=True, max_length=64)
     display_columns = serializers.ListField(
         child=serializers.CharField(max_length=64),
         required=False,
@@ -338,6 +339,7 @@ class BlobTableViewUpdateSerializer(serializers.Serializer):
 class BlobTableViewRowsSerializer(serializers.Serializer):
     offset = serializers.IntegerField(required=False, default=0, min_value=0)
     limit = serializers.IntegerField(required=False, default=100, min_value=1, max_value=500)
+    include_total = serializers.BooleanField(required=False, default=True)
 
 
 class BlobTableViewPreviewSchemaSerializer(serializers.Serializer):

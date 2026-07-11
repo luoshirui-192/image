@@ -16,6 +16,7 @@ from images.blob_table_view_service import (
     _batch_ids_with_nonempty_blob,
     create_table_view,
     fetch_view_rows,
+    update_table_view,
 )
 from images.models import BlobTableView, ImageInfo, ImageSourceMap
 from users.models import SysUser
@@ -203,6 +204,16 @@ class BlobTableViewTestCase(TestCase):
         row2 = payload["rows"][1]
         self.assertEqual(row2["photo"]["status"], "pending")
         self.assertEqual(row2["photo"]["display"], "未迁移")
+
+    def test_fetch_view_rows_can_skip_total_count(self):
+        payload = fetch_view_rows(self.view.id, offset=0, limit=10, include_total=False)
+        self.assertEqual(payload["total"], -1)
+        self.assertTrue(payload["has_more"])
+        self.assertEqual(len(payload["rows"]), 3)
+
+    def test_update_table_view_can_change_database_name(self):
+        updated = update_table_view(self.view.id, database_name="catalog_db")
+        self.assertEqual(updated.database_name, "catalog_db")
 
     def test_blob_presence_skips_already_migrated_rows(self):
         checked_ids: list[str] = []

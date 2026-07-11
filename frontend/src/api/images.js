@@ -270,9 +270,9 @@ export function deleteBlobTableViewApi(id) {
   return request.delete(`/images/blob-migration/table-views/${id}/`)
 }
 
-export function fetchBlobTableViewRowsApi(id, { offset = 0, limit = 100 } = {}) {
+export function fetchBlobTableViewRowsApi(id, { offset = 0, limit = 100, includeTotal = true } = {}) {
   return request.get(`/images/blob-migration/table-views/${id}/rows/`, {
-    params: { offset, limit },
+    params: { offset, limit, include_total: includeTotal ? 1 : 0 },
     timeout: 120000,
   })
 }

@@ -768,6 +768,7 @@ def fetch_simulated_table_rows(
     limit: int = DEFAULT_ROW_LIMIT,
     extra_where: str = "",
     touch_last_viewed: bool = True,
+    include_total: bool = True,
 ) -> dict:
     """Fetch paginated rows with BLOB columns replaced by path cells (no BLOB bytes)."""
     if offset < 0:
@@ -807,7 +808,7 @@ def fetch_simulated_table_rows(
             col_names = [col[0] for col in cursor.description]
 
         row_total = -1
-        if offset == 0:
+        if offset == 0 and include_total:
             count_sql = f"SELECT COUNT(*) FROM {table}{where_sql}"
             with conn.cursor() as cursor:
                 cursor.execute(count_sql, where_params)
@@ -912,9 +913,15 @@ def fetch_view_rows(
     *,
     offset: int = 0,
     limit: int = DEFAULT_ROW_LIMIT,
+    include_total: bool = True,
 ) -> dict:
     view = _load_view(view_id)
-    return fetch_simulated_table_rows(view, offset=offset, limit=limit)
+    return fetch_simulated_table_rows(
+        view,
+        offset=offset,
+        limit=limit,
+        include_total=include_total,
+    )
 
 
 def build_ephemeral_table_view(
@@ -1061,6 +1068,8 @@ def update_table_view(view_id: int, **fields) -> BlobTableView:
         view.remark = (fields.get("remark") or "").strip()
     if "where_clause" in fields:
         view.where_clause = validate_where_clause(fields.get("where_clause") or "")
+    if "database_name" in fields:
+        view.database_name = (fields.get("database_name") or "").strip()
     if "display_columns" in fields:
         view.display_columns = _serialize_display_columns(fields.get("display_columns"))
     if any(k in fields for k in ("db_alias", "source_table", "source_pk_column", "blob_column")):
