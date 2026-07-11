@@ -119,27 +119,40 @@ docker compose -f docker-compose.app.yml exec backend \
 ## 启动与停止
 
 ```bash
-chmod +x start-app.sh
+chmod +x start-app.sh scripts/compose-app-args.sh
 ./start-app.sh
 ```
 
-等价命令：
+`start-app.sh` 会**自动**选择 MySQL 连接方式：
+
+| 条件 | backend 连接 |
+|------|----------------|
+| 存在 `docker-compose.app.override.yml` | 按 override（推荐：宿主机 **mysql8039**） |
+| `.env` 中 `USE_EXTERNAL_MYSQL=1` | `host.docker.internal:3306` |
+| 否则 | compose 内置 `db` 容器 |
+
+**使用宿主机已有 MySQL（如 mysql8039）时，任选其一：**
 
 ```bash
-python3 docker/set-env.py
-docker compose -f docker-compose.app.yml up -d --build
+# 方式 A：保留 override（推荐，一次配置永久生效）
+cp docker-compose.app.external-db.example.yml docker-compose.app.override.yml
+# 确认 .env 中 MYSQL_DATABASE / MYSQL_USER / DB_PASSWORD 与 mysql8039 一致
+
+# 方式 B：仅用 .env 开关
+# 在 .env 增加：USE_EXTERNAL_MYSQL=1
 ```
 
-**Windows：**
-
-```powershell
-.\start-app.ps1
-```
-
-**停止：**
+重启前确保宿主机 MySQL 已启动：
 
 ```bash
-docker compose -f docker-compose.app.yml down
+docker start mysql8039
+./start-app.sh
+```
+
+**停止**（与启动相同 compose 文件组合，含 override 时须带上）：
+
+```bash
+docker compose -f docker-compose.app.yml -f docker-compose.app.override.yml down
 ```
 
 ---
@@ -233,6 +246,7 @@ cd backend && DB_ENGINE=sqlite python manage.py test images sqlquery -v 1
 
 | 现象 | 处理 |
 |------|------|
+| **每次重启后表数据「已加载 0」** | 未用 override / `USE_EXTERNAL_MYSQL=1`，backend 连到**空的 compose db** 而非 **mysql8039**。执行 `docker compose ... exec backend env \| grep DB_HOST`，应为 `host.docker.internal`；然后 `docker start mysql8039` 并用 `./start-app.sh` 重启 |
 | backend 一直 waiting for MySQL | `docker compose -f docker-compose.app.yml logs db`；检查 `.env` 密码 |
 | 上传/预览失败 | `STORAGE_BACKEND=minio`；MinIO 凭证；容器能否访问 9.100:9000 |
 | readiness upload 失败 | 运行 `python scripts/init_storage.py`；检查 MINIO_* 配置 |

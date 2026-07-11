@@ -14,15 +14,15 @@ services:
     environment:
       DB_HOST: host.docker.internal
       DB_PORT: "3306"
-      DB_NAME: ara_fp_analyst
-      DB_USER: fp_user
-      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE:-image_db}
+      DB_USER: ${MYSQL_USER:-image_db}
+      DB_PASSWORD: ${DB_PASSWORD:-${MYSQL_PASSWORD}}
 
   scheduler:
     # extra_hosts for host.docker.internal is in docker-compose.app.yml (scheduler service).
     environment:
       DB_HOST: host.docker.internal
       DB_PORT: "3306"
-      DB_NAME: ara_fp_analyst
-      DB_USER: fp_user
-      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE:-image_db}
+      DB_USER: ${MYSQL_USER:-image_db}
+      DB_PASSWORD: ${DB_PASSWORD:-${MYSQL_PASSWORD}}

@@ -49,16 +49,27 @@ else
 fi
 
 python3 docker/set-env.py
-docker compose -f "$COMPOSE_FILE" up -d --build
+
+COMPOSE_ARGS=()
+while IFS= read -r line; do
+  COMPOSE_ARGS+=("$line")
+done < <(bash scripts/compose-app-args.sh | grep -v '^compose:')
+
+docker compose "${COMPOSE_ARGS[@]}" up -d --build
 
 echo ""
 echo "=========================================="
 echo " 机器 A 已启动（MySQL + 应用层）"
 PUBLIC_URL="$(grep '^PUBLIC_URL=' .env | cut -d= -f2- | tr -d '\r')"
 echo " 浏览器访问: ${PUBLIC_URL:-http://localhost}"
-echo " MySQL: 本机 Docker 容器 db（127.0.0.1:${MYSQL_PUBLISH_PORT:-3306}）"
+if [ -f docker-compose.app.override.yml ] || grep -qE '^USE_EXTERNAL_MYSQL=(1|true|yes)' .env 2>/dev/null; then
+  echo " MySQL: 宿主机 3306（host.docker.internal，如 mysql8039）"
+  echo " 提示: 重启前请确认宿主机 MySQL 已启动: docker start mysql8039"
+else
+  echo " MySQL: 本机 Docker 容器 db（127.0.0.1:${MYSQL_PUBLISH_PORT:-3306}）"
+fi
 echo " 图片存储: ${STORAGE_BACKEND}（minio 见 MINIO_ENDPOINT）"
 echo " 默认账号: admin / admin123"
-echo " 停止: docker compose -f $COMPOSE_FILE down"
+echo " 停止: docker compose ${COMPOSE_ARGS[*]} down"
 echo " 详细说明: README-MACHINE-A.md"
 echo "=========================================="
