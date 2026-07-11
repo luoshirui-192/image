@@ -59,6 +59,7 @@ let resizeObserver = null
 
 const PAGE_SIZE = 80
 const SCROLL_LOAD_DISTANCE = 120
+const TABLE_SCROLLBAR_GUTTER = 14
 
 const browseReady = ref(false)
 let rowsLoadSeq = 0
@@ -744,6 +745,8 @@ async function handleSqlExecute() {
     await nextTick()
     selectSqlPreviewRow(sqlTableData.value[0] ?? null, { focusBrowse: true })
     setupSqlTableViewport()
+    await nextTick()
+    layoutTableRefs()
   } catch (err) {
     sqlResult.value = null
     sqlTableData.value = []
@@ -915,7 +918,7 @@ function openPreview(pathCellValue, row) {
   selectPreviewRow(row, { focusPanel: true })
 }
 
-function syncTableHeight() {
+function syncBrowseTableHeight() {
   const wrap = tableWrapRef.value
   const main = wrap?.parentElement
   if (wrap && main) {
@@ -925,15 +928,13 @@ function syncTableHeight() {
       available = main.clientHeight - (hint?.offsetHeight ?? 0)
     }
     if (available > 200) {
-      tableHeight.value = Math.floor(available)
-      syncSqlTableHeight()
+      tableHeight.value = Math.max(200, Math.floor(available) - TABLE_SCROLLBAR_GUTTER)
       return
     }
   }
 
   const reservedTop = 56 + 16 + 16 + 20 + 12 + 40 + 72 + 48 + 36 + 210
-  tableHeight.value = Math.max(420, window.innerHeight - reservedTop)
-  syncSqlTableHeight()
+  tableHeight.value = Math.max(420, window.innerHeight - reservedTop - TABLE_SCROLLBAR_GUTTER)
 }
 
 function syncSqlTableHeight() {
@@ -945,13 +946,23 @@ function syncSqlTableHeight() {
       available = main.clientHeight
     }
     if (available > 200) {
-      sqlTableHeight.value = Math.floor(available)
+      sqlTableHeight.value = Math.max(200, Math.floor(available) - TABLE_SCROLLBAR_GUTTER)
       return
     }
   }
 
   const reservedTop = 56 + 16 + 16 + 20 + 12 + 40 + 72 + 48 + 36 + 280
-  sqlTableHeight.value = Math.max(320, window.innerHeight - reservedTop)
+  sqlTableHeight.value = Math.max(320, window.innerHeight - reservedTop - TABLE_SCROLLBAR_GUTTER)
+}
+
+function syncTableHeight() {
+  syncBrowseTableHeight()
+  syncSqlTableHeight()
+}
+
+function layoutTableRefs() {
+  tableRef.value?.doLayout?.()
+  sqlTableRef.value?.doLayout?.()
 }
 
 function setupSqlTableViewport() {
@@ -965,6 +976,7 @@ function setupTableViewport() {
       if (!resizeObserver) {
         resizeObserver = new ResizeObserver(() => {
           syncTableHeight()
+          layoutTableRefs()
         })
       }
       resizeObserver.disconnect()
@@ -976,6 +988,7 @@ function setupTableViewport() {
       }
     }
     bindTableScroll()
+    layoutTableRefs()
   })
 }
 
@@ -1503,6 +1516,8 @@ onUnmounted(() => {
                         ref="tableRef"
                         :data="tableRows"
                         :height="tableHeight"
+                        :fit="false"
+                        scrollbar-always-on
                         size="small"
                         border
                         stripe
@@ -1630,6 +1645,8 @@ onUnmounted(() => {
                         ref="sqlTableRef"
                         :data="sqlTableData"
                         :height="sqlTableHeight"
+                        :fit="false"
+                        scrollbar-always-on
                         size="small"
                         border
                         stripe
@@ -2274,6 +2291,7 @@ onUnmounted(() => {
 .table-viewport {
   flex: 1;
   min-height: 240px;
+  min-width: 0;
   overflow: hidden;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
@@ -2284,13 +2302,26 @@ onUnmounted(() => {
   box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
 }
 
+.table-viewport :deep(.el-table__inner-wrapper) {
+  /* Leave room so the horizontal scrollbar is not clipped by overflow:hidden. */
+  padding-bottom: 2px;
+}
+
 .table-viewport :deep(.el-scrollbar__bar.is-vertical) {
   width: 10px;
   right: 0;
+  z-index: 4;
 }
 
 .table-viewport :deep(.el-scrollbar__bar.is-horizontal) {
-  height: 10px;
+  height: 12px;
+  bottom: 0;
+  z-index: 4;
+  opacity: 1;
+}
+
+.table-viewport :deep(.el-scrollbar__bar.is-horizontal .el-scrollbar__thumb) {
+  border-radius: 6px;
 }
 
 .data-table {
