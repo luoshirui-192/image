@@ -209,6 +209,25 @@ const sqlPathColumn = computed(() => {
   return findPathColumn(sqlResult.value.columns, sqlResult.value.rows)
 })
 
+const browseTableInnerStyle = computed(() => {
+  if (!columns.value.length) return {}
+  const minWidth = columns.value.reduce(
+    (sum, col) => sum + (col.is_path_substitute ? 200 : 100),
+    0,
+  )
+  return { minWidth: `${Math.max(minWidth, 100)}px` }
+})
+
+const sqlTableInnerStyle = computed(() => {
+  const cols = sqlResult.value?.columns
+  if (!cols?.length) return {}
+  const minWidth = cols.reduce(
+    (sum, col) => sum + (sqlIsPathColumn(col) ? 200 : 120),
+    0,
+  )
+  return { minWidth: `${Math.max(minWidth, 100)}px` }
+})
+
 function sqlIsPathColumn(colName) {
   return Boolean(sqlColumnMetaByName.value[colName]?.is_path_substitute)
 }
@@ -1507,26 +1526,26 @@ onUnmounted(() => {
                     <div
                       ref="tableWrapRef"
                       v-loading="loadingRows && !tableRows.length"
-                      class="table-viewport"
+                      class="table-viewport table-viewport--native-scroll-x"
                       tabindex="0"
                       @keydown="onPreviewKeydown"
                     >
-                      <el-table
-                        v-if="columns.length"
-                        ref="tableRef"
-                        :data="tableRows"
-                        :height="tableHeight"
-                        :fit="false"
-                        scrollbar-always-on
-                        size="small"
-                        border
-                        stripe
-                        highlight-current-row
-                        :row-key="getRowKey"
-                        class="data-table compact-table"
-                        empty-text="无数据"
-                        @row-click="onTableRowClick"
-                      >
+                      <template v-if="columns.length">
+                        <div class="table-h-scroll-inner" :style="browseTableInnerStyle">
+                          <el-table
+                            ref="tableRef"
+                            :data="tableRows"
+                            :height="tableHeight"
+                            :fit="false"
+                            size="small"
+                            border
+                            stripe
+                            highlight-current-row
+                            :row-key="getRowKey"
+                            class="data-table compact-table"
+                            empty-text="无数据"
+                            @row-click="onTableRowClick"
+                          >
                         <el-table-column
                           v-for="col in columns"
                           :key="col.name"
@@ -1560,7 +1579,9 @@ onUnmounted(() => {
                             </template>
                           </template>
                         </el-table-column>
-                      </el-table>
+                          </el-table>
+                        </div>
+                      </template>
                       <el-empty v-else-if="!loadingRows" description="无数据" />
                     </div>
                     <div v-if="loadingMore" class="load-more-hint">加载更多…</div>
@@ -1637,16 +1658,16 @@ onUnmounted(() => {
                   <div class="table-main">
                     <div
                       ref="sqlTableWrapRef"
-                      class="table-viewport"
+                      class="table-viewport table-viewport--native-scroll-x"
                       tabindex="0"
                       @keydown="onSqlPreviewKeydown"
                     >
+                      <div class="table-h-scroll-inner" :style="sqlTableInnerStyle">
                       <el-table
                         ref="sqlTableRef"
                         :data="sqlTableData"
                         :height="sqlTableHeight"
                         :fit="false"
-                        scrollbar-always-on
                         size="small"
                         border
                         stripe
@@ -1691,6 +1712,7 @@ onUnmounted(() => {
                           </template>
                         </el-table-column>
                       </el-table>
+                      </div>
                     </div>
                   </div>
 
@@ -2298,30 +2320,39 @@ onUnmounted(() => {
   outline: none;
 }
 
-.table-viewport:focus {
-  box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
+.table-viewport--native-scroll-x {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 
-.table-viewport :deep(.el-table__inner-wrapper) {
-  /* Leave room so the horizontal scrollbar is not clipped by overflow:hidden. */
-  padding-bottom: 2px;
+.table-viewport--native-scroll-x::-webkit-scrollbar {
+  height: 12px;
+}
+
+.table-viewport--native-scroll-x::-webkit-scrollbar-thumb {
+  border-radius: 6px;
+  background: var(--el-border-color-darker);
+}
+
+.table-h-scroll-inner {
+  width: max-content;
+  min-width: 100%;
+  height: 100%;
+}
+
+.table-viewport--native-scroll-x :deep(.el-scrollbar__bar.is-horizontal) {
+  display: none !important;
+}
+
+.table-viewport:focus {
+  box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
 }
 
 .table-viewport :deep(.el-scrollbar__bar.is-vertical) {
   width: 10px;
   right: 0;
   z-index: 4;
-}
-
-.table-viewport :deep(.el-scrollbar__bar.is-horizontal) {
-  height: 12px;
-  bottom: 0;
-  z-index: 4;
-  opacity: 1;
-}
-
-.table-viewport :deep(.el-scrollbar__bar.is-horizontal .el-scrollbar__thumb) {
-  border-radius: 6px;
 }
 
 .data-table {
