@@ -107,6 +107,8 @@ const sqlValidating = ref(false)
 const sqlResult = ref(null)
 const sqlError = ref('')
 const sqlSelectedRow = ref(null)
+const sqlTableRef = ref(null)
+const sqlPreviewPanelRef = ref(null)
 
 const migrationSources = ref([])
 const selectionMigrationStats = ref(null)
@@ -229,6 +231,11 @@ const sqlSelectedPreviewItems = computed(() => {
         : null
     })
     .filter(Boolean)
+})
+
+const selectedSqlRowIndex = computed(() => {
+  if (!sqlSelectedRow.value) return -1
+  return sqlTableData.value.indexOf(sqlSelectedRow.value)
 })
 
 function catalogNodeLabel(data) {
@@ -683,7 +690,7 @@ async function handleSqlExecute() {
   try {
     const res = await executeSqlApi(sql, sqlSimulateContext.value)
     sqlResult.value = res.data
-    sqlSelectedRow.value = sqlTableData.value[0] || null
+    selectSqlPreviewRow(sqlTableData.value[0] ?? null)
   } catch (err) {
     sqlResult.value = null
     sqlError.value = err.message || '执行失败'
@@ -777,6 +784,67 @@ function onPreviewWheel(event) {
   }
 }
 
+function selectSqlPreviewRow(row, { focusPanel = false } = {}) {
+  sqlSelectedRow.value = row
+  syncSqlTableCurrentRow(row)
+  if (focusPanel) {
+    nextTick(() => sqlPreviewPanelRef.value?.focus())
+  }
+}
+
+function goPrevSqlPreviewRow() {
+  const rows = sqlTableData.value
+  if (rows.length <= 1) return
+  const idx = selectedSqlRowIndex.value
+  if (idx <= 0) return
+  selectSqlPreviewRow(rows[idx - 1])
+}
+
+function goNextSqlPreviewRow() {
+  const rows = sqlTableData.value
+  if (!rows.length) return
+  const idx = selectedSqlRowIndex.value
+  if (idx < 0) {
+    selectSqlPreviewRow(rows[0])
+    return
+  }
+  if (idx < rows.length - 1) {
+    selectSqlPreviewRow(rows[idx + 1])
+  }
+}
+
+function onSqlPreviewKeydown(event) {
+  if (!sqlTableData.value.length) return
+  if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+    event.preventDefault()
+    goPrevSqlPreviewRow()
+  } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+    event.preventDefault()
+    goNextSqlPreviewRow()
+  }
+}
+
+function onSqlPreviewWheel(event) {
+  const rows = sqlTableData.value
+  if (rows.length <= 1 || previewWheelLocked) return
+  if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
+  event.preventDefault()
+  previewWheelLocked = true
+  window.setTimeout(() => {
+    previewWheelLocked = false
+  }, 200)
+  if (event.deltaY > 0) {
+    goNextSqlPreviewRow()
+  } else if (event.deltaY < 0) {
+    goPrevSqlPreviewRow()
+  }
+}
+
+function onSqlTableRowClick(row, _column, event) {
+  if (event?.target?.closest?.('button, a, .el-button')) return
+  selectSqlPreviewRow(row, { focusPanel: true })
+}
+
 function onTableRowClick(row, _column, event) {
   if (event?.target?.closest?.('button, a, .el-button')) return
   selectPreviewRow(row, { focusPanel: true })
@@ -803,7 +871,7 @@ function rowPreviewCells(row) {
 function openPreview(pathCellValue, row) {
   if (!pathCellValue?.image_info_id) return
   if (rightTab.value === 'sql') {
-    sqlSelectedRow.value = row
+    selectSqlPreviewRow(row, { focusPanel: true })
     return
   }
   selectPreviewRow(row, { focusPanel: true })
@@ -1068,11 +1136,25 @@ function syncTableCurrentRow(row) {
   )
 }
 
+function syncSqlTableCurrentRow(row) {
+  highlightAndScrollTableRow(
+    sqlTableRef,
+    row,
+    (a, b) => a === b,
+  )
+}
+
 watch(tableRows, () => {
   if (selectedRow.value && !tableRows.value.includes(selectedRow.value)) {
     selectedRow.value = null
   }
   setupTableViewport()
+})
+
+watch(sqlTableData, () => {
+  if (sqlSelectedRow.value && !sqlTableData.value.includes(sqlSelectedRow.value)) {
+    sqlSelectedRow.value = null
+  }
 })
 
 watch(activeViewId, (id, oldId) => {
@@ -1408,6 +1490,7 @@ onUnmounted(() => {
               <el-alert v-if="sqlError" :title="sqlError" type="error" show-icon :closable="false" class="sql-error" />
               <el-table
                 v-if="sqlTableData.length"
+                ref="sqlTableRef"
                 :data="sqlTableData"
                 size="small"
                 border
@@ -1415,7 +1498,7 @@ onUnmounted(() => {
                 highlight-current-row
                 max-height="420"
                 class="sql-result-table"
-                @row-click="(row) => { sqlSelectedRow = row }"
+                @row-click="onSqlTableRowClick"
               >
                 <el-table-column
                   v-for="col in sqlResult.columns"
@@ -1453,11 +1536,30 @@ onUnmounted(() => {
                   </template>
                 </el-table-column>
               </el-table>
-              <div v-if="sqlSelectedPreviewItems.length" class="row-preview-panel sql-preview-panel">
+              <div
+                v-if="sqlTableData.length"
+                ref="sqlPreviewPanelRef"
+                class="row-preview-panel sql-preview-panel"
+                tabindex="0"
+                @keydown="onSqlPreviewKeydown"
+                @wheel="onSqlPreviewWheel"
+              >
                 <div class="row-preview-head">
                   <span>SQL 结果预览</span>
+                  <span v-if="sqlSelectedPreviewItems.length" class="row-preview-count">
+                    {{ sqlSelectedPreviewItems.length }} 张
+                  </span>
+                  <span
+                    v-if="sqlTableData.length > 1 && selectedSqlRowIndex >= 0"
+                    class="row-preview-count"
+                  >
+                    第 {{ selectedSqlRowIndex + 1 }} / {{ sqlTableData.length }} 行
+                  </span>
+                  <span v-if="sqlTableData.length > 1" class="row-preview-hint">
+                    聚焦后 ↑↓ 或滚轮切换行
+                  </span>
                 </div>
-                <div class="row-preview-strip">
+                <div v-if="sqlSelectedPreviewItems.length" class="row-preview-strip">
                   <div
                     v-for="item in sqlSelectedPreviewItems"
                     :key="item.column"
@@ -1473,6 +1575,9 @@ onUnmounted(() => {
                     />
                     <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
                   </div>
+                </div>
+                <div v-else class="row-preview-empty">
+                  点击结果行切换选中；已迁移的图片会显示在下方（无图/未迁移行仅高亮表格行）
                 </div>
               </div>
               <el-empty v-else-if="!sqlExecuting" description="执行 SELECT 后在此显示结果" />
