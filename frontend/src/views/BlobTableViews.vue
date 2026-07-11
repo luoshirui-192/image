@@ -95,9 +95,6 @@ function getRowKey(row) {
   return base || JSON.stringify(row)
 }
 
-let browsePreviewWheelLocked = false
-let sqlPreviewWheelLocked = false
-
 const loadingCatalog = ref(false)
 const selectedCatalogObject = ref(null)
 const pendingRestorePk = ref('')
@@ -828,22 +825,6 @@ function onPreviewKeydown(event) {
   }
 }
 
-function onPreviewWheel(event) {
-  const rows = tableRows.value
-  if (rows.length <= 1 || browsePreviewWheelLocked) return
-  if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
-  event.preventDefault()
-  browsePreviewWheelLocked = true
-  window.setTimeout(() => {
-    browsePreviewWheelLocked = false
-  }, 200)
-  if (event.deltaY > 0) {
-    void goNextPreviewRow()
-  } else if (event.deltaY < 0) {
-    goPrevPreviewRow()
-  }
-}
-
 function focusSqlBrowse() {
   nextTick(() => sqlTableWrapRef.value?.focus())
 }
@@ -888,22 +869,6 @@ function onSqlPreviewKeydown(event) {
   } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
     event.preventDefault()
     goNextSqlPreviewRow()
-  }
-}
-
-function onSqlPreviewWheel(event) {
-  const rows = sqlTableData.value
-  if (rows.length <= 1 || sqlPreviewWheelLocked) return
-  if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
-  event.preventDefault()
-  sqlPreviewWheelLocked = true
-  window.setTimeout(() => {
-    sqlPreviewWheelLocked = false
-  }, 200)
-  if (event.deltaY > 0) {
-    goNextSqlPreviewRow()
-  } else if (event.deltaY < 0) {
-    goPrevSqlPreviewRow()
   }
 }
 
@@ -1532,7 +1497,6 @@ onUnmounted(() => {
                       class="table-viewport"
                       tabindex="0"
                       @keydown="onPreviewKeydown"
-                      @wheel.capture="onPreviewWheel"
                     >
                       <el-table
                         v-if="columns.length"
@@ -1593,7 +1557,6 @@ onUnmounted(() => {
                     class="row-preview-panel"
                     tabindex="0"
                     @keydown="onPreviewKeydown"
-                    @wheel="onPreviewWheel"
                   >
                     <div class="row-preview-head">
                       <span>行预览</span>
@@ -1607,7 +1570,7 @@ onUnmounted(() => {
                         第 {{ selectedPreviewRowIndex + 1 }} / {{ tableRows.length }} 行
                       </span>
                       <span v-if="tableRows.length > 1 || hasMore" class="row-preview-hint">
-                        点击结果区后 ↑↓←→ 或滚轮切换行（到底部会自动加载下一页）
+                        点击结果区后 ↑↓←→ 切换行（到底部会自动加载下一页）
                       </span>
                     </div>
                     <div v-if="selectedRowPreviewItems.length" class="row-preview-strip">
@@ -1662,7 +1625,6 @@ onUnmounted(() => {
                       class="table-viewport"
                       tabindex="0"
                       @keydown="onSqlPreviewKeydown"
-                      @wheel.capture="onSqlPreviewWheel"
                     >
                       <el-table
                         ref="sqlTableRef"
@@ -1720,7 +1682,6 @@ onUnmounted(() => {
                     class="row-preview-panel sql-preview-panel"
                     tabindex="0"
                     @keydown="onSqlPreviewKeydown"
-                    @wheel.capture="onSqlPreviewWheel"
                   >
                     <div class="row-preview-head">
                       <span>SQL 结果预览</span>
@@ -1734,7 +1695,7 @@ onUnmounted(() => {
                         第 {{ selectedSqlRowIndex + 1 }} / {{ sqlTableData.length }} 行
                       </span>
                       <span v-if="sqlTableData.length > 1" class="row-preview-hint">
-                        点击结果区后 ↑↓←→ 或滚轮切换行
+                        点击结果区后 ↑↓←→ 切换行
                       </span>
                     </div>
                     <div v-if="sqlSelectedPreviewItems.length" class="row-preview-strip">
