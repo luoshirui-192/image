@@ -108,6 +108,7 @@ const sqlExecuting = ref(false)
 const sqlValidating = ref(false)
 const sqlResult = ref(null)
 const sqlError = ref('')
+const sqlTableData = ref([])
 const sqlSelectedRow = ref(null)
 const sqlTableRef = ref(null)
 const sqlTableWrapRef = ref(null)
@@ -197,12 +198,12 @@ const sqlSimulateContext = computed(() => {
   return base
 })
 
-const sqlColumnMetaByName = computed(() => sqlColumnMetaMap(sqlResult.value?.column_meta))
+function rebuildSqlTableData() {
+  const result = sqlResult.value
+  sqlTableData.value = result ? rowsToRecords(result.columns, result.rows) : []
+}
 
-const sqlTableData = computed(() => {
-  if (!sqlResult.value) return []
-  return rowsToRecords(sqlResult.value.columns, sqlResult.value.rows)
-})
+const sqlColumnMetaByName = computed(() => sqlColumnMetaMap(sqlResult.value?.column_meta))
 
 const sqlPathColumn = computed(() => {
   if (!sqlResult.value) return null
@@ -739,11 +740,14 @@ async function handleSqlExecute() {
   try {
     const res = await executeSqlApi(sql, sqlSimulateContext.value)
     sqlResult.value = res.data
+    rebuildSqlTableData()
     await nextTick()
     selectSqlPreviewRow(sqlTableData.value[0] ?? null, { focusBrowse: true })
     setupSqlTableViewport()
   } catch (err) {
     sqlResult.value = null
+    sqlTableData.value = []
+    sqlSelectedRow.value = null
     sqlError.value = err.message || '执行失败'
   } finally {
     sqlExecuting.value = false
@@ -1255,10 +1259,11 @@ function syncTableCurrentRow(row) {
 }
 
 function syncSqlTableCurrentRow(row) {
+  const idx = row ? sqlTableData.value.indexOf(row) : -1
   highlightAndScrollTableRow(
     sqlTableRef,
     row,
-    (a, b) => a === b,
+    (a, b) => a === b || (idx >= 0 && sqlTableData.value.indexOf(a) === idx),
   )
 }
 
@@ -1270,9 +1275,6 @@ watch(tableRows, () => {
 })
 
 watch(sqlTableData, () => {
-  if (sqlSelectedRow.value && !sqlTableData.value.includes(sqlSelectedRow.value)) {
-    sqlSelectedRow.value = null
-  }
   if (rightTab.value === 'sql') {
     setupSqlTableViewport()
   }
@@ -1524,7 +1526,7 @@ onUnmounted(() => {
                       class="table-viewport"
                       tabindex="0"
                       @keydown="onPreviewKeydown"
-                      @wheel="onPreviewWheel"
+                      @wheel.capture="onPreviewWheel"
                     >
                       <el-table
                         v-if="columns.length"
@@ -1654,7 +1656,7 @@ onUnmounted(() => {
                       class="table-viewport"
                       tabindex="0"
                       @keydown="onSqlPreviewKeydown"
-                      @wheel="onSqlPreviewWheel"
+                      @wheel.capture="onSqlPreviewWheel"
                     >
                       <el-table
                         ref="sqlTableRef"
@@ -1712,7 +1714,7 @@ onUnmounted(() => {
                     class="row-preview-panel sql-preview-panel"
                     tabindex="0"
                     @keydown="onSqlPreviewKeydown"
-                    @wheel="onSqlPreviewWheel"
+                    @wheel.capture="onSqlPreviewWheel"
                   >
                     <div class="row-preview-head">
                       <span>SQL 结果预览</span>
