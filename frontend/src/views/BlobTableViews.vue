@@ -111,7 +111,6 @@ const sqlTableData = ref([])
 const sqlSelectedRow = ref(null)
 const sqlTableRef = ref(null)
 const sqlTableWrapRef = ref(null)
-const sqlTableHeight = ref(420)
 const sqlPreviewPanelRef = ref(null)
 
 const migrationSources = ref([])
@@ -944,12 +943,10 @@ function openPreview(pathCellValue, row) {
 
 function syncBrowseTableHeight() {
   const wrap = tableWrapRef.value
-  const main = wrap?.parentElement
-  if (wrap && main) {
+  if (wrap) {
     let available = wrap.clientHeight
     if (available <= 0) {
-      const hint = main.querySelector('.load-more-hint')
-      available = main.clientHeight - (hint?.offsetHeight ?? 0)
+      available = wrap.parentElement?.clientHeight ?? 0
     }
     if (available > 200) {
       tableHeight.value = Math.max(200, Math.floor(available) - TABLE_SCROLLBAR_GUTTER)
@@ -961,27 +958,8 @@ function syncBrowseTableHeight() {
   tableHeight.value = Math.max(420, window.innerHeight - reservedTop - TABLE_SCROLLBAR_GUTTER)
 }
 
-function syncSqlTableHeight() {
-  const wrap = sqlTableWrapRef.value
-  const main = wrap?.parentElement
-  if (wrap && main) {
-    let available = wrap.clientHeight
-    if (available <= 0) {
-      available = main.clientHeight
-    }
-    if (available > 200) {
-      sqlTableHeight.value = Math.max(200, Math.floor(available) - TABLE_SCROLLBAR_GUTTER)
-      return
-    }
-  }
-
-  const reservedTop = 56 + 16 + 16 + 20 + 12 + 40 + 72 + 48 + 36 + 280
-  sqlTableHeight.value = Math.max(320, window.innerHeight - reservedTop - TABLE_SCROLLBAR_GUTTER)
-}
-
 function syncTableHeight() {
   syncBrowseTableHeight()
-  syncSqlTableHeight()
 }
 
 function layoutTableRefs() {
@@ -1527,11 +1505,11 @@ onUnmounted(() => {
                 </div>
 
                 <div class="table-panel">
-                  <div class="table-main">
+                  <div class="browse-result-list-wrap">
                     <div
                       ref="tableWrapRef"
                       v-loading="loadingRows && !tableRows.length"
-                      class="table-viewport table-viewport--native-scroll-x"
+                      class="browse-result-list-scroll"
                       tabindex="0"
                       @keydown="onPreviewKeydown"
                     >
@@ -1556,7 +1534,7 @@ onUnmounted(() => {
                           :key="col.name"
                           :prop="col.name"
                           :label="col.name"
-                          :min-width="col.is_path_substitute ? 200 : 100"
+                          :width="col.is_path_substitute ? 200 : 100"
                           show-overflow-tooltip
                         >
                           <template #default="{ row }">
@@ -1660,11 +1638,10 @@ onUnmounted(() => {
                 </div>
 
                 <div v-if="sqlTableData.length" class="table-panel sql-results-panel">
-                  <div class="table-main">
+                  <div class="sql-result-list-wrap">
                     <div
                       ref="sqlTableWrapRef"
-                      class="table-viewport table-viewport--native-scroll"
-                      :style="{ maxHeight: `${sqlTableHeight}px` }"
+                      class="sql-result-list-scroll"
                       tabindex="0"
                       @keydown="onSqlPreviewKeydown"
                     >
@@ -1686,7 +1663,7 @@ onUnmounted(() => {
                           :key="col"
                           :prop="col"
                           :label="col"
-                          :min-width="sqlIsPathColumn(col) ? 200 : 120"
+                          :width="sqlColumnWidth(col)"
                           show-overflow-tooltip
                         >
                           <template #default="{ row }">
@@ -2218,6 +2195,73 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* 上方数据列表（与底部图片预览区分开） */
+.sql-result-list-wrap,
+.browse-result-list-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.browse-result-list-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 180px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior: contain;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  outline: none;
+  scrollbar-width: thin;
+}
+
+.sql-result-list-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 180px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  outline: none;
+  scrollbar-width: thin;
+}
+
+.sql-result-list-scroll::-webkit-scrollbar,
+.browse-result-list-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 12px;
+}
+
+.sql-result-list-scroll::-webkit-scrollbar-thumb,
+.browse-result-list-scroll::-webkit-scrollbar-thumb {
+  border-radius: 6px;
+  background: var(--el-border-color-darker);
+}
+
+.sql-result-list-scroll:focus,
+.browse-result-list-scroll:focus {
+  box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
+}
+
+.browse-result-list-scroll :deep(.el-scrollbar__bar.is-horizontal),
+.sql-result-list-scroll :deep(.el-scrollbar__bar.is-horizontal) {
+  display: none !important;
+}
+
+.sql-result-list-scroll :deep(.el-table__body-wrapper),
+.sql-result-list-scroll :deep(.el-table__header-wrapper) {
+  overflow: visible !important;
+}
+
+.browse-result-list-scroll :deep(.el-table__body-wrapper) {
+  overflow-x: visible !important;
 }
 
 .row-preview-panel {
