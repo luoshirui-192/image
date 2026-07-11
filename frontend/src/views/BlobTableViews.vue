@@ -94,7 +94,8 @@ function getRowKey(row) {
   return base || JSON.stringify(row)
 }
 
-let previewWheelLocked = false
+let browsePreviewWheelLocked = false
+let sqlPreviewWheelLocked = false
 
 const loadingCatalog = ref(false)
 const selectedCatalogObject = ref(null)
@@ -109,6 +110,8 @@ const sqlResult = ref(null)
 const sqlError = ref('')
 const sqlSelectedRow = ref(null)
 const sqlTableRef = ref(null)
+const sqlTableWrapRef = ref(null)
+const sqlTableHeight = ref(420)
 const sqlPreviewPanelRef = ref(null)
 
 const migrationSources = ref([])
@@ -736,7 +739,9 @@ async function handleSqlExecute() {
   try {
     const res = await executeSqlApi(sql, sqlSimulateContext.value)
     sqlResult.value = res.data
-    selectSqlPreviewRow(sqlTableData.value[0] ?? null)
+    await nextTick()
+    selectSqlPreviewRow(sqlTableData.value[0] ?? null, { focusBrowse: true })
+    setupSqlTableViewport()
   } catch (err) {
     sqlResult.value = null
     sqlError.value = err.message || '执行失败'
@@ -816,12 +821,12 @@ function onPreviewKeydown(event) {
 
 function onPreviewWheel(event) {
   const rows = tableRows.value
-  if (rows.length <= 1 || previewWheelLocked) return
+  if (rows.length <= 1 || browsePreviewWheelLocked) return
   if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
   event.preventDefault()
-  previewWheelLocked = true
+  browsePreviewWheelLocked = true
   window.setTimeout(() => {
-    previewWheelLocked = false
+    browsePreviewWheelLocked = false
   }, 200)
   if (event.deltaY > 0) {
     void goNextPreviewRow()
@@ -830,11 +835,18 @@ function onPreviewWheel(event) {
   }
 }
 
-function selectSqlPreviewRow(row, { focusPanel = false } = {}) {
+function focusSqlBrowse() {
+  nextTick(() => sqlTableWrapRef.value?.focus())
+}
+
+function selectSqlPreviewRow(row, { focusPanel = false, focusBrowse = false } = {}) {
   sqlSelectedRow.value = row
   syncSqlTableCurrentRow(row)
   if (focusPanel) {
     nextTick(() => sqlPreviewPanelRef.value?.focus())
+  }
+  if (focusBrowse || focusPanel) {
+    focusSqlBrowse()
   }
 }
 
@@ -872,12 +884,12 @@ function onSqlPreviewKeydown(event) {
 
 function onSqlPreviewWheel(event) {
   const rows = sqlTableData.value
-  if (rows.length <= 1 || previewWheelLocked) return
+  if (rows.length <= 1 || sqlPreviewWheelLocked) return
   if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
   event.preventDefault()
-  previewWheelLocked = true
+  sqlPreviewWheelLocked = true
   window.setTimeout(() => {
-    previewWheelLocked = false
+    sqlPreviewWheelLocked = false
   }, 200)
   if (event.deltaY > 0) {
     goNextSqlPreviewRow()
@@ -886,14 +898,20 @@ function onSqlPreviewWheel(event) {
   }
 }
 
+function getSqlRowKey(row) {
+  const idx = sqlTableData.value.indexOf(row)
+  return idx >= 0 ? `sql-${idx}` : `sql-${String(row?.id ?? row?.ID ?? '')}`
+}
+
 function onSqlTableRowClick(row, _column, event) {
   if (event?.target?.closest?.('button, a, .el-button')) return
-  selectSqlPreviewRow(row, { focusPanel: true })
+  selectSqlPreviewRow(row, { focusBrowse: true })
 }
 
 function onTableRowClick(row, _column, event) {
   if (event?.target?.closest?.('button, a, .el-button')) return
   selectPreviewRow(row, { focusPanel: true })
+  nextTick(() => tableWrapRef.value?.focus())
 }
 
 function rowPreviewCells(row) {
@@ -917,7 +935,7 @@ function rowPreviewCells(row) {
 function openPreview(pathCellValue, row) {
   if (!pathCellValue?.image_info_id) return
   if (rightTab.value === 'sql') {
-    selectSqlPreviewRow(row, { focusPanel: true })
+    selectSqlPreviewRow(row, { focusBrowse: true })
     return
   }
   selectPreviewRow(row, { focusPanel: true })
@@ -934,25 +952,54 @@ function syncTableHeight() {
     }
     if (available > 200) {
       tableHeight.value = Math.floor(available)
+      syncSqlTableHeight()
       return
     }
   }
 
   const reservedTop = 56 + 16 + 16 + 20 + 12 + 40 + 72 + 48 + 36 + 210
   tableHeight.value = Math.max(420, window.innerHeight - reservedTop)
+  syncSqlTableHeight()
+}
+
+function syncSqlTableHeight() {
+  const wrap = sqlTableWrapRef.value
+  const main = wrap?.parentElement
+  if (wrap && main) {
+    let available = wrap.clientHeight
+    if (available <= 0) {
+      available = main.clientHeight
+    }
+    if (available > 200) {
+      sqlTableHeight.value = Math.floor(available)
+      return
+    }
+  }
+
+  const reservedTop = 56 + 16 + 16 + 20 + 12 + 40 + 72 + 48 + 36 + 280
+  sqlTableHeight.value = Math.max(320, window.innerHeight - reservedTop)
+}
+
+function setupSqlTableViewport() {
+  setupTableViewport()
 }
 
 function setupTableViewport() {
   nextTick(() => {
     syncTableHeight()
-    if (tableWrapRef.value) {
+    if (tableWrapRef.value || sqlTableWrapRef.value) {
       if (!resizeObserver) {
         resizeObserver = new ResizeObserver(() => {
           syncTableHeight()
         })
       }
       resizeObserver.disconnect()
-      resizeObserver.observe(tableWrapRef.value)
+      if (tableWrapRef.value) {
+        resizeObserver.observe(tableWrapRef.value)
+      }
+      if (sqlTableWrapRef.value) {
+        resizeObserver.observe(sqlTableWrapRef.value)
+      }
     }
     bindTableScroll()
   })
@@ -1226,6 +1273,9 @@ watch(sqlTableData, () => {
   if (sqlSelectedRow.value && !sqlTableData.value.includes(sqlSelectedRow.value)) {
     sqlSelectedRow.value = null
   }
+  if (rightTab.value === 'sql') {
+    setupSqlTableViewport()
+  }
 })
 
 watch(activeViewId, (id, oldId) => {
@@ -1297,6 +1347,13 @@ watch(rightTab, (tab) => {
     nextTick(() => {
       if (selectedRow.value) {
         syncTableCurrentRow(selectedRow.value)
+      }
+    })
+  } else if (tab === 'sql') {
+    setupSqlTableViewport()
+    nextTick(() => {
+      if (sqlSelectedRow.value) {
+        syncSqlTableCurrentRow(sqlSelectedRow.value)
       }
     })
   }
@@ -1465,6 +1522,9 @@ onUnmounted(() => {
                       ref="tableWrapRef"
                       v-loading="loadingRows && !tableRows.length"
                       class="table-viewport"
+                      tabindex="0"
+                      @keydown="onPreviewKeydown"
+                      @wheel="onPreviewWheel"
                     >
                       <el-table
                         v-if="columns.length"
@@ -1539,7 +1599,7 @@ onUnmounted(() => {
                         第 {{ selectedPreviewRowIndex + 1 }} / {{ tableRows.length }} 行
                       </span>
                       <span v-if="tableRows.length > 1 || hasMore" class="row-preview-hint">
-                        聚焦后 ↑↓ 或滚轮切换行（到底部会自动加载下一页）
+                        点击结果区后 ↑↓←→ 或滚轮切换行（到底部会自动加载下一页）
                       </span>
                     </div>
                     <div v-if="selectedRowPreviewItems.length" class="row-preview-strip">
@@ -1569,113 +1629,130 @@ onUnmounted(() => {
             </el-tab-pane>
 
             <el-tab-pane label="SQL 查询" name="sql">
-              <div class="sql-editor-wrap">
-                <SqlEditor v-model="sqlText" @execute="handleSqlExecute" />
-              </div>
-              <div class="sql-toolbar">
-                <el-button :loading="sqlValidating" @click="handleSqlValidate">校验</el-button>
-                <el-button type="primary" :loading="sqlExecuting" :icon="VideoPlay" @click="handleSqlExecute">
-                  执行
-                </el-button>
-                <span v-if="sqlResult" class="sql-meta">
-                  {{ sqlResult.row_count }} 行 · {{ sqlResult.elapsed_ms }}ms
-                  <span v-if="sqlResult.truncated">（已截断）</span>
-                </span>
-              </div>
-              <el-alert v-if="sqlError" :title="sqlError" type="error" show-icon :closable="false" class="sql-error" />
-              <el-table
-                v-if="sqlTableData.length"
-                ref="sqlTableRef"
-                :data="sqlTableData"
-                size="small"
-                border
-                stripe
-                highlight-current-row
-                max-height="420"
-                class="sql-result-table"
-                @row-click="onSqlTableRowClick"
-              >
-                <el-table-column
-                  v-for="col in sqlResult.columns"
-                  :key="col"
-                  :prop="col"
-                  :label="col"
-                  :min-width="sqlIsPathColumn(col) ? 200 : 120"
-                  show-overflow-tooltip
-                >
-                  <template #default="{ row }">
-                    <template v-if="sqlIsPathColumn(col) || sqlPathCell(row, col)">
-                      <div class="path-cell">
-                        <el-tag
-                          :type="statusTagType(sqlPathCell(row, col)?.status)"
-                          size="small"
-                          class="path-tag"
-                        >
-                          {{ statusLabel(sqlPathCell(row, col)?.status) }}
-                        </el-tag>
-                        <span class="path-text">{{ sqlFormatCell(row, col) }}</span>
-                        <el-button
-                          v-if="sqlPathCell(row, col)?.image_info_id"
-                          link
-                          type="primary"
-                          size="small"
-                          @click.stop="openPreview(sqlPathCell(row, col), row)"
-                        >
-                          预览
-                        </el-button>
-                      </div>
-                    </template>
-                    <template v-else>
-                      {{ formatCellValue(row[col]) }}
-                    </template>
-                  </template>
-                </el-table-column>
-              </el-table>
-              <div
-                v-if="sqlTableData.length"
-                ref="sqlPreviewPanelRef"
-                class="row-preview-panel sql-preview-panel"
-                tabindex="0"
-                @keydown="onSqlPreviewKeydown"
-                @wheel="onSqlPreviewWheel"
-              >
-                <div class="row-preview-head">
-                  <span>SQL 结果预览</span>
-                  <span v-if="sqlSelectedPreviewItems.length" class="row-preview-count">
-                    {{ sqlSelectedPreviewItems.length }} 张
-                  </span>
-                  <span
-                    v-if="sqlTableData.length > 1 && selectedSqlRowIndex >= 0"
-                    class="row-preview-count"
-                  >
-                    第 {{ selectedSqlRowIndex + 1 }} / {{ sqlTableData.length }} 行
-                  </span>
-                  <span v-if="sqlTableData.length > 1" class="row-preview-hint">
-                    聚焦后 ↑↓ 或滚轮切换行
-                  </span>
+              <div class="sql-pane">
+                <div class="sql-pane-head">
+                  <div class="sql-editor-wrap">
+                    <SqlEditor v-model="sqlText" @execute="handleSqlExecute" />
+                  </div>
+                  <div class="sql-toolbar">
+                    <el-button :loading="sqlValidating" @click="handleSqlValidate">校验</el-button>
+                    <el-button type="primary" :loading="sqlExecuting" :icon="VideoPlay" @click="handleSqlExecute">
+                      执行
+                    </el-button>
+                    <span v-if="sqlResult" class="sql-meta">
+                      {{ sqlResult.row_count }} 行 · {{ sqlResult.elapsed_ms }}ms
+                      <span v-if="sqlResult.truncated">（已截断）</span>
+                    </span>
+                  </div>
+                  <el-alert v-if="sqlError" :title="sqlError" type="error" show-icon :closable="false" class="sql-error" />
                 </div>
-                <div v-if="sqlSelectedPreviewItems.length" class="row-preview-strip">
+
+                <div v-if="sqlTableData.length" class="table-panel sql-results-panel">
+                  <div class="table-main">
+                    <div
+                      ref="sqlTableWrapRef"
+                      class="table-viewport"
+                      tabindex="0"
+                      @keydown="onSqlPreviewKeydown"
+                      @wheel="onSqlPreviewWheel"
+                    >
+                      <el-table
+                        ref="sqlTableRef"
+                        :data="sqlTableData"
+                        :height="sqlTableHeight"
+                        size="small"
+                        border
+                        stripe
+                        highlight-current-row
+                        :row-key="getSqlRowKey"
+                        class="sql-result-table compact-table"
+                        @row-click="onSqlTableRowClick"
+                      >
+                        <el-table-column
+                          v-for="col in sqlResult.columns"
+                          :key="col"
+                          :prop="col"
+                          :label="col"
+                          :min-width="sqlIsPathColumn(col) ? 200 : 120"
+                          show-overflow-tooltip
+                        >
+                          <template #default="{ row }">
+                            <template v-if="sqlIsPathColumn(col) || sqlPathCell(row, col)">
+                              <div class="path-cell">
+                                <el-tag
+                                  :type="statusTagType(sqlPathCell(row, col)?.status)"
+                                  size="small"
+                                  class="path-tag"
+                                >
+                                  {{ statusLabel(sqlPathCell(row, col)?.status) }}
+                                </el-tag>
+                                <span class="path-text">{{ sqlFormatCell(row, col) }}</span>
+                                <el-button
+                                  v-if="sqlPathCell(row, col)?.image_info_id"
+                                  link
+                                  type="primary"
+                                  size="small"
+                                  @click.stop="openPreview(sqlPathCell(row, col), row)"
+                                >
+                                  预览
+                                </el-button>
+                              </div>
+                            </template>
+                            <template v-else>
+                              {{ formatCellValue(row[col]) }}
+                            </template>
+                          </template>
+                        </el-table-column>
+                      </el-table>
+                    </div>
+                  </div>
+
                   <div
-                    v-for="item in sqlSelectedPreviewItems"
-                    :key="item.column"
-                    class="row-preview-card"
+                    ref="sqlPreviewPanelRef"
+                    class="row-preview-panel sql-preview-panel"
+                    tabindex="0"
+                    @keydown="onSqlPreviewKeydown"
+                    @wheel="onSqlPreviewWheel"
                   >
-                    <div class="row-preview-label">{{ item.column }}</div>
-                    <ImagePreview
-                      :key="`${item.cell.image_info_id}-${item.column}`"
-                      :image-id="item.cell.image_info_id"
-                      :image-path="item.cell.path"
-                      :size="120"
-                      :lazy="false"
-                    />
-                    <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
+                    <div class="row-preview-head">
+                      <span>SQL 结果预览</span>
+                      <span v-if="sqlSelectedPreviewItems.length" class="row-preview-count">
+                        {{ sqlSelectedPreviewItems.length }} 张
+                      </span>
+                      <span
+                        v-if="sqlTableData.length > 1 && selectedSqlRowIndex >= 0"
+                        class="row-preview-count"
+                      >
+                        第 {{ selectedSqlRowIndex + 1 }} / {{ sqlTableData.length }} 行
+                      </span>
+                      <span v-if="sqlTableData.length > 1" class="row-preview-hint">
+                        点击结果区后 ↑↓←→ 或滚轮切换行
+                      </span>
+                    </div>
+                    <div v-if="sqlSelectedPreviewItems.length" class="row-preview-strip">
+                      <div
+                        v-for="item in sqlSelectedPreviewItems"
+                        :key="item.column"
+                        class="row-preview-card"
+                      >
+                        <div class="row-preview-label">{{ item.column }}</div>
+                        <ImagePreview
+                          :key="`${item.cell.image_info_id}-${item.column}`"
+                          :image-id="item.cell.image_info_id"
+                          :image-path="item.cell.path"
+                          :size="120"
+                          :lazy="false"
+                        />
+                        <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
+                      </div>
+                    </div>
+                    <div v-else class="row-preview-empty">
+                      点击表格行切换选中；已迁移的图片会显示在下方（无图/未迁移行仅高亮表格行）
+                    </div>
                   </div>
                 </div>
-                <div v-else class="row-preview-empty">
-                  点击结果行切换选中；已迁移的图片会显示在下方（无图/未迁移行仅高亮表格行）
-                </div>
+                <el-empty v-else-if="!sqlExecuting" description="执行 SELECT 后在此显示结果" />
               </div>
-              <el-empty v-else-if="!sqlExecuting" description="执行 SELECT 后在此显示结果" />
             </el-tab-pane>
           </el-tabs>
         </main>
@@ -1995,7 +2072,24 @@ onUnmounted(() => {
 }
 
 .sql-preview-panel {
-  margin-top: 12px;
+  margin-top: 0;
+}
+
+.sql-pane {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sql-pane-head {
+  flex-shrink: 0;
+}
+
+.sql-results-panel {
+  margin-top: 8px;
 }
 
 .sql-editor-wrap {
@@ -2216,6 +2310,11 @@ onUnmounted(() => {
   overflow: hidden;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
+  outline: none;
+}
+
+.table-viewport:focus {
+  box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
 }
 
 .data-table {
