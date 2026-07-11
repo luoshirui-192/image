@@ -9,7 +9,7 @@ x-backend-environment: &backend-environment
   SECRET_KEY: ${SECRET_KEY:-change-me-docker-secret-key}
   IMAGE_ACCESS_SECRET: ${IMAGE_ACCESS_SECRET:-change-me-docker-image-secret}
   DB_ENGINE: mysql
-  DB_HOST: db
+  DB_HOST: ${DB_HOST:-db}
   DB_PORT: "3306"
   DB_NAME: ${MYSQL_DATABASE:-image_db}
   DB_USER: ${MYSQL_USER:-image_db}
@@ -35,6 +35,7 @@ x-backend-environment: &backend-environment
 
 services:
   db:
+    profiles: ["with-builtin-mysql"]
     image: mysql:8.0
     restart: unless-stopped
     environment:

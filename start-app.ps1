@@ -24,13 +24,13 @@ if (-not (Test-Path .env)) {
 python docker/set-env.py
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$composeArgs = @("-f", $ComposeFile)
-if (Test-Path "docker-compose.app.override.yml") {
-  $composeArgs += @("-f", "docker-compose.app.override.yml")
-  Write-Host "compose: using docker-compose.app.override.yml (external MySQL)"
-} elseif (Select-String -Path .env -Pattern '^USE_EXTERNAL_MYSQL=(1|true|yes)' -Quiet) {
-  $composeArgs += @("-f", "docker-compose.app.external-db.example.yml")
-  Write-Host "compose: USE_EXTERNAL_MYSQL=1, host.docker.internal:3306"
+$composeArgs = @()
+bash scripts/compose-app-args.sh 2>$null | ForEach-Object { $composeArgs += $_ }
+
+$dbHost = (Select-String -Path .env -Pattern '^DB_HOST=' | Select-Object -First 1)
+if ($dbHost -and $dbHost.Line -notmatch '=db\s*$' -and $dbHost.Line -notmatch '=db$') {
+  docker start mysql8039 2>$null
+  docker compose -f docker-compose.app.yml stop db 2>$null
 }
 
 docker compose @composeArgs up -d --build

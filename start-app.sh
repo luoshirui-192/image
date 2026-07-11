@@ -4,7 +4,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
-COMPOSE_FILE="docker-compose.app.yml"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "请先安装 Docker: https://docs.docker.com/get-docker/"
@@ -14,7 +13,7 @@ fi
 if [ ! -f .env ]; then
   cp .env.app.example .env
   echo "已创建 .env（来自 .env.app.example）"
-  echo "请编辑 MYSQL_* 密码、PUBLIC_URL、MINIO_* 后重新运行本脚本。"
+  echo "请编辑 MYSQL_* / DB_HOST / PUBLIC_URL、MINIO_* 后重新运行本脚本。"
   exit 0
 fi
 
@@ -53,23 +52,32 @@ python3 docker/set-env.py
 COMPOSE_ARGS=()
 while IFS= read -r line; do
   COMPOSE_ARGS+=("$line")
-done < <(bash scripts/compose-app-args.sh | grep -v '^compose:')
+done < <(bash scripts/compose-app-args.sh 2>/dev/null)
+
+# 外部 MySQL：确保宿主机库在跑，停掉可能冲突的内置 db
+DB_HOST_VAL="${DB_HOST:-db}"
+if [ "$DB_HOST_VAL" != "db" ] || [ -f docker-compose.app.override.yml ] || grep -qE '^USE_EXTERNAL_MYSQL=(1|true|yes)' .env 2>/dev/null; then
+  echo "外部 MySQL 模式: DB_HOST=${DB_HOST_VAL}"
+  if docker ps -a --format '{{.Names}}' | grep -qx 'mysql8039'; then
+    docker start mysql8039 2>/dev/null || true
+    echo "已尝试启动 mysql8039"
+  fi
+  docker compose -f docker-compose.app.yml stop db 2>/dev/null || true
+fi
 
 docker compose "${COMPOSE_ARGS[@]}" up -d --build
 
 echo ""
 echo "=========================================="
-echo " 机器 A 已启动（MySQL + 应用层）"
+echo " 机器 A 已启动"
 PUBLIC_URL="$(grep '^PUBLIC_URL=' .env | cut -d= -f2- | tr -d '\r')"
-echo " 浏览器访问: ${PUBLIC_URL:-http://localhost}"
-if [ -f docker-compose.app.override.yml ] || grep -qE '^USE_EXTERNAL_MYSQL=(1|true|yes)' .env 2>/dev/null; then
-  echo " MySQL: 宿主机 3306（host.docker.internal，如 mysql8039）"
-  echo " 提示: 重启前请确认宿主机 MySQL 已启动: docker start mysql8039"
+echo " 浏览器: ${PUBLIC_URL:-http://localhost}"
+if [ "$DB_HOST_VAL" != "db" ]; then
+  echo " MySQL: 宿主机 (${DB_HOST_VAL}:3306) — 数据在 mysql8039 等现有库"
 else
-  echo " MySQL: 本机 Docker 容器 db（127.0.0.1:${MYSQL_PUBLISH_PORT:-3306}）"
+  echo " MySQL: compose 内置 db"
 fi
-echo " 图片存储: ${STORAGE_BACKEND}（minio 见 MINIO_ENDPOINT）"
-echo " 默认账号: admin / admin123"
+echo ""
+echo " 诊断: bash scripts/diagnose-machine-a.sh"
 echo " 停止: docker compose ${COMPOSE_ARGS[*]} down"
-echo " 详细说明: README-MACHINE-A.md"
 echo "=========================================="
