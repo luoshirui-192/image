@@ -356,25 +356,80 @@ function findMigrationSourceForView(view) {
   return migrationSources.value.find((source) => viewMigrationKey(source) === key) || null
 }
 
+function blobColumnsFromView(view) {
+  if (!view) return []
+  const raw = view.blob_columns
+  if (Array.isArray(raw) && raw.length) return raw
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed) && parsed.length) return parsed
+    } catch {
+      // ignore invalid JSON
+    }
+  }
+  return view.blob_column ? [view.blob_column] : []
+}
+
+function objectHasMigratableBlob(catalogData, view) {
+  if (blobColumnsFromView(view).length) return true
+  return !!(catalogData?.blobColumns?.length)
+}
+
+function resolveMigrationHint({ stats, view, catalogData, loading = false }) {
+  if (!objectHasMigratableBlob(catalogData, view)) return null
+  if (loading) return { text: '检测迁移状态…', type: 'info' }
+  if (!view) {
+    return catalogData?.blobColumns?.length ? { text: '未配置迁移', type: 'info' } : null
+  }
+  const source = findMigrationSourceForView(view)
+  if (!source?.id || stats?.noSource) return { text: '未配置迁移', type: 'info' }
+  if (!stats || stats.error) return { text: '迁移状态未知', type: 'info' }
+
+  const pending = Number(stats.pending ?? 0)
+  if (pending > 0) return { text: `待迁移 ${pending}`, type: 'warning' }
+
+  const migrated = Number(stats.migrated ?? 0)
+  const total = Number(stats.total_with_blob ?? 0)
+  if (total > 0 && migrated >= total) return { text: '已迁完', type: 'success' }
+  if (migrated > 0) return { text: `已迁移 ${migrated}/${total}`, type: 'success' }
+  return { text: '无可迁移', type: 'info' }
+}
+
+function catalogMigrationTag(data) {
+  if (!data || data.nodeType !== 'object') return null
+  const view = findSavedViewForCatalogNode(data)
+  const source = view ? findMigrationSourceForView(view) : null
+  return resolveMigrationHint({
+    stats: source?.stats,
+    view,
+    catalogData: data,
+    loading: false,
+  })
+}
+
+const selectionMigrationTag = computed(() => {
+  const view = savedViewForSelection.value
+  const source = view ? findMigrationSourceForView(view) : null
+  const stats = selectionMigrationStats.value ?? source?.stats ?? null
+  return resolveMigrationHint({
+    stats,
+    view,
+    catalogData: selectedCatalogObject.value,
+    loading: loadingSelectionMigrationStats.value,
+  })
+})
+
+const selectionMigrationHint = computed(() => selectionMigrationTag.value?.text || '')
+
 const showMigrateForSelection = computed(() => {
   if (!savedViewForSelection.value) return false
   if (loadingSelectionMigrationStats.value) return false
   const stats = selectionMigrationStats.value
   if (!stats) return false
-  if (stats.noSource) return true
-  if (stats.error) return true
+  if (stats.noSource) return objectHasMigratableBlob(selectedCatalogObject.value, savedViewForSelection.value)
+  if (stats.error) return false
   return Number(stats.pending ?? 0) > 0
-})
-
-const selectionPendingHint = computed(() => {
-  if (!savedViewForSelection.value) return ''
-  if (loadingSelectionMigrationStats.value) return '检测迁移状态…'
-  const stats = selectionMigrationStats.value
-  if (!stats || stats.noSource) return '尚未配置迁移'
-  if (stats.error) return '迁移状态未知'
-  const pending = Number(stats.pending ?? 0)
-  if (pending <= 0) return ''
-  return `待迁移 ${pending} 条`
 })
 
 async function loadCatalogTree(root, resolve) {
@@ -472,9 +527,9 @@ async function onCatalogObjectSelected(data) {
   persistBrowseUiState()
 }
 
-async function loadMigrationSources() {
+async function loadMigrationSources({ includeStats = true } = {}) {
   try {
-    const res = await callWithRetry(() => listBlobMigrationSourcesApi({ includeStats: false }))
+    const res = await callWithRetry(() => listBlobMigrationSourcesApi({ includeStats }))
     migrationSources.value = res.data || []
   } catch {
     migrationSources.value = []
@@ -501,21 +556,6 @@ async function refreshSelectionMigrationStats() {
   } finally {
     loadingSelectionMigrationStats.value = false
   }
-}
-
-function blobColumnsFromView(view) {
-  if (!view) return []
-  const raw = view.blob_columns
-  if (Array.isArray(raw) && raw.length) return raw
-  if (typeof raw === 'string' && raw.trim()) {
-    try {
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed) && parsed.length) return parsed
-    } catch {
-      // ignore invalid JSON
-    }
-  }
-  return view.blob_column ? [view.blob_column] : []
 }
 
 function buildMigrationSourcePayload(view, form) {
@@ -1128,6 +1168,7 @@ async function loadViews() {
     if (activeViewId.value && !views.value.some((v) => v.id === activeViewId.value)) {
       activeViewId.value = null
     }
+    await loadMigrationSources()
   } catch (err) {
     views.value = []
     ElMessage.error(err.message || '加载配置失败')
@@ -1406,7 +1447,7 @@ onMounted(async () => {
   window.addEventListener('resize', syncTableHeight)
 
   browseReady.value = false
-  await Promise.all([loadViews(), loadMigrationSources()])
+  await loadViews()
   restoreBrowseUiState()
 
   const catalog = selectedCatalogObject.value
@@ -1451,7 +1492,7 @@ onUnmounted(() => {
         <aside class="view-list-panel">
           <div class="panel-head">
             <span>数据库目录</span>
-            <el-button link type="primary" :loading="loadingViews" title="刷新已保存配置" @click="loadViews">
+            <el-button link type="primary" :loading="loadingViews" title="刷新表视图配置" @click="loadViews">
               <el-icon><Refresh /></el-icon>
             </el-button>
           </div>
@@ -1469,13 +1510,13 @@ onUnmounted(() => {
                 <span class="catalog-node">
                   <span class="catalog-node-label">{{ catalogNodeLabel(data) }}</span>
                   <el-tag
-                    v-if="findSavedViewForCatalogNode(data)"
+                    v-if="catalogMigrationTag(data)"
                     size="small"
-                    type="success"
+                    :type="catalogMigrationTag(data).type"
                     effect="plain"
-                    class="catalog-saved-tag"
+                    class="catalog-migration-tag"
                   >
-                    已保存
+                    {{ catalogMigrationTag(data).text }}
                   </el-tag>
                 </span>
               </template>
@@ -1483,18 +1524,15 @@ onUnmounted(() => {
           </div>
 
           <div v-if="selectedCatalogObject" class="catalog-selection">
-            <div class="catalog-selection-title">
-              已选对象
-              <el-tag v-if="savedViewForSelection" size="small" type="success" effect="plain">已保存</el-tag>
-            </div>
+            <div class="catalog-selection-title">已选对象</div>
             <div>{{ selectedCatalogObject.database }}.{{ selectedCatalogObject.label }}</div>
             <div class="field-hint">
               {{ selectedCatalogObject.objectType === 'view' ? '数据库视图' : '表' }}
+              <template v-if="selectionMigrationHint">
+                · {{ selectionMigrationHint }}
+              </template>
               <template v-if="savedViewForSelection?.row_count != null">
                 · {{ savedViewForSelection.row_count }} 行
-              </template>
-              <template v-if="selectionPendingHint">
-                · {{ selectionPendingHint }}
               </template>
             </div>
             <div class="catalog-actions">
@@ -1534,7 +1572,7 @@ onUnmounted(() => {
                   show-icon
                   class="browse-db-mismatch"
                   :title="catalogDatabaseMismatch"
-                  description="表数据按已保存配置的库名查询。请重新点击左侧目录中的表，或删除配置后重建。"
+                  description="表数据按配置的库名查询。请重新点击左侧目录中的表，或删除配置后重建。"
                 />
                 <div class="data-head">
                   <div>
@@ -1678,7 +1716,7 @@ onUnmounted(() => {
                   </div>
                 </div>
               </div>
-              <el-empty v-else description="请在左侧目录选择对象，或打开已保存的配置" />
+              <el-empty v-else description="请在左侧目录选择表或视图" />
             </el-tab-pane>
 
             <el-tab-pane label="SQL 查询" name="sql">
@@ -2064,7 +2102,7 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-.catalog-saved-tag {
+.catalog-migration-tag {
   flex-shrink: 0;
   height: 18px;
   padding: 0 4px;
