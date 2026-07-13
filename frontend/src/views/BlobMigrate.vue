@@ -27,6 +27,7 @@ import {
   getBlobMigrationSourceApi,
   listCategoriesApi,
   listExternalDbConnectionsApi,
+  provisionExternalDbTableViewsApi,
   retryBlobMigrationJobApi,
   runBlobMigrationApi,
   runGlobalDataSyncApi,
@@ -96,6 +97,7 @@ const connForm = reactive({
 })
 const connSaving = ref(false)
 const connTesting = ref(false)
+const provisionConnId = ref(null)
 
 const selectedDb = computed(() => databases.value.find((d) => d.alias === form.dbAlias))
 
@@ -143,7 +145,7 @@ async function saveConnection() {
   }
   connSaving.value = true
   try {
-    await createExternalDbConnectionApi({
+    const res = await createExternalDbConnectionApi({
       name: connForm.name.trim(),
       host: connForm.host.trim(),
       port: Number(connForm.port) || 3306,
@@ -153,7 +155,7 @@ async function saveConnection() {
       charset: connForm.charset || 'utf8',
       remark: connForm.remark.trim(),
     })
-    ElMessage.success('旧库连接已保存')
+    ElMessage.success(res.message || '旧库连接已保存')
     connForm.password = ''
     await Promise.all([loadConnections(), loadDatabases()])
   } catch (err) {
@@ -198,6 +200,18 @@ async function testSavedConnection(row) {
     await loadConnections()
   } finally {
     connTesting.value = false
+  }
+}
+
+async function syncConnectionTableViews(row) {
+  provisionConnId.value = row.id
+  try {
+    const res = await provisionExternalDbTableViewsApi(row.id)
+    ElMessage.success(res.message || '表视图同步完成')
+  } catch (err) {
+    ElMessage.error(err.message || '表视图同步失败')
+  } finally {
+    provisionConnId.value = null
   }
 }
 
@@ -958,10 +972,18 @@ onUnmounted(() => {
               <span v-else>—</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="180">
+          <el-table-column label="操作" width="260">
             <template #default="{ row }">
               <el-button link type="primary" @click="useConnection(row)">选用</el-button>
               <el-button link type="primary" :loading="connTesting" @click="testSavedConnection(row)">测试</el-button>
+              <el-button
+                link
+                type="primary"
+                :loading="provisionConnId === row.id"
+                @click="syncConnectionTableViews(row)"
+              >
+                同步表视图
+              </el-button>
               <el-button link type="danger" @click="removeConnection(row)">删除</el-button>
             </template>
           </el-table-column>

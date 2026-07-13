@@ -232,6 +232,10 @@ export function testSavedExternalDbConnectionApi(id, data = {}) {
   return request.post(`/images/blob-migration/connections/${id}/test/`, data, { skipGlobalError: true })
 }
 
+export function provisionExternalDbTableViewsApi(id) {
+  return request.post(`/images/blob-migration/connections/${id}/provision-table-views/`, {}, { timeout: 600000 })
+}
+
 export function listBlobCatalogConnectionsApi() {
   return request.get('/images/blob-catalog/connections/')
 }

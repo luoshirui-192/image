@@ -280,7 +280,7 @@ class BlobTableViewCreateSerializer(serializers.Serializer):
     blob_columns = serializers.ListField(
         child=serializers.CharField(max_length=64, trim_whitespace=True),
         required=False,
-        allow_empty=False,
+        allow_empty=True,
     )
     display_columns = serializers.ListField(
         child=serializers.CharField(max_length=64),
@@ -293,8 +293,6 @@ class BlobTableViewCreateSerializer(serializers.Serializer):
     def validate(self, attrs):
         blob_column = (attrs.get("blob_column") or "").strip()
         blob_columns = attrs.get("blob_columns") or []
-        if not blob_column and not blob_columns:
-            raise serializers.ValidationError("请提供 blob_column 或 blob_columns")
         if blob_column and not blob_columns:
             attrs["blob_column"] = blob_column
         elif blob_columns and not blob_column:

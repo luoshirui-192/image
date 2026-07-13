@@ -14,11 +14,13 @@ from rest_framework.test import APIClient
 
 from images.blob_table_view_service import (
     _batch_ids_with_nonempty_blob,
+    auto_provision_table_views_for_connection,
     create_table_view,
     fetch_view_rows,
+    infer_pk_column_from_detail,
     update_table_view,
 )
-from images.models import BlobTableView, ImageInfo, ImageSourceMap
+from images.models import BlobTableView, ExternalDbConnection, ImageInfo, ImageSourceMap
 from users.models import SysUser
 
 SQLITE_TABLES = """
@@ -82,6 +84,11 @@ CREATE TABLE IF NOT EXISTS image_source_map (
     source_column VARCHAR(64) NOT NULL DEFAULT '',
     image_info_id INTEGER NOT NULL,
     migrated_at DATETIME NOT NULL,
+    source_content_hash VARCHAR(64) NOT NULL DEFAULT '',
+    source_blob_length INTEGER NOT NULL DEFAULT 0,
+    last_checked_at DATETIME NULL,
+    sync_status VARCHAR(20) NOT NULL DEFAULT 'unknown',
+    last_sync_error VARCHAR(500) NOT NULL DEFAULT '',
     UNIQUE(source_table, source_id, source_column)
 );
 CREATE TABLE IF NOT EXISTS legacy_photos (
@@ -94,6 +101,10 @@ CREATE TABLE IF NOT EXISTS legacy_dual_blob (
     title VARCHAR(100) NOT NULL DEFAULT '',
     photo BLOB NOT NULL,
     thumb BLOB NOT NULL DEFAULT X''
+);
+CREATE TABLE IF NOT EXISTS legacy_plain (
+    code VARCHAR(20) NOT NULL,
+    title VARCHAR(100) NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS external_db_connection (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -490,6 +501,102 @@ class BlobTableViewTestCase(TestCase):
         self.assertEqual(row["photo"]["status"], "migrated")
         self.assertEqual(row["thumb"]["status"], "migrated")
         self.assertEqual(row["thumb"]["image_info_id"], thumb_image.id)
+
+    def test_infer_pk_column_falls_back_to_first_column(self):
+        pk = infer_pk_column_from_detail(
+            [
+                {"name": "code", "column_key": ""},
+                {"name": "title", "column_key": ""},
+            ]
+        )
+        self.assertEqual(pk, "code")
+
+    def test_create_and_fetch_plain_table_view_without_blob(self):
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM legacy_plain")
+            cursor.execute(
+                "INSERT INTO legacy_plain (code, title) VALUES ('A001', 'hello')"
+            )
+        plain_view = create_table_view(
+            name="plain",
+            db_alias="default",
+            source_table="legacy_plain",
+            source_pk_column="missing_pk",
+            blob_column="",
+            blob_columns=[],
+        )
+        payload = fetch_view_rows(plain_view.id, offset=0, limit=10)
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["rows"][0]["code"], "A001")
+        self.assertEqual(payload["rows"][0]["title"], "hello")
+
+    def test_auto_provision_table_views_for_connection(self):
+        now = timezone.now()
+        record = ExternalDbConnection.objects.create(
+            name="mock legacy",
+            host="127.0.0.1",
+            port=3306,
+            db_name="legacy_db",
+            username="root",
+            password_encrypted="x",
+            enabled=1,
+            create_time=now,
+            update_time=now,
+        )
+        catalog = {
+            "objects": [
+                {"name": "legacy_photos", "object_type": "table", "blob_columns": [{"column": "photo"}]},
+                {"name": "legacy_plain", "object_type": "table", "blob_columns": []},
+            ]
+        }
+        photo_detail = {
+            "columns": [
+                {"name": "id", "column_key": "PRI"},
+                {"name": "title", "column_key": ""},
+                {"name": "photo", "column_key": ""},
+            ],
+            "blob_columns": [{"column": "photo", "data_type": "blob"}],
+        }
+        plain_detail = {
+            "columns": [
+                {"name": "code", "column_key": ""},
+                {"name": "title", "column_key": ""},
+            ],
+            "blob_columns": [],
+        }
+
+        def _fake_create(**kwargs):
+            return BlobTableView.objects.create(
+                name=kwargs.get("name") or "",
+                db_alias=kwargs["db_alias"],
+                database_name=kwargs.get("database_name") or "",
+                source_table=kwargs["source_table"],
+                source_object_type=kwargs.get("source_object_type") or "table",
+                path_lookup_table="",
+                blob_column_path_mappings="",
+                source_pk_column=kwargs["source_pk_column"],
+                blob_column=kwargs.get("blob_column") or "",
+                blob_columns=kwargs.get("blob_columns") and '["photo"]' if kwargs.get("blob_columns") else "",
+                display_columns="",
+                where_clause="",
+                remark=kwargs.get("remark") or "",
+                create_time=now,
+                update_time=now,
+            )
+
+        with patch("images.blob_catalog_service.list_database_objects", return_value=catalog), patch(
+            "images.blob_catalog_service.get_database_object_detail",
+            side_effect=[photo_detail, plain_detail],
+        ), patch("images.blob_table_view_service.create_table_view", side_effect=_fake_create):
+            result = auto_provision_table_views_for_connection(record)
+
+        self.assertEqual(result["created"], 2)
+        self.assertEqual(result["failed"], 0)
+        views = BlobTableView.objects.filter(db_alias=f"external_{record.id}").order_by("source_table")
+        self.assertEqual(views.count(), 2)
+        plain = views.get(source_table="legacy_plain")
+        self.assertEqual(plain.source_pk_column, "code")
+        self.assertEqual(plain.blob_column, "")
 
     def test_api_blob_browse_alias_list(self):
         self.client.force_authenticate(user=self.admin)

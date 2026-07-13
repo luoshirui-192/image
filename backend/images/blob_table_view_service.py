@@ -18,6 +18,7 @@ from images.blob_migration_service import (
     validate_where_clause,
 )
 from images.blob_schema_helpers import (
+    OBJECT_TYPE_TABLE,
     parse_blob_column_path_mappings,
     parse_blob_columns,
     serialize_blob_column_path_mappings,
@@ -151,9 +152,30 @@ def _fetch_remote_columns(conn, table: str) -> list[VirtualColumn]:
 
 def _view_blob_columns(view: BlobTableView) -> list[str]:
     cols = parse_blob_columns(view.blob_columns, view.blob_column)
-    if not cols:
-        raise BlobTableViewError("至少需要一个 BLOB 列")
     return [validate_identifier(col, label="BLOB 列") for col in cols]
+
+
+def infer_pk_column_from_detail(columns: list[dict]) -> str:
+    """Pick PK column, else ``id``, else the first column."""
+    for col in columns:
+        if (col.get("column_key") or "") == "PRI":
+            return validate_identifier(str(col["name"]), label="主键列")
+    for col in columns:
+        if str(col.get("name") or "").lower() == "id":
+            return validate_identifier(str(col["name"]), label="主键列")
+    if not columns:
+        raise BlobTableViewError("源对象没有可用列")
+    return validate_identifier(str(columns[0]["name"]), label="主键列")
+
+
+def _effective_pk_column(view: BlobTableView, remote_cols: list[VirtualColumn]) -> str:
+    col_map = {c.name: c for c in remote_cols}
+    pk = (view.source_pk_column or "").strip()
+    if pk and pk in col_map:
+        return validate_identifier(pk, label="主键列")
+    if remote_cols:
+        return validate_identifier(remote_cols[0].name, label="主键列")
+    raise BlobTableViewError("源对象没有可用列")
 
 
 def _path_lookup_table(view: BlobTableView) -> str:
@@ -165,14 +187,12 @@ def _path_lookup_table(view: BlobTableView) -> str:
 
 def _resolve_display_columns(view: BlobTableView, remote_cols: list[VirtualColumn]) -> list[VirtualColumn]:
     blob_cols = _view_blob_columns(view)
-    pk_col = validate_identifier(view.source_pk_column, label="主键列")
+    pk_col = _effective_pk_column(view, remote_cols)
     col_map = {c.name: c for c in remote_cols}
 
     for blob_col in blob_cols:
         if blob_col not in col_map:
             raise BlobTableViewError(f"源对象缺少 BLOB 列: {blob_col}")
-    if pk_col not in col_map:
-        raise BlobTableViewError(f"源对象缺少主键列: {pk_col}")
 
     requested = _parse_display_columns(view.display_columns)
     if requested:
@@ -776,14 +796,14 @@ def fetch_simulated_table_rows(
     limit = min(max(1, limit), MAX_ROW_LIMIT)
 
     validate_db_alias(view.db_alias)
-    pk = validate_identifier(view.source_pk_column, label="主键列")
-    blob_cols = _view_blob_columns(view)
     table = _quote_ident(view.source_table)
     where_sql, where_params = _build_where(view, extra_where)
 
     with _view_db_session(view) as alias:
         conn = connections[alias]
         remote_cols = _fetch_remote_columns(conn, view.source_table)
+        pk = _effective_pk_column(view, remote_cols)
+        blob_cols = _view_blob_columns(view)
         display_cols = _resolve_display_columns(view, remote_cols)
         from images.blob_view_path_service import resolve_effective_path_mappings
 
@@ -1089,3 +1109,76 @@ def update_table_view(view_id: int, **fields) -> BlobTableView:
 def delete_table_view(view_id: int) -> None:
     view = _load_view(view_id)
     view.delete()
+
+
+def auto_provision_table_views_for_connection(record) -> dict[str, int | list[str]]:
+    """Create saved table-view configs for every table/view on a new external connection."""
+    from images.blob_catalog_service import BlobCatalogError, get_database_object_detail, list_database_objects
+    from images.external_db_service import external_alias
+    from images.models import ExternalDbConnection
+
+    if not isinstance(record, ExternalDbConnection):
+        raise BlobTableViewError("无效的外部库连接")
+
+    db_alias = external_alias(record.id)
+    database = (record.db_name or "").strip()
+    if not database:
+        return {"created": 0, "skipped": 0, "failed": 0, "errors": ["连接未配置数据库名"]}
+
+    try:
+        catalog = list_database_objects(database, db_alias=db_alias)
+    except BlobCatalogError as exc:
+        return {"created": 0, "skipped": 0, "failed": 0, "errors": [str(exc)]}
+
+    created = 0
+    skipped = 0
+    failed = 0
+    errors: list[str] = []
+
+    for obj in catalog.get("objects") or []:
+        obj_name = str(obj.get("name") or "").strip()
+        obj_type = str(obj.get("object_type") or OBJECT_TYPE_TABLE).strip() or OBJECT_TYPE_TABLE
+        if not obj_name:
+            continue
+
+        if BlobTableView.objects.filter(
+            db_alias=db_alias,
+            database_name=database,
+            source_table=obj_name,
+            source_object_type=obj_type,
+        ).exists():
+            skipped += 1
+            continue
+
+        try:
+            detail = get_database_object_detail(database, obj_name, db_alias=db_alias)
+            columns = detail.get("columns") or []
+            pk = infer_pk_column_from_detail(columns)
+            blob_cols = [
+                str(item.get("column") or "").strip()
+                for item in (detail.get("blob_columns") or [])
+                if str(item.get("column") or "").strip()
+            ]
+            create_table_view(
+                name=obj_name,
+                db_alias=db_alias,
+                database_name=database,
+                source_table=obj_name,
+                source_object_type=obj_type,
+                source_pk_column=pk,
+                blob_columns=blob_cols or None,
+                blob_column=blob_cols[0] if blob_cols else "",
+                remark="连接建立时自动生成",
+            )
+            created += 1
+        except Exception as exc:
+            failed += 1
+            if len(errors) < 20:
+                errors.append(f"{obj_name}: {exc}")
+
+    return {
+        "created": created,
+        "skipped": skipped,
+        "failed": failed,
+        "errors": errors,
+    }

@@ -1,6 +1,8 @@
 """Tests for Web-configured external DB connections."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from django.contrib.auth.hashers import make_password
 from django.db import connection
 from django.test import TestCase
@@ -58,18 +60,22 @@ class ExternalDbConnectionApiTestCase(TestCase):
 
     def test_create_and_list_connection(self):
         self.client.force_authenticate(user=self.admin)
-        res = self.client.post(
-            "/api/images/blob-migration/connections/",
-            {
-                "name": "旧库A",
-                "host": "192.168.1.10",
-                "port": 3306,
-                "db_name": "legacy",
-                "username": "reader",
-                "password": "secret",
-            },
-            format="json",
-        )
+        with patch(
+            "images.external_db_views.auto_provision_table_views_for_connection",
+            return_value={"created": 0, "skipped": 0, "failed": 0, "errors": []},
+        ):
+            res = self.client.post(
+                "/api/images/blob-migration/connections/",
+                {
+                    "name": "旧库A",
+                    "host": "192.168.1.10",
+                    "port": 3306,
+                    "db_name": "legacy",
+                    "username": "reader",
+                    "password": "secret",
+                },
+                format="json",
+            )
         self.assertEqual(res.status_code, 201)
         record = ExternalDbConnection.objects.get()
         self.assertEqual(record.name, "旧库A")
@@ -98,3 +104,30 @@ class ExternalDbConnectionApiTestCase(TestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 400)
+
+    def test_provision_table_views_for_saved_connection(self):
+        self.client.force_authenticate(user=self.admin)
+        record = ExternalDbConnection.objects.create(
+            name="旧库C",
+            host="192.168.1.10",
+            port=3306,
+            db_name="legacy",
+            username="reader",
+            password_encrypted="enc",
+            enabled=1,
+        )
+        provision = {"created": 3, "skipped": 1, "failed": 0, "errors": []}
+        with patch(
+            "images.external_db_views.auto_provision_table_views_for_connection",
+            return_value=provision,
+        ) as mock_provision:
+            res = self.client.post(
+                f"/api/images/blob-migration/connections/{record.id}/provision-table-views/"
+            )
+
+        self.assertEqual(res.status_code, 200)
+        body = res.json()
+        self.assertEqual(body["code"], 0)
+        self.assertIn("新增 3 个", body["message"])
+        self.assertEqual(body["data"]["table_view_provision"], provision)
+        mock_provision.assert_called_once()

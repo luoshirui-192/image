@@ -212,8 +212,6 @@ def resolve_source_metadata(
         serialize_blob_columns(blob_columns) if blob_columns else None,
         blob_column,
     )
-    if not cols:
-        raise BlobViewPathError("至少需要一个 BLOB 列")
 
     obj_type = normalize_object_type(object_type) if object_type else None
     if conn.vendor == "mysql":
@@ -224,6 +222,28 @@ def resolve_source_metadata(
             obj_type = detected
     elif obj_type is None:
         obj_type = OBJECT_TYPE_TABLE
+
+    if not cols:
+        lookup = ""
+        if obj_type == OBJECT_TYPE_VIEW:
+            try:
+                lookup = resolve_path_lookup_table(
+                    conn,
+                    database=database,
+                    object_name=object_name,
+                    object_type=obj_type,
+                    manual=path_lookup_table,
+                    blob_columns=[],
+                )
+            except BlobViewPathError:
+                lookup = ""
+        return {
+            "source_object_type": obj_type,
+            "path_lookup_table": lookup,
+            "blob_columns": [],
+            "blob_column": "",
+            "blob_column_path_mappings": [],
+        }
 
     lookup = resolve_path_lookup_table(
         conn,

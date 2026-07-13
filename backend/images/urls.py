@@ -47,6 +47,7 @@ from images.external_db_views import (
     BlobMigrationDatabaseListView,
     ExternalDbConnectionDetailView,
     ExternalDbConnectionListCreateView,
+    ExternalDbConnectionProvisionTableViewsView,
     ExternalDbConnectionTestSavedView,
     ExternalDbConnectionTestView,
 )
@@ -57,6 +58,11 @@ urlpatterns = [
     path("blob-migration/connections/test/", ExternalDbConnectionTestView.as_view(), name="blob-migration-connections-test"),
     path("blob-migration/connections/<int:pk>/", ExternalDbConnectionDetailView.as_view(), name="blob-migration-connection-detail"),
     path("blob-migration/connections/<int:pk>/test/", ExternalDbConnectionTestSavedView.as_view(), name="blob-migration-connection-test"),
+    path(
+        "blob-migration/connections/<int:pk>/provision-table-views/",
+        ExternalDbConnectionProvisionTableViewsView.as_view(),
+        name="blob-migration-connection-provision-table-views",
+    ),
     path("blob-migration/discover/", BlobMigrationDiscoverView.as_view(), name="blob-migration-discover"),
     path("blob-migration/sources/", BlobMigrationSourceListCreateView.as_view(), name="blob-migration-sources"),
     path("blob-migration/sources/<int:pk>/", BlobMigrationSourceDetailView.as_view(), name="blob-migration-source-detail"),
