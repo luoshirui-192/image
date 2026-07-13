@@ -20,6 +20,7 @@ from images.blob_migration_job_service import (
 )
 from images.blob_migration_service import (
     BlobMigrationError,
+    count_live_map_entries_by_source_table,
     count_migration_candidates,
     create_migration_source,
     discover_blob_tables,
@@ -414,6 +415,16 @@ class BlobMigrationJobErrorsExportView(APIView):
         response = HttpResponse(csv_text, content_type="text/csv; charset=utf-8")
         response["Content-Disposition"] = f'attachment; filename="blob_migration_job_{pk}_errors.csv"'
         return response
+
+
+@extend_schema(tags=["blob-migration"])
+class BlobMigrationMapStatsView(APIView):
+    """GET /api/images/blob-migration/map-stats/ — live image_source_map counts by source_table."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request):
+        return success_response({"by_source_table": count_live_map_entries_by_source_table()})
 
 
 def _format_errors(errors: dict) -> str:

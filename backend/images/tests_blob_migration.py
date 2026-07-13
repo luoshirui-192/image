@@ -464,6 +464,30 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(ImageInfo.objects.filter(is_delete=0).count(), 1)
 
     @override_settings(UPLOAD_ROOT=None)
+    def test_map_stats_api(self):
+        now = timezone.now()
+        image = ImageInfo.objects.create(
+            image_name="mapped.png",
+            image_path="2026/01/mapped.png",
+            upload_time=now,
+            update_time=now,
+            upload_user="test",
+            is_delete=0,
+        )
+        ImageSourceMap.objects.create(
+            source_table="legacy_photos",
+            source_id="1",
+            source_column="photo",
+            image_info_id=image.id,
+            migrated_at=now,
+        )
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get("/api/images/blob-migration/map-stats/")
+        self.assertEqual(res.status_code, 200)
+        counts = res.json()["data"]["by_source_table"]
+        self.assertEqual(counts["legacy_photos"], 1)
+
+    @override_settings(UPLOAD_ROOT=None)
     def test_api_discover_and_dry_run(self):
         upload_root = str(self.upload_root)
         self.client.force_authenticate(user=self.admin)

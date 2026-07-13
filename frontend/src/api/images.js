@@ -112,6 +112,10 @@ export function listBlobMigrationSourcesApi({ includeStats = false } = {}) {
   })
 }
 
+export function listBlobMigrationMapStatsApi() {
+  return request.get('/images/blob-migration/map-stats/', { timeout: 60000 })
+}
+
 export function createBlobMigrationSourceApi(data, { includeStats = false } = {}) {
   return request.post('/images/blob-migration/sources/', data, {
     params: { include_stats: includeStats ? 1 : 0 },

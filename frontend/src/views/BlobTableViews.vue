@@ -17,6 +17,7 @@ import {
   listBlobCatalogDatabasesApi,
   listBlobCatalogObjectsApi,
   listBlobMigrationSourcesApi,
+  listBlobMigrationMapStatsApi,
   listBlobTableViewsApi,
   updateBlobTableViewApi,
   getBlobMigrationSourceApi,
@@ -118,6 +119,7 @@ const sqlHBarRef = ref(null)
 const sqlPreviewPanelRef = ref(null)
 
 const migrationSources = ref([])
+const mapStatsByTable = ref({})
 const selectionMigrationStats = ref(null)
 const loadingSelectionMigrationStats = ref(false)
 
@@ -350,10 +352,22 @@ function viewMigrationKey(view) {
   return `${view.db_alias || ''}\0${view.database_name || ''}\0${view.source_table || ''}\0${view.source_object_type || 'table'}`
 }
 
-function findMigrationSourceForView(view) {
-  if (!view) return null
-  const key = viewMigrationKey(view)
-  return migrationSources.value.find((source) => viewMigrationKey(source) === key) || null
+function findMigrationSourceForView(view, catalogData = null) {
+  if (!view && !catalogData) return null
+  const dbAlias = (view?.db_alias || catalogData?.connection?.alias || '').trim()
+  const table = (view?.source_table || catalogData?.label || '').trim()
+  const objType = (view?.source_object_type || catalogData?.objectType || 'table').trim() || 'table'
+  const dbName = (view?.database_name || catalogData?.database || '').trim()
+  if (!dbAlias || !table) return null
+
+  return migrationSources.value.find((source) => {
+    if ((source.db_alias || '').trim() !== dbAlias) return false
+    if ((source.source_table || '').trim() !== table) return false
+    if ((source.source_object_type || 'table').trim() !== objType) return false
+    const sourceDb = (source.database_name || '').trim()
+    if (sourceDb && dbName && sourceDb !== dbName) return false
+    return true
+  }) || null
 }
 
 function blobColumnsFromView(view) {
@@ -376,30 +390,59 @@ function objectHasMigratableBlob(catalogData, view) {
   return !!(catalogData?.blobColumns?.length)
 }
 
+function mapLookupTables(view, catalogData) {
+  const tables = []
+  const seen = new Set()
+  const add = (name) => {
+    const value = (name || '').trim()
+    if (!value || seen.has(value)) return
+    seen.add(value)
+    tables.push(value)
+  }
+  add(view?.path_lookup_table)
+  add(view?.source_table || catalogData?.label)
+  return tables
+}
+
+function countMapMigratedEntries(view, catalogData) {
+  let total = 0
+  for (const table of mapLookupTables(view, catalogData)) {
+    total += Number(mapStatsByTable.value[table] || 0)
+  }
+  return total
+}
+
 function resolveMigrationHint({ stats, view, catalogData, loading = false }) {
   if (!objectHasMigratableBlob(catalogData, view)) return null
   if (loading) return { text: '检测迁移状态…', type: 'info' }
-  if (!view) {
-    return catalogData?.blobColumns?.length ? { text: '未配置迁移', type: 'info' } : null
+
+  const source = findMigrationSourceForView(view, catalogData)
+  const resolvedStats = stats?.noSource
+    ? null
+    : (stats ?? source?.stats ?? null)
+
+  if (source?.id && resolvedStats && !resolvedStats.error) {
+    const pending = Number(resolvedStats.pending ?? 0)
+    if (pending > 0) return { text: `待迁移 ${pending}`, type: 'warning' }
+
+    const migrated = Number(resolvedStats.migrated ?? 0)
+    const total = Number(resolvedStats.total_with_blob ?? 0)
+    if (total > 0 && migrated >= total) return { text: '已迁完', type: 'success' }
+    if (migrated > 0) return { text: `已迁移 ${migrated}/${total}`, type: 'success' }
+    return { text: '无可迁移', type: 'info' }
   }
-  const source = findMigrationSourceForView(view)
-  if (!source?.id || stats?.noSource) return { text: '未配置迁移', type: 'info' }
-  if (!stats || stats.error) return { text: '迁移状态未知', type: 'info' }
 
-  const pending = Number(stats.pending ?? 0)
-  if (pending > 0) return { text: `待迁移 ${pending}`, type: 'warning' }
+  const mapped = countMapMigratedEntries(view, catalogData)
+  if (mapped > 0) return { text: `已迁移 ${mapped}`, type: 'success' }
 
-  const migrated = Number(stats.migrated ?? 0)
-  const total = Number(stats.total_with_blob ?? 0)
-  if (total > 0 && migrated >= total) return { text: '已迁完', type: 'success' }
-  if (migrated > 0) return { text: `已迁移 ${migrated}/${total}`, type: 'success' }
-  return { text: '无可迁移', type: 'info' }
+  if (view || catalogData?.blobColumns?.length) return { text: '未配置迁移', type: 'info' }
+  return null
 }
 
 function catalogMigrationTag(data) {
   if (!data || data.nodeType !== 'object') return null
   const view = findSavedViewForCatalogNode(data)
-  const source = view ? findMigrationSourceForView(view) : null
+  const source = findMigrationSourceForView(view, data)
   return resolveMigrationHint({
     stats: source?.stats,
     view,
@@ -410,12 +453,15 @@ function catalogMigrationTag(data) {
 
 const selectionMigrationTag = computed(() => {
   const view = savedViewForSelection.value
-  const source = view ? findMigrationSourceForView(view) : null
-  const stats = selectionMigrationStats.value ?? source?.stats ?? null
+  const catalogData = selectedCatalogObject.value
+  const source = findMigrationSourceForView(view, catalogData)
+  const stats = selectionMigrationStats.value?.noSource
+    ? null
+    : (selectionMigrationStats.value ?? source?.stats ?? null)
   return resolveMigrationHint({
     stats,
     view,
-    catalogData: selectedCatalogObject.value,
+    catalogData,
     loading: loadingSelectionMigrationStats.value,
   })
 })
@@ -536,13 +582,23 @@ async function loadMigrationSources({ includeStats = true } = {}) {
   }
 }
 
+async function loadMapStats() {
+  try {
+    const res = await callWithRetry(() => listBlobMigrationMapStatsApi())
+    mapStatsByTable.value = res.data?.by_source_table || {}
+  } catch {
+    mapStatsByTable.value = {}
+  }
+}
+
 async function refreshSelectionMigrationStats() {
   const view = savedViewForSelection.value
+  const catalogData = selectedCatalogObject.value
   if (!view) {
     selectionMigrationStats.value = null
     return
   }
-  const source = findMigrationSourceForView(view)
+  const source = findMigrationSourceForView(view, catalogData)
   if (!source?.id) {
     selectionMigrationStats.value = { noSource: true }
     return
@@ -589,8 +645,8 @@ async function startMigrationJob(sourceId) {
   return jobRes.data
 }
 
-async function ensureMigrationSourceForView(view, form) {
-  const existing = findMigrationSourceForView(view)
+async function ensureMigrationSourceForView(view, form, catalogData = null) {
+  const existing = findMigrationSourceForView(view, catalogData ?? selectedCatalogObject.value)
   if (existing?.id) return existing.id
   const sourceRes = await createBlobMigrationSourceApi(buildMigrationSourcePayload(view, form), {
     includeStats: false,
@@ -636,6 +692,7 @@ async function submitSavedViewMigration() {
     }
     ElMessage.success(message)
     migrateDialogVisible.value = false
+    await Promise.all([loadMigrationSources(), loadMapStats()])
     await refreshSelectionMigrationStats()
   } catch (err) {
     ElMessage.error(err.message || '启动迁移失败')
@@ -1169,6 +1226,7 @@ async function loadViews() {
       activeViewId.value = null
     }
     await loadMigrationSources()
+    await loadMapStats()
   } catch (err) {
     views.value = []
     ElMessage.error(err.message || '加载配置失败')

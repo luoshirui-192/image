@@ -1536,6 +1536,23 @@ def invalidate_migration_stats_cache(source_id: int | None = None) -> None:
                 _STATS_CACHE.pop(key, None)
 
 
+def count_live_map_entries_by_source_table() -> dict[str, int]:
+    """Count non-deleted image_source_map rows grouped by source_table."""
+    from django.db.models import Count
+
+    live_ids = ImageInfo.objects.filter(is_delete=0).values("id")
+    rows = (
+        ImageSourceMap.objects.filter(image_info_id__in=live_ids)
+        .values("source_table")
+        .annotate(count=Count("id"))
+    )
+    return {
+        str(row["source_table"]): int(row["count"])
+        for row in rows
+        if (row.get("source_table") or "").strip()
+    }
+
+
 def run_blob_migration(
     source_id: int,
     *,
