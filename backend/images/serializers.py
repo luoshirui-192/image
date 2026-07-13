@@ -114,6 +114,7 @@ class BlobMigrationSourceSerializer(serializers.Serializer):
     where_clause = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
     db_alias = serializers.CharField(required=False, default="default", max_length=32)
     database_name = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    source_uid = serializers.CharField(required=False, allow_blank=True, default="", max_length=36)
     enabled = serializers.IntegerField(required=False, default=1)
     last_run_at = serializers.DateTimeField(read_only=True)
     create_time = serializers.DateTimeField(read_only=True)
@@ -154,6 +155,7 @@ class BlobMigrationSourceSerializer(serializers.Serializer):
                 "where_clause": instance.where_clause,
                 "db_alias": instance.db_alias,
                 "database_name": getattr(instance, "database_name", "") or "",
+                "source_uid": getattr(instance, "source_uid", "") or "",
                 "enabled": instance.enabled,
                 "last_run_at": instance.last_run_at,
                 "auto_sync_enabled": bool(getattr(instance, "auto_sync_enabled", 1)),
@@ -222,6 +224,7 @@ class BlobTableViewSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=100)
     db_alias = serializers.CharField(max_length=32)
     database_name = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    source_uid = serializers.CharField(required=False, allow_blank=True, default="", max_length=36)
     source_table = serializers.CharField(max_length=64)
     source_object_type = serializers.ChoiceField(choices=["table", "view"], required=False, default="table")
     path_lookup_table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
@@ -249,6 +252,7 @@ class BlobTableViewSerializer(serializers.Serializer):
                 "name": instance.name,
                 "db_alias": instance.db_alias,
                 "database_name": instance.database_name or "",
+                "source_uid": getattr(instance, "source_uid", "") or "",
                 "source_table": instance.source_table,
                 "source_object_type": instance.source_object_type or "table",
                 "path_lookup_table": instance.path_lookup_table or "",
@@ -370,3 +374,15 @@ class BlobTableViewPreviewSchemaSerializer(serializers.Serializer):
         required=False,
         allow_empty=True,
     )
+
+
+class BlobMigrationSourceRebindSerializer(serializers.Serializer):
+    db_alias = serializers.CharField(max_length=32)
+    database_name = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    source_table = serializers.CharField(max_length=64, trim_whitespace=True)
+    source_object_type = serializers.ChoiceField(choices=["table", "view"], required=False, default="table")
+    path_lookup_table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+
+
+class BlobTableViewLinkSourceSerializer(serializers.Serializer):
+    source_uid = serializers.CharField(max_length=36, trim_whitespace=True)

@@ -147,6 +147,20 @@ export function runBlobMigrationApi({ sourceId, batchSize = 50, dryRun = false, 
   }, { timeout: 600000, skipGlobalError: true })
 }
 
+export function getBlobMigrationSourceSchemaCheckApi(id) {
+  return request.get(`/images/blob-migration/sources/${id}/schema-check/`, { timeout: 60000 })
+}
+
+export function rebindBlobMigrationSourceApi(id, data) {
+  return request.post(`/images/blob-migration/sources/${id}/rebind/`, data, { timeout: 120000 })
+}
+
+export function linkBlobTableViewSourceApi(viewId, { sourceUid }) {
+  return request.post(`/images/blob-migration/table-views/${viewId}/link-source/`, {
+    source_uid: sourceUid,
+  }, { timeout: 60000 })
+}
+
 export function listBlobMigrationJobsApi({ sourceId } = {}) {
   const params = sourceId != null ? { source_id: sourceId } : undefined
   return request.get('/images/blob-migration/jobs/', { params, timeout: 60000 })

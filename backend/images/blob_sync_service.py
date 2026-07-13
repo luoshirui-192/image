@@ -180,16 +180,9 @@ def _local_file_hash(image_info_id: int) -> str:
 
 
 def _maps_for_source(source: BlobMigrationSource) -> list[int]:
-    from images.blob_sync_context import _source_lookup_tables
+    from images.source_map_service import map_queryset_for_source
 
-    tables = _source_lookup_tables(source)
-    if not tables:
-        return []
-    return list(
-        ImageSourceMap.objects.filter(source_table__in=tables)
-        .order_by("id")
-        .values_list("id", flat=True)
-    )
+    return list(map_queryset_for_source(source).order_by("id").values_list("id", flat=True))
 
 
 def _load_map(pk: int) -> ImageSourceMap:
@@ -204,7 +197,12 @@ def process_map_fingerprint(
     index=None,
 ) -> str:
     if ctx is None:
-        ctx = resolve_sync_context(map_row.source_table, map_row.source_column, index=index)
+        ctx = resolve_sync_context(
+            map_row.source_table,
+            map_row.source_column,
+            source_uid=getattr(map_row, "source_uid", "") or "",
+            index=index,
+        )
     if ctx is None:
         update_map_fingerprint(
             map_row,
@@ -302,25 +300,76 @@ def resync_map_row(
             logger.warning("purge old image after resync id=%s failed", old_image_id, exc_info=True)
 
     refreshed = _load_map(map_row.pk)
-    ctx = resolve_sync_context(refreshed.source_table, refreshed.source_column)
-    if ctx:
+    source = _resolve_source_for_map(refreshed, None)
+    if source is not None:
+        ctx = _sync_context_from_source(source, refreshed)
         with db_alias_session(ctx.db_alias, database=ctx.database_name or None) as alias:
             conn = connections[alias]
             process_map_fingerprint(refreshed, ctx=ctx, conn=conn)
+    else:
+        ctx = resolve_sync_context(
+            refreshed.source_table,
+            refreshed.source_column,
+            source_uid=getattr(refreshed, "source_uid", "") or "",
+        )
+        if ctx:
+            with db_alias_session(ctx.db_alias, database=ctx.database_name or None) as alias:
+                conn = connections[alias]
+                process_map_fingerprint(refreshed, ctx=ctx, conn=conn)
     return True
 
 
-def _resolve_source_for_map(map_row: ImageSourceMap, ctx: TableSyncContext) -> BlobMigrationSource | None:
-    if ctx.migration_source_id:
+def _sync_context_from_source(source: BlobMigrationSource, map_row: ImageSourceMap) -> TableSyncContext:
+    from images.blob_schema_helpers import map_storage_table, parse_blob_columns
+
+    col = (map_row.source_column or "").strip()
+    blob_cols = parse_blob_columns(source.blob_columns, source.blob_column)
+    blob_col = col or (blob_cols[0] if blob_cols else source.blob_column)
+    try:
+        lookup_table = map_storage_table(
+            source_table=source.source_table,
+            source_object_type=source.source_object_type,
+            path_lookup_table=source.path_lookup_table,
+        )
+    except ValueError:
+        lookup_table = (source.source_table or "").strip()
+    return TableSyncContext(
+        lookup_table=lookup_table,
+        source_column=col,
+        pk_column=source.source_pk_column or "id",
+        db_alias=source.db_alias or "default",
+        database_name=(getattr(source, "database_name", "") or "").strip(),
+        migration_source_id=source.id,
+        blob_column=blob_col,
+        source_uid=(getattr(source, "source_uid", "") or "").strip(),
+    )
+
+
+def _resolve_source_for_map(map_row: ImageSourceMap, ctx: TableSyncContext | None) -> BlobMigrationSource | None:
+    from images.source_identity import is_valid_source_uid, normalize_source_uid
+
+    migration_source_id = getattr(map_row, "migration_source_id", None) or (
+        ctx.migration_source_id if ctx else None
+    )
+    if migration_source_id:
         try:
-            return prepare_migration_source(_load_source(ctx.migration_source_id))
+            return prepare_migration_source(_load_source(migration_source_id))
         except BlobMigrationError:
             pass
+
+    uid = normalize_source_uid(getattr(map_row, "source_uid", "") or (ctx.source_uid if ctx else ""))
+    if is_valid_source_uid(uid):
+        source = BlobMigrationSource.objects.filter(source_uid=uid, enabled=1).order_by("-id").first()
+        if source is not None:
+            try:
+                return prepare_migration_source(source)
+            except BlobMigrationError:
+                pass
 
     from images.blob_sync_context import _source_lookup_tables
 
     lookup = (map_row.source_table or "").strip()
-    for source in BlobMigrationSource.objects.filter(enabled=1).order_by("id"):
+    for source in BlobMigrationSource.objects.filter(enabled=1).order_by("-id"):
         if lookup in _source_lookup_tables(source):
             try:
                 return prepare_migration_source(source)

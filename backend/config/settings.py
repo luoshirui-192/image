@@ -206,6 +206,7 @@ BLOB_SYNC_BATCH_SIZE = int(os.getenv("BLOB_SYNC_BATCH_SIZE", "200"))
 BLOB_SYNC_PURGE_OLD_IMAGE = os.getenv("BLOB_SYNC_PURGE_OLD_IMAGE", "true").lower() in {"1", "true", "yes", "on"}
 BLOB_SYNC_USE_MYSQL_SHA2 = os.getenv("BLOB_SYNC_USE_MYSQL_SHA2", "true").lower() in {"1", "true", "yes", "on"}
 BLOB_SYNC_MAX_RESYNC_PER_RUN = int(os.getenv("BLOB_SYNC_MAX_RESYNC_PER_RUN", "50"))
+BLOB_MAP_LEGACY_LOOKUP = os.getenv("BLOB_MAP_LEGACY_LOOKUP", "true").lower() in {"1", "true", "yes", "on"}
 
 # ---------------------------------------------------------------------------
 # CORS

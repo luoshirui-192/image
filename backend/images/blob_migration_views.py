@@ -27,6 +27,13 @@ from images.blob_migration_service import (
     prepare_migration_source,
     run_blob_migration,
 )
+from images.source_map_service import count_live_map_entries_by_source_uid
+from images.source_rebind_service import (
+    SourceRebindError,
+    detect_schema_drift,
+    link_table_view_to_source_uid,
+    rebind_migration_source,
+)
 from images.models import BlobMigrationJob, BlobMigrationSource
 from images.serializers import (
     BlobMigrationDiscoverSerializer,
@@ -34,7 +41,10 @@ from images.serializers import (
     BlobMigrationJobClearSerializer,
     BlobMigrationJobRetrySerializer,
     BlobMigrationRunSerializer,
+    BlobMigrationSourceRebindSerializer,
     BlobMigrationSourceSerializer,
+    BlobTableViewLinkSourceSerializer,
+    BlobTableViewSerializer,
 )
 from utils.audit import write_operate_log
 from utils.permissions import IsActiveAccount
@@ -421,12 +431,77 @@ class BlobMigrationJobErrorsExportView(APIView):
 
 @extend_schema(tags=["blob-migration"])
 class BlobMigrationMapStatsView(APIView):
-    """GET /api/images/blob-migration/map-stats/ — live image_source_map counts by source_table."""
+    """GET /api/images/blob-migration/map-stats/ — live image_source_map counts."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
 
     def get(self, request):
-        return success_response({"by_source_table": count_live_map_entries_by_source_table()})
+        return success_response(
+            {
+                "by_source_table": count_live_map_entries_by_source_table(),
+                "by_source_uid": count_live_map_entries_by_source_uid(),
+            }
+        )
+
+
+@extend_schema(tags=["blob-migration"], request=BlobMigrationSourceRebindSerializer)
+class BlobMigrationSourceRebindView(APIView):
+    """POST /api/images/blob-migration/sources/{id}/rebind/ — point logical source at new table."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def post(self, request, pk: int):
+        serializer = BlobMigrationSourceRebindSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(_format_errors(serializer.errors), code=4001, status=400)
+        data = serializer.validated_data
+        try:
+            source = rebind_migration_source(
+                pk,
+                db_alias=data["db_alias"],
+                database_name=data.get("database_name") or "",
+                source_table=data["source_table"],
+                source_object_type=data.get("source_object_type"),
+                path_lookup_table=data.get("path_lookup_table"),
+            )
+        except SourceRebindError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        write_operate_log(request, "blob_migration_rebind", detail=f"source_id={pk} table={source.source_table}")
+        payload = BlobMigrationSourceSerializer(prepare_migration_source(source)).data
+        payload["stats"] = None
+        return success_response(payload, message="迁移源已重新绑定")
+
+
+@extend_schema(tags=["blob-migration"])
+class BlobMigrationSourceSchemaCheckView(APIView):
+    """GET /api/images/blob-migration/sources/{id}/schema-check/ — remote schema drift."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request, pk: int):
+        try:
+            source = prepare_migration_source(BlobMigrationSource.objects.get(pk=pk))
+        except BlobMigrationSource.DoesNotExist:
+            return error_response("迁移配置不存在", code=4044, status=404)
+        return success_response(detect_schema_drift(source))
+
+
+@extend_schema(tags=["blob-migration"], request=BlobTableViewLinkSourceSerializer)
+class BlobTableViewLinkSourceView(APIView):
+    """POST /api/images/blob-migration/table-views/{id}/link-source/ — attach view to logical source."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def post(self, request, pk: int):
+        serializer = BlobTableViewLinkSourceSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(_format_errors(serializer.errors), code=4001, status=400)
+        try:
+            view = link_table_view_to_source_uid(pk, serializer.validated_data["source_uid"])
+        except SourceRebindError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        write_operate_log(request, "blob_table_view_link_source", detail=f"view_id={pk} uid={view.source_uid}")
+        return success_response(BlobTableViewSerializer(view).data, message="浏览配置已关联逻辑源")
 
 
 def _format_errors(errors: dict) -> str:

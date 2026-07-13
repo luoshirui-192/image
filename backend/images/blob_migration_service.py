@@ -291,12 +291,21 @@ def find_migration_source_match(
     database: str,
     source_table: str,
     source_object_type: str = "table",
+    source_uid: str | None = None,
 ) -> tuple[BlobMigrationSource | None, bool]:
     """Match a catalog object to a migration source without cross-database ambiguity.
 
     Returns (source, ambiguous). When ambiguous is True, multiple configs could apply
     and callers must not show stats from another database on the same connection.
     """
+    from images.source_identity import is_valid_source_uid, normalize_source_uid
+
+    uid = normalize_source_uid(source_uid)
+    if is_valid_source_uid(uid):
+        matched = BlobMigrationSource.objects.filter(source_uid=uid).order_by("-id").first()
+        if matched is not None:
+            return prepare_migration_source(matched), False
+
     alias = validate_db_alias_reference(db_alias)
     table = validate_identifier(source_table, label="源表名")
     obj_type = normalize_object_type(source_object_type)
@@ -345,6 +354,8 @@ def find_migration_source_match(
 
 def prepare_migration_source(source: BlobMigrationSource, *, persist: bool = True) -> BlobMigrationSource:
     """Ensure database_name and JOIN path mappings are ready before remote scans."""
+    from images.source_identity import ensure_source_record_uid
+
     resolved = resolve_source_database_name(source)
     current = (getattr(source, "database_name", "") or "").strip()
     if resolved and resolved != current:
@@ -352,6 +363,7 @@ def prepare_migration_source(source: BlobMigrationSource, *, persist: bool = Tru
             BlobMigrationSource.objects.filter(pk=source.pk).update(database_name=resolved)
         source.database_name = resolved
     source = _refresh_path_mappings_if_needed(source, persist=persist)
+    ensure_source_record_uid(source, persist=persist)
     return source
 
 
@@ -426,22 +438,20 @@ def _live_image_subquery():
 
 def _map_exists_for_migration(
     *,
+    source: BlobMigrationSource,
     lookup_table: str,
     source_id: str,
     map_column: str,
     blob_columns: list[str],
 ) -> bool:
     """True only when a live image_source_map points at a non-deleted image_info."""
-    live_images = ImageInfo.objects.filter(is_delete=0).values("id")
-    qs = ImageSourceMap.objects.filter(
-        source_table=lookup_table,
-        source_id=source_id,
-        image_info_id__in=live_images,
-    )
-    if qs.filter(source_column=map_column).exists():
+    from images.source_map_service import map_queryset_for_source
+
+    qs = map_queryset_for_source(source, source_ids=[source_id], columns=[map_column])
+    if qs.exists():
         return True
     if len(blob_columns) == 1 and map_column == blob_columns[0]:
-        return qs.filter(source_column="").exists()
+        return map_queryset_for_source(source, source_ids=[source_id], columns=[""]).exists()
     return False
 
 
@@ -725,6 +735,8 @@ class _MigrationBatchContext:
 
     @classmethod
     def load(cls, source: BlobMigrationSource, light_rows: list[dict]) -> _MigrationBatchContext:
+        from images.source_map_service import migrated_key_set_for_batch
+
         storage_table = _storage_table(source)
         blob_columns = _source_blob_columns(source)
         path_mappings = _path_mappings(source)
@@ -737,7 +749,6 @@ class _MigrationBatchContext:
                 path_mappings=path_mappings,
             )
 
-        # Group lookup keys by (lookup_table, map_column) for efficient queries.
         targets_by_table: dict[str, set[str]] = {}
         map_columns_by_table: dict[str, set[str]] = {}
         for light in light_rows:
@@ -752,20 +763,15 @@ class _MigrationBatchContext:
                     map_columns_by_table[lookup_table].add("")
 
         for lookup_table, source_ids in targets_by_table.items():
-            cols = list(map_columns_by_table.get(lookup_table) or [])
-            rows = ImageSourceMap.objects.filter(
-                source_table=lookup_table,
-                source_id__in=list(source_ids),
-                image_info_id__in=_live_image_subquery(),
+            cols = list(map_columns_by_table.get(lookup_table) or blob_columns)
+            migrated_keys.update(
+                migrated_key_set_for_batch(
+                    source,
+                    lookup_table=lookup_table,
+                    source_ids=list(source_ids),
+                    map_columns=cols,
+                )
             )
-            if cols:
-                rows = rows.filter(source_column__in=cols)
-            for source_id, source_column in rows.values_list("source_id", "source_column"):
-                col = (source_column or "").strip()
-                if col:
-                    migrated_keys.add((lookup_table, str(source_id), col))
-                elif len(blob_columns) == 1:
-                    migrated_keys.add((lookup_table, str(source_id), blob_columns[0]))
 
         return cls(
             storage_table=storage_table,
@@ -981,6 +987,7 @@ def _fetch_source_row_by_pk(source: BlobMigrationSource, pk_value: str) -> dict 
 def _is_already_migrated(source: BlobMigrationSource, row: dict, blob_column: str) -> bool:
     lookup_table, source_id_str, map_column = _map_target_for_column(source, row, blob_column)
     return _map_exists_for_migration(
+        source=source,
         lookup_table=lookup_table,
         source_id=source_id_str,
         map_column=map_column,
@@ -990,20 +997,20 @@ def _is_already_migrated(source: BlobMigrationSource, row: dict, blob_column: st
 
 def _upsert_source_map(
     *,
+    source: BlobMigrationSource,
     lookup_table: str,
     map_source_id: str,
     map_column: str,
     image_info_id: int,
 ) -> None:
-    """Create or refresh mapping — stale rows without live image_info are overwritten."""
-    ImageSourceMap.objects.update_or_create(
-        source_table=lookup_table,
-        source_id=map_source_id,
-        source_column=map_column,
-        defaults={
-            "image_info_id": image_info_id,
-            "migrated_at": timezone.now(),
-        },
+    from images.source_map_service import upsert_source_map
+
+    upsert_source_map(
+        source=source,
+        lookup_table=lookup_table,
+        map_source_id=map_source_id,
+        map_column=map_column,
+        image_info_id=image_info_id,
     )
 
 
@@ -1071,6 +1078,7 @@ def _migrate_single_column(
             tags=source.tags,
         )
         _upsert_source_map(
+            source=source,
             lookup_table=lookup_table,
             map_source_id=map_source_id,
             map_column=map_column,
@@ -1095,6 +1103,7 @@ def _migrate_single_column(
             )
         existing = exc.existing
         _upsert_source_map(
+            source=source,
             lookup_table=lookup_table,
             map_source_id=map_source_id,
             map_column=map_column,
@@ -1492,10 +1501,10 @@ def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dic
     blob_cols = _source_blob_columns(source)
     storage_table = _storage_table(source)
     path_mappings = _path_mappings(source)
-    mapping_by_col = {m["view_column"]: m for m in path_mappings}
 
     cache_key = (
         source.id,
+        (getattr(source, "source_uid", "") or "").strip(),
         _source_database_name(source) or "",
         source.source_table,
         source.where_clause or "",
@@ -1540,41 +1549,13 @@ def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dic
                 row = cursor.fetchone() or ()
             total_with_blob = sum(int(v or 0) for v in row)
 
-    live_maps = ImageSourceMap.objects.filter(image_info_id__in=_live_image_subquery())
-    migrated = 0
-    if path_mappings:
-        seen_keys: set[tuple[str, str]] = set()
-        for col in blob_cols:
-            mapping = mapping_by_col.get(col)
-            if not mapping:
-                continue
-            key = (mapping["lookup_table"], mapping.get("source_column") or col)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            lookup_table, map_column = key
-            migrated += live_maps.filter(
-                source_table=lookup_table,
-                source_column=map_column,
-            ).count()
-            if len(blob_cols) == 1:
-                migrated += live_maps.filter(
-                    source_table=lookup_table,
-                    source_column="",
-                ).count()
-    else:
-        migrated = live_maps.filter(
-            source_table=storage_table,
-            source_column__in=blob_cols,
-        ).count()
-        if len(blob_cols) == 1:
-            migrated += live_maps.filter(
-                source_table=storage_table,
-                source_column="",
-            ).count()
+    from images.source_map_service import count_live_map_entries_for_source
+
+    migrated = count_live_map_entries_for_source(source)
 
     result = {
         "source_id": source.id,
+        "source_uid": (getattr(source, "source_uid", "") or "").strip(),
         "source_table": source.source_table,
         "storage_table": storage_table,
         "db_alias": source.db_alias,
@@ -1624,25 +1605,10 @@ def count_live_map_entries_by_source_table() -> dict[str, int]:
 
 
 def count_map_entries_for_source(source: BlobMigrationSource) -> int:
-    """Count live map rows for one migration source's storage table(s)."""
-    from django.db.models import Count
+    """Count live map rows for one migration source."""
+    from images.source_map_service import count_live_map_entries_for_source
 
-    storage = map_storage_table(
-        source_table=source.source_table,
-        source_object_type=source.source_object_type,
-        path_lookup_table=source.path_lookup_table,
-    )
-    tables = [storage]
-    if (source.path_lookup_table or "").strip() and source.path_lookup_table.strip() != storage:
-        tables.append(source.path_lookup_table.strip())
-
-    live_ids = ImageInfo.objects.filter(is_delete=0).values("id")
-    return int(
-        ImageSourceMap.objects.filter(image_info_id__in=live_ids, source_table__in=tables).aggregate(
-            total=Count("id")
-        )["total"]
-        or 0
-    )
+    return count_live_map_entries_for_source(source)
 
 
 def run_blob_migration(
@@ -1745,8 +1711,39 @@ def create_migration_source(**fields) -> BlobMigrationSource:
         enabled=1,
         auto_sync_enabled=1,
         change_track_mode="hash",
+        source_uid=fields.get("source_uid") or "",
         create_time=timezone.now(),
     )
+    if not (source.source_uid or "").strip():
+        from images.source_identity import ensure_source_record_uid
+
+        source.source_uid = ensure_source_record_uid(source, persist=False)
     _validate_source_config(source)
     source.save(force_insert=True)
+    from images.source_identity import ensure_source_record_uid
+
+    ensure_source_record_uid(source, persist=True)
+    _link_views_to_source_uid(source)
     return source
+
+
+def _link_views_to_source_uid(source: BlobMigrationSource) -> None:
+    from images.models import BlobTableView
+
+    uid = (getattr(source, "source_uid", "") or "").strip()
+    if not uid:
+        return
+    BlobTableView.objects.filter(source_uid=uid).update(
+        db_alias=source.db_alias,
+        database_name=source.database_name or "",
+        source_table=source.source_table,
+        source_object_type=source.source_object_type or "table",
+        path_lookup_table=source.path_lookup_table or "",
+    )
+    BlobTableView.objects.filter(
+        db_alias=source.db_alias,
+        database_name=source.database_name or "",
+        source_table=source.source_table,
+        source_object_type=source.source_object_type or "table",
+        source_uid="",
+    ).update(source_uid=uid)

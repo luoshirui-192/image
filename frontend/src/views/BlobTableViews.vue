@@ -118,6 +118,7 @@ const sqlPreviewPanelRef = ref(null)
 
 const migrationSources = ref([])
 const mapStatsByTable = ref({})
+const mapStatsByUid = ref({})
 const selectionMigrationStats = ref(null)
 const loadingSelectionMigrationStats = ref(false)
 
@@ -345,6 +346,12 @@ function viewMigrationKey(view) {
 
 function migrationSourceCandidates(view, catalogData = null) {
   if (!view && !catalogData) return []
+  const viewUid = (view?.source_uid || '').trim()
+  if (viewUid) {
+    const byUid = migrationSources.value.filter((source) => (source.source_uid || '').trim() === viewUid)
+    if (byUid.length) return byUid
+  }
+
   const dbAlias = (view?.db_alias || catalogData?.connection?.alias || '').trim()
   const table = (view?.source_table || catalogData?.label || '').trim()
   const objType = (view?.source_object_type || catalogData?.objectType || 'table').trim() || 'table'
@@ -362,6 +369,12 @@ function sourceDatabaseName(source) {
 }
 
 function isMigrationMatchAmbiguous(view, catalogData = null) {
+  const viewUid = (view?.source_uid || '').trim()
+  if (viewUid) {
+    const byUid = migrationSources.value.filter((source) => (source.source_uid || '').trim() === viewUid)
+    return byUid.length > 1
+  }
+
   const candidates = migrationSourceCandidates(view, catalogData)
   const catalogDb = (view?.database_name || catalogData?.database || '').trim()
   if (!candidates.length) return false
@@ -439,6 +452,10 @@ function mapLookupTables(view, catalogData) {
 
 function countMapMigratedEntries(source) {
   if (!source) return 0
+  const uid = (source.source_uid || '').trim()
+  if (uid) {
+    return Number(mapStatsByUid.value[uid] || 0)
+  }
   let total = 0
   for (const table of mapLookupTables(source, null)) {
     total += Number(mapStatsByTable.value[table] || 0)
@@ -612,7 +629,7 @@ async function onCatalogObjectSelected(data) {
   persistBrowseUiState()
 }
 
-async function loadMigrationSources({ includeStats = true } = {}) {
+async function loadMigrationSources({ includeStats = false } = {}) {
   try {
     const res = await callWithRetry(() => listBlobMigrationSourcesApi({ includeStats }))
     migrationSources.value = res.data || []
@@ -625,8 +642,10 @@ async function loadMapStats() {
   try {
     const res = await callWithRetry(() => listBlobMigrationMapStatsApi())
     mapStatsByTable.value = res.data?.by_source_table || {}
+    mapStatsByUid.value = res.data?.by_source_uid || {}
   } catch {
     mapStatsByTable.value = {}
+    mapStatsByUid.value = {}
   }
 }
 
@@ -656,6 +675,7 @@ async function refreshSelectionMigrationStats() {
 function buildMigrationSourcePayload(view, form) {
   return {
     name: `${view.name || view.source_table} 迁移`,
+    source_uid: (view.source_uid || '').trim() || undefined,
     db_alias: view.db_alias,
     database_name: view.database_name || '',
     source_table: view.source_table,
@@ -724,8 +744,8 @@ async function submitSavedViewMigration() {
     }
     ElMessage.success(message)
     migrateDialogVisible.value = false
-    await Promise.all([loadMigrationSources(), loadMapStats()])
-    await refreshSelectionMigrationStats()
+    migrateSaving.value = false
+    void Promise.all([loadMigrationSources(), loadMapStats()]).then(() => refreshSelectionMigrationStats())
   } catch (err) {
     ElMessage.error(err.message || '启动迁移失败')
   } finally {

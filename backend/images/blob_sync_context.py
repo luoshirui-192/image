@@ -16,6 +16,7 @@ class TableSyncContext:
     database_name: str
     migration_source_id: int | None
     blob_column: str
+    source_uid: str = ""
 
     @property
     def key(self) -> tuple[str, str]:
@@ -73,6 +74,7 @@ def build_sync_context_index() -> dict[tuple[str, str], TableSyncContext]:
         db_name = (getattr(source, "database_name", "") or "").strip()
         blob_cols = parse_blob_columns(source.blob_columns, source.blob_column)
         lookup_tables = _source_lookup_tables(source)
+        source_uid = (getattr(source, "source_uid", "") or "").strip()
         for lookup_table in lookup_tables:
             for blob_col in blob_cols:
                 col = blob_col
@@ -88,6 +90,7 @@ def build_sync_context_index() -> dict[tuple[str, str], TableSyncContext]:
                         database_name=db_name,
                         migration_source_id=source.id,
                         blob_column=col,
+                        source_uid=source_uid,
                     )
                 )
                 put(
@@ -99,12 +102,14 @@ def build_sync_context_index() -> dict[tuple[str, str], TableSyncContext]:
                         database_name=db_name,
                         migration_source_id=source.id,
                         blob_column=blob_cols[0] if blob_cols else source.blob_column,
+                        source_uid=source_uid,
                     )
                 )
 
     for view in BlobTableView.objects.all().order_by("id"):
         db_name = (view.database_name or "").strip()
         blob_cols = parse_blob_columns(view.blob_columns, view.blob_column)
+        view_uid = (getattr(view, "source_uid", "") or "").strip()
         for lookup_table in _view_lookup_tables(view):
             for blob_col in blob_cols:
                 put(
@@ -116,6 +121,7 @@ def build_sync_context_index() -> dict[tuple[str, str], TableSyncContext]:
                         database_name=db_name,
                         migration_source_id=None,
                         blob_column=blob_col,
+                        source_uid=view_uid,
                     )
                 )
 
@@ -151,10 +157,21 @@ def resolve_sync_context(
     lookup_table: str,
     source_column: str,
     *,
+    source_uid: str = "",
     index: dict[tuple[str, str], TableSyncContext] | None = None,
 ) -> TableSyncContext | None:
+    from images.source_identity import is_valid_source_uid, normalize_source_uid
+
     idx = index if index is not None else build_sync_context_index()
     col = (source_column or "").strip()
+    uid = normalize_source_uid(source_uid)
+    if is_valid_source_uid(uid):
+        for ctx in idx.values():
+            if normalize_source_uid(getattr(ctx, "source_uid", "")) == uid:
+                if ctx.source_column == col or (not col and not ctx.source_column):
+                    return ctx
+                if not col and ctx.source_column:
+                    return ctx
     if (lookup_table, col) in idx:
         return idx[(lookup_table, col)]
     if (lookup_table, "") in idx:

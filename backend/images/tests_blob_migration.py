@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS blob_migration_source (
     database_name VARCHAR(64) NOT NULL DEFAULT '',
     enabled SMALLINT NOT NULL DEFAULT 1,
     last_run_at DATETIME NULL,
+    auto_sync_enabled SMALLINT NOT NULL DEFAULT 1,
+    sync_interval_minutes INTEGER NOT NULL DEFAULT 60,
+    sync_batch_size INTEGER NOT NULL DEFAULT 200,
+    sync_last_run_at DATETIME NULL,
+    sync_last_checked_map_id INTEGER NOT NULL DEFAULT 0,
+    change_track_column VARCHAR(64) NOT NULL DEFAULT '',
+    change_track_mode VARCHAR(20) NOT NULL DEFAULT 'hash',
+    source_uid VARCHAR(36) NOT NULL DEFAULT '',
     create_time DATETIME NULL
 );
 CREATE TABLE IF NOT EXISTS image_source_map (
@@ -93,6 +101,13 @@ CREATE TABLE IF NOT EXISTS image_source_map (
     source_column VARCHAR(64) NOT NULL DEFAULT '',
     image_info_id INTEGER NOT NULL,
     migrated_at DATETIME NOT NULL,
+    source_content_hash VARCHAR(64) NOT NULL DEFAULT '',
+    source_blob_length INTEGER NOT NULL DEFAULT 0,
+    last_checked_at DATETIME NULL,
+    sync_status VARCHAR(20) NOT NULL DEFAULT 'unknown',
+    last_sync_error VARCHAR(500) NOT NULL DEFAULT '',
+    source_uid VARCHAR(36) NOT NULL DEFAULT '',
+    migration_source_id INTEGER NULL,
     UNIQUE(source_table, source_id, source_column)
 );
 CREATE TABLE IF NOT EXISTS blob_table_view (
@@ -100,6 +115,7 @@ CREATE TABLE IF NOT EXISTS blob_table_view (
     name VARCHAR(100) NOT NULL DEFAULT '',
     db_alias VARCHAR(32) NOT NULL DEFAULT 'default',
     database_name VARCHAR(64) NOT NULL DEFAULT '',
+    source_uid VARCHAR(36) NOT NULL DEFAULT '',
     source_table VARCHAR(64) NOT NULL,
     source_object_type VARCHAR(20) NOT NULL DEFAULT 'table',
     path_lookup_table VARCHAR(64) NOT NULL DEFAULT '',
@@ -571,6 +587,74 @@ class BlobMigrationTestCase(TestCase):
         self.assertEqual(res.status_code, 200)
         counts = res.json()["data"]["by_source_table"]
         self.assertEqual(counts["legacy_photos"], 1)
+        self.assertEqual(res.json()["data"].get("by_source_uid"), {})
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_skip_existing_by_source_uid_after_table_move(self):
+        upload_root = str(self.upload_root)
+        uid = "11111111-1111-4111-8111-111111111111"
+        now = timezone.now()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "CREATE TABLE IF NOT EXISTS legacy_photos_moved ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, title VARCHAR(100), photo BLOB)"
+            )
+            cursor.execute(
+                "INSERT INTO legacy_photos_moved (id, title, photo) "
+                "SELECT id, title, photo FROM legacy_photos"
+            )
+        BlobMigrationSource.objects.filter(pk=self.source.pk).update(
+            source_uid=uid,
+            source_table="legacy_photos_moved",
+        )
+        self.source.refresh_from_db()
+        image = ImageInfo.objects.create(
+            image_name="mapped.png",
+            image_path="2026/01/mapped.png",
+            upload_time=now,
+            update_time=now,
+            upload_user="test",
+            is_delete=0,
+        )
+        ImageSourceMap.objects.create(
+            source_uid=uid,
+            source_table="legacy_photos",
+            source_id="1",
+            source_column="photo",
+            image_info_id=image.id,
+            migrated_at=now,
+            migration_source_id=self.source.id,
+        )
+        with override_settings(UPLOAD_ROOT=upload_root):
+            result = run_blob_migration(self.source.id, batch_size=10, dry_run=False, skip_existing=True)
+            self.assertEqual(result.skipped, 1)
+            self.assertEqual(result.succeeded, 0)
+            self.assertEqual(ImageInfo.objects.filter(is_delete=0).count(), 1)
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_find_migration_source_match_by_source_uid(self):
+        uid = "22222222-2222-4222-8222-222222222222"
+        now = timezone.now()
+        source = BlobMigrationSource.objects.create(
+            name="uid source",
+            source_table="legacy_photos",
+            source_pk_column="id",
+            blob_column="photo",
+            category_id=1,
+            db_alias="default",
+            database_name="other_db",
+            source_uid=uid,
+            enabled=1,
+            create_time=now,
+        )
+        matched, ambiguous = find_migration_source_match(
+            db_alias="default",
+            database="db_a",
+            source_table="different_table",
+            source_uid=uid,
+        )
+        self.assertFalse(ambiguous)
+        self.assertEqual(matched.id, source.id)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_api_discover_and_dry_run(self):

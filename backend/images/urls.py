@@ -29,6 +29,9 @@ from images.blob_migration_views import (
     BlobMigrationRunView,
     BlobMigrationSourceDetailView,
     BlobMigrationSourceListCreateView,
+    BlobMigrationSourceRebindView,
+    BlobMigrationSourceSchemaCheckView,
+    BlobTableViewLinkSourceView,
 )
 from images.blob_table_view_views import (
     BlobTableViewDetailView,
@@ -67,6 +70,16 @@ urlpatterns = [
     path("blob-migration/discover/", BlobMigrationDiscoverView.as_view(), name="blob-migration-discover"),
     path("blob-migration/sources/", BlobMigrationSourceListCreateView.as_view(), name="blob-migration-sources"),
     path("blob-migration/sources/<int:pk>/", BlobMigrationSourceDetailView.as_view(), name="blob-migration-source-detail"),
+    path(
+        "blob-migration/sources/<int:pk>/rebind/",
+        BlobMigrationSourceRebindView.as_view(),
+        name="blob-migration-source-rebind",
+    ),
+    path(
+        "blob-migration/sources/<int:pk>/schema-check/",
+        BlobMigrationSourceSchemaCheckView.as_view(),
+        name="blob-migration-source-schema-check",
+    ),
     path(
         "blob-migration/sources/<int:pk>/sync/status/",
         BlobMigrationSourceSyncStatusView.as_view(),
@@ -111,6 +124,11 @@ urlpatterns = [
     path("blob-migration/table-views/<int:pk>/schema/", BlobTableViewSchemaView.as_view(), name="blob-table-view-schema"),
     path("blob-migration/table-views/<int:pk>/rows/", BlobTableViewRowsView.as_view(), name="blob-table-view-rows"),
     path("blob-migration/table-views/<int:pk>/", BlobTableViewDetailView.as_view(), name="blob-table-view-detail"),
+    path(
+        "blob-migration/table-views/<int:pk>/link-source/",
+        BlobTableViewLinkSourceView.as_view(),
+        name="blob-table-view-link-source",
+    ),
     # PR4 aliases — same handlers, clearer browse naming
     path("blob-browse/preview-schema/", BlobTableViewPreviewSchemaView.as_view(), name="blob-browse-preview-schema"),
     path("blob-browse/", BlobTableViewListCreateView.as_view(), name="blob-browse-list"),

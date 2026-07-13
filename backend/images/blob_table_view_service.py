@@ -646,20 +646,19 @@ def _load_path_map(
     *,
     blob_columns: list[str] | None = None,
     path_lookup_table: str | None = None,
+    source_uid: str | None = None,
 ) -> dict[str, dict[str, dict]]:
     if not source_ids:
         return {}
     lookup_table = (path_lookup_table or source_table).strip() or source_table
-    mappings = ImageSourceMap.objects.filter(
-        source_table=lookup_table,
-        source_id__in=source_ids,
+    from images.source_map_service import map_queryset_for_uid
+
+    mappings = map_queryset_for_uid(
+        source_uid or "",
+        lookup_tables=[lookup_table],
+        source_ids=source_ids,
+        columns=blob_columns,
     )
-    if blob_columns:
-        legacy_cols = list(blob_columns)
-        if len(legacy_cols) == 1:
-            mappings = mappings.filter(source_column__in=[*legacy_cols, ""])
-        else:
-            mappings = mappings.filter(source_column__in=legacy_cols)
     image_ids = [m.image_info_id for m in mappings]
     images = {
         img.id: img
@@ -720,6 +719,7 @@ def _load_path_maps_for_mappings(
     fallback_source_table: str,
     fallback_lookup_table: str,
     pk_index: int = 0,
+    source_uid: str | None = None,
 ) -> list[dict[str, dict[str, dict]]]:
     """Return per-row path maps keyed by view BLOB column name."""
     if not mappings:
@@ -747,6 +747,7 @@ def _load_path_maps_for_mappings(
                 source_ids,
                 blob_columns=[mapping["source_column"]],
                 path_lookup_table=mapping["lookup_table"],
+                source_uid=source_uid,
             )
         else:
             existing = path_cache[cache_key]
@@ -757,6 +758,7 @@ def _load_path_maps_for_mappings(
                     missing,
                     blob_columns=[mapping["source_column"]],
                     path_lookup_table=mapping["lookup_table"],
+                    source_uid=source_uid,
                 )
                 for sid, cols in extra.items():
                     existing.setdefault(sid, {}).update(cols)
@@ -847,6 +849,7 @@ def fetch_simulated_table_rows(
                 fallback_source_table=view.source_table,
                 fallback_lookup_table=_path_lookup_table(view),
                 pk_index=pk_index,
+                source_uid=getattr(view, "source_uid", "") or "",
             )
         else:
             source_ids = [str(row[pk_index]) for row in raw_rows]
@@ -855,6 +858,7 @@ def fetch_simulated_table_rows(
                 source_ids,
                 blob_columns=blob_cols,
                 path_lookup_table=_path_lookup_table(view),
+                source_uid=getattr(view, "source_uid", "") or "",
             )
 
         blob_presence = _compute_blob_presence_for_page(
@@ -1058,10 +1062,26 @@ def create_table_view(
         _resolve_display_columns(temp, remote_cols)
 
     now = timezone.now()
+    from images.blob_migration_service import find_migration_source_match
+    from images.source_identity import generate_source_uid, is_valid_source_uid, normalize_source_uid
+
+    view_uid = ""
+    matched_source, _ambiguous = find_migration_source_match(
+        db_alias=db_alias,
+        database=db_name,
+        source_table=table,
+        source_object_type=meta["source_object_type"],
+    )
+    if matched_source is not None:
+        view_uid = normalize_source_uid(getattr(matched_source, "source_uid", ""))
+    if not is_valid_source_uid(view_uid):
+        view_uid = generate_source_uid()
+
     return BlobTableView.objects.create(
         name=(name or "").strip() or f"{table} 浏览",
         db_alias=db_alias,
         database_name=db_name,
+        source_uid=view_uid,
         source_table=table,
         source_object_type=meta["source_object_type"],
         path_lookup_table=meta["path_lookup_table"],

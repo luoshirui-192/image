@@ -80,6 +80,7 @@ class BlobMigrationSource(models.Model):
     sync_last_checked_map_id = models.PositiveBigIntegerField(default=0)
     change_track_column = models.CharField(max_length=64, default="")
     change_track_mode = models.CharField(max_length=20, default="hash")
+    source_uid = models.CharField(max_length=36, default="")
     create_time = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -104,6 +105,8 @@ class ImageSourceMap(models.Model):
     last_checked_at = models.DateTimeField(null=True, blank=True)
     sync_status = models.CharField(max_length=20, default="unknown")
     last_sync_error = models.CharField(max_length=500, default="")
+    source_uid = models.CharField(max_length=36, default="")
+    migration_source_id = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         managed = False
@@ -135,6 +138,7 @@ class BlobTableView(models.Model):
     where_clause = models.CharField(max_length=500, default="")
     remark = models.CharField(max_length=500, default="")
     last_viewed_at = models.DateTimeField(null=True, blank=True)
+    source_uid = models.CharField(max_length=36, default="")
     create_time = models.DateTimeField(null=True, blank=True)
     update_time = models.DateTimeField(null=True, blank=True)
 

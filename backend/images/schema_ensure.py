@@ -453,3 +453,46 @@ def ensure_blob_sync_schema() -> None:
             )
     except Exception:
         logger.warning("ensure blob sync schema failed", exc_info=True)
+    ensure_blob_source_uid_schema()
+
+
+def ensure_blob_source_uid_schema() -> None:
+    """Logical source_uid on migration/browse/map tables."""
+    from django.db import connection
+
+    if connection.vendor != "mysql":
+        return
+
+    alters = [
+        ("blob_migration_source", "source_uid", "varchar(36) NOT NULL DEFAULT '' COMMENT '逻辑源 UUID' AFTER `change_track_mode`"),
+        ("blob_table_view", "source_uid", "varchar(36) NOT NULL DEFAULT '' COMMENT '逻辑源 UUID' AFTER `database_name`"),
+        ("image_source_map", "source_uid", "varchar(36) NOT NULL DEFAULT '' COMMENT '逻辑源 UUID' AFTER `source_column`"),
+        (
+            "image_source_map",
+            "migration_source_id",
+            "int(10) UNSIGNED NULL DEFAULT NULL COMMENT 'blob_migration_source.id' AFTER `source_uid`",
+        ),
+    ]
+
+    try:
+        with connection.cursor() as cursor:
+            for table, column, ddl in alters:
+                if not _mysql_column_exists(cursor, table, column):
+                    cursor.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {ddl}")
+                    logger.info("added %s.%s", table, column)
+
+            if not _mysql_index_exists(cursor, "image_source_map", "idx_map_source_uid"):
+                cursor.execute(
+                    "ALTER TABLE `image_source_map` ADD KEY `idx_map_source_uid` "
+                    "(`source_uid`, `source_id`, `source_column`)"
+                )
+            if not _mysql_index_exists(cursor, "blob_migration_source", "idx_source_uid"):
+                cursor.execute(
+                    "ALTER TABLE `blob_migration_source` ADD KEY `idx_source_uid` (`source_uid`)"
+                )
+            if not _mysql_index_exists(cursor, "blob_table_view", "idx_view_source_uid"):
+                cursor.execute(
+                    "ALTER TABLE `blob_table_view` ADD KEY `idx_view_source_uid` (`source_uid`)"
+                )
+    except Exception:
+        logger.warning("ensure blob source_uid schema failed", exc_info=True)
