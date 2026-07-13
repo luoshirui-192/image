@@ -484,7 +484,6 @@ function resolveMigrationHint({ stats, view, catalogData, loading = false }) {
     if (mapped > 0) return { text: `已迁移 ${mapped}`, type: 'success' }
   }
 
-  if (view || catalogData?.blobColumns?.length) return { text: '未配置迁移', type: 'info' }
   return null
 }
 
