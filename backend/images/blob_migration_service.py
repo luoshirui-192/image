@@ -248,21 +248,32 @@ def resolve_source_database_name(source: BlobMigrationSource) -> str:
 
     from images.models import BlobTableView
 
-    view = (
+    obj_type = normalize_object_type(source.source_object_type)
+    views = list(
         BlobTableView.objects.filter(
             db_alias=source.db_alias,
             source_table=source.source_table,
+            source_object_type=obj_type,
         )
         .exclude(database_name="")
         .order_by("-id")
-        .first()
     )
-    if view and (view.database_name or "").strip():
-        return view.database_name.strip()
+    db_names = sorted({(v.database_name or "").strip() for v in views if (v.database_name or "").strip()})
+    if len(db_names) == 1:
+        return db_names[0]
 
     from images.external_db_service import parse_external_alias
 
     ext_id = parse_external_alias(source.db_alias)
+    if ext_id is not None and db_names:
+        from images.models import ExternalDbConnection
+
+        conn = ExternalDbConnection.objects.filter(pk=ext_id, enabled=1).first()
+        conn_db = (conn.db_name or "").strip() if conn else ""
+        if conn_db and conn_db in db_names:
+            return conn_db
+        return ""
+
     if ext_id is not None:
         from images.models import ExternalDbConnection
 
@@ -271,6 +282,64 @@ def resolve_source_database_name(source: BlobMigrationSource) -> str:
             return conn.db_name.strip()
 
     return ""
+
+
+def find_migration_source_match(
+    *,
+    db_alias: str,
+    database: str,
+    source_table: str,
+    source_object_type: str = "table",
+) -> tuple[BlobMigrationSource | None, bool]:
+    """Match a catalog object to a migration source without cross-database ambiguity.
+
+    Returns (source, ambiguous). When ambiguous is True, multiple configs could apply
+    and callers must not show stats from another database on the same connection.
+    """
+    alias = validate_db_alias_reference(db_alias)
+    table = validate_identifier(source_table, label="源表名")
+    obj_type = normalize_object_type(source_object_type)
+    catalog_db = (database or "").strip()
+
+    candidates = list(
+        BlobMigrationSource.objects.filter(
+            db_alias=alias,
+            source_table=table,
+            source_object_type=obj_type,
+        ).order_by("-id")
+    )
+    if not candidates:
+        return None, False
+
+    def _db_name(source: BlobMigrationSource) -> str:
+        return (getattr(source, "database_name", "") or "").strip()
+
+    if catalog_db:
+        exact = [s for s in candidates if _db_name(s) == catalog_db]
+        if len(exact) == 1:
+            return prepare_migration_source(exact[0]), False
+        if len(exact) > 1:
+            return None, True
+
+        empty_db = [s for s in candidates if not _db_name(s)]
+        explicit_other = [s for s in candidates if _db_name(s) and _db_name(s) != catalog_db]
+        if explicit_other:
+            return None, False
+
+        if len(empty_db) == 1 and len(candidates) == 1:
+            source = prepare_migration_source(empty_db[0])
+            resolved = (source.database_name or "").strip()
+            if not resolved or resolved == catalog_db:
+                return source, False
+            return None, False
+
+        if len(empty_db) > 1 or (empty_db and len(candidates) > 1):
+            return None, True
+        return None, False
+
+    if len(candidates) == 1:
+        return prepare_migration_source(candidates[0]), False
+    return None, True
 
 
 def prepare_migration_source(source: BlobMigrationSource, *, persist: bool = True) -> BlobMigrationSource:
@@ -1551,6 +1620,28 @@ def count_live_map_entries_by_source_table() -> dict[str, int]:
         for row in rows
         if (row.get("source_table") or "").strip()
     }
+
+
+def count_map_entries_for_source(source: BlobMigrationSource) -> int:
+    """Count live map rows for one migration source's storage table(s)."""
+    from django.db.models import Count
+
+    storage = map_storage_table(
+        source_table=source.source_table,
+        source_object_type=source.source_object_type,
+        path_lookup_table=source.path_lookup_table,
+    )
+    tables = [storage]
+    if (source.path_lookup_table or "").strip() and source.path_lookup_table.strip() != storage:
+        tables.append(source.path_lookup_table.strip())
+
+    live_ids = ImageInfo.objects.filter(is_delete=0).values("id")
+    return int(
+        ImageSourceMap.objects.filter(image_info_id__in=live_ids, source_table__in=tables).aggregate(
+            total=Count("id")
+        )["total"]
+        or 0
+    )
 
 
 def run_blob_migration(

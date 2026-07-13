@@ -24,6 +24,7 @@ from images.blob_migration_service import (
     count_migration_candidates,
     create_migration_source,
     discover_blob_tables,
+    prepare_migration_source,
     run_blob_migration,
 )
 from images.models import BlobMigrationJob, BlobMigrationSource
@@ -97,6 +98,7 @@ class BlobMigrationSourceListCreateView(APIView):
         }
         data = []
         for source in qs:
+            source = prepare_migration_source(source, persist=True)
             entry = BlobMigrationSourceSerializer(source).data
             if include_stats:
                 try:

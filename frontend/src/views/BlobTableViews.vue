@@ -352,22 +352,64 @@ function viewMigrationKey(view) {
   return `${view.db_alias || ''}\0${view.database_name || ''}\0${view.source_table || ''}\0${view.source_object_type || 'table'}`
 }
 
-function findMigrationSourceForView(view, catalogData = null) {
-  if (!view && !catalogData) return null
+function migrationSourceCandidates(view, catalogData = null) {
+  if (!view && !catalogData) return []
   const dbAlias = (view?.db_alias || catalogData?.connection?.alias || '').trim()
   const table = (view?.source_table || catalogData?.label || '').trim()
   const objType = (view?.source_object_type || catalogData?.objectType || 'table').trim() || 'table'
-  const dbName = (view?.database_name || catalogData?.database || '').trim()
-  if (!dbAlias || !table) return null
+  if (!dbAlias || !table) return []
 
-  return migrationSources.value.find((source) => {
+  return migrationSources.value.filter((source) => {
     if ((source.db_alias || '').trim() !== dbAlias) return false
     if ((source.source_table || '').trim() !== table) return false
-    if ((source.source_object_type || 'table').trim() !== objType) return false
-    const sourceDb = (source.database_name || '').trim()
-    if (sourceDb && dbName && sourceDb !== dbName) return false
-    return true
-  }) || null
+    return (source.source_object_type || 'table').trim() === objType
+  })
+}
+
+function sourceDatabaseName(source) {
+  return (source?.database_name || '').trim()
+}
+
+function isMigrationMatchAmbiguous(view, catalogData = null) {
+  const candidates = migrationSourceCandidates(view, catalogData)
+  const catalogDb = (view?.database_name || catalogData?.database || '').trim()
+  if (!candidates.length) return false
+  if (!catalogDb) return candidates.length > 1
+
+  const exact = candidates.filter((source) => sourceDatabaseName(source) === catalogDb)
+  if (exact.length > 1) return true
+
+  const emptyDb = candidates.filter((source) => !sourceDatabaseName(source))
+  if (emptyDb.length > 1) return true
+  if (emptyDb.length && candidates.length > 1) return true
+  return false
+}
+
+function findMigrationSourceForView(view, catalogData = null) {
+  const candidates = migrationSourceCandidates(view, catalogData)
+  const catalogDb = (view?.database_name || catalogData?.database || '').trim()
+  if (!candidates.length) return null
+  if (isMigrationMatchAmbiguous(view, catalogData)) return null
+
+  if (catalogDb) {
+    const exact = candidates.find((source) => sourceDatabaseName(source) === catalogDb)
+    if (exact) return exact
+
+    const emptyDb = candidates.filter((source) => !sourceDatabaseName(source))
+    const explicitOther = candidates.some(
+      (source) => sourceDatabaseName(source) && sourceDatabaseName(source) !== catalogDb,
+    )
+    if (explicitOther) return null
+
+    if (emptyDb.length === 1 && candidates.length === 1) {
+      const resolved = sourceDatabaseName(emptyDb[0])
+      if (!resolved || resolved === catalogDb) return emptyDb[0]
+      return null
+    }
+    return null
+  }
+
+  return candidates.length === 1 ? candidates[0] : null
 }
 
 function blobColumnsFromView(view) {
@@ -404,9 +446,10 @@ function mapLookupTables(view, catalogData) {
   return tables
 }
 
-function countMapMigratedEntries(view, catalogData) {
+function countMapMigratedEntries(source) {
+  if (!source) return 0
   let total = 0
-  for (const table of mapLookupTables(view, catalogData)) {
+  for (const table of mapLookupTables(source, null)) {
     total += Number(mapStatsByTable.value[table] || 0)
   }
   return total
@@ -415,6 +458,10 @@ function countMapMigratedEntries(view, catalogData) {
 function resolveMigrationHint({ stats, view, catalogData, loading = false }) {
   if (!objectHasMigratableBlob(catalogData, view)) return null
   if (loading) return { text: '检测迁移状态…', type: 'info' }
+
+  if (isMigrationMatchAmbiguous(view, catalogData)) {
+    return { text: '迁移状态不明', type: 'warning' }
+  }
 
   const source = findMigrationSourceForView(view, catalogData)
   const resolvedStats = stats?.noSource
@@ -432,8 +479,10 @@ function resolveMigrationHint({ stats, view, catalogData, loading = false }) {
     return { text: '无可迁移', type: 'info' }
   }
 
-  const mapped = countMapMigratedEntries(view, catalogData)
-  if (mapped > 0) return { text: `已迁移 ${mapped}`, type: 'success' }
+  if (source) {
+    const mapped = countMapMigratedEntries(source)
+    if (mapped > 0) return { text: `已迁移 ${mapped}`, type: 'success' }
+  }
 
   if (view || catalogData?.blobColumns?.length) return { text: '未配置迁移', type: 'info' }
   return null

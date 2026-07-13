@@ -16,6 +16,7 @@ from images.blob_migration_job_service import create_migration_job, execute_migr
 from images.blob_migration_service import (
     count_migration_candidates,
     create_migration_source,
+    find_migration_source_match,
     prepare_migration_source,
     run_blob_migration,
 )
@@ -272,6 +273,90 @@ class BlobMigrationTestCase(TestCase):
         self.assertEqual(prepared.database_name, "legacy_catalog_db")
         source.refresh_from_db()
         self.assertEqual(source.database_name, "legacy_catalog_db")
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_prepare_migration_source_skips_ambiguous_multi_database_views(self):
+        now = timezone.now()
+        for db_name in ("db_a", "db_b"):
+            BlobTableView.objects.create(
+                name=f"browse {db_name}",
+                db_alias="default",
+                database_name=db_name,
+                source_table="shared_photos",
+                source_pk_column="id",
+                blob_column="photo",
+                create_time=now,
+            )
+        source = BlobMigrationSource.objects.create(
+            name="ambiguous db",
+            source_table="shared_photos",
+            source_pk_column="id",
+            blob_column="photo",
+            category_id=1,
+            db_alias="default",
+            database_name="",
+            enabled=1,
+        )
+        prepared = prepare_migration_source(source, persist=False)
+        self.assertEqual(prepared.database_name, "")
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_find_migration_source_match_requires_database_when_ambiguous(self):
+        now = timezone.now()
+        BlobMigrationSource.objects.create(
+            name="db a",
+            source_table="shared_photos",
+            source_pk_column="id",
+            blob_column="photo",
+            category_id=1,
+            db_alias="default",
+            database_name="db_a",
+            enabled=1,
+            create_time=now,
+        )
+        BlobMigrationSource.objects.create(
+            name="db b",
+            source_table="shared_photos",
+            source_pk_column="id",
+            blob_column="photo",
+            category_id=1,
+            db_alias="default",
+            database_name="db_b",
+            enabled=1,
+            create_time=now,
+        )
+
+        matched, ambiguous = find_migration_source_match(
+            db_alias="default",
+            database="db_a",
+            source_table="shared_photos",
+        )
+        self.assertFalse(ambiguous)
+        self.assertEqual(matched.database_name, "db_a")
+
+        other, ambiguous_other = find_migration_source_match(
+            db_alias="default",
+            database="db_b",
+            source_table="shared_photos",
+        )
+        self.assertFalse(ambiguous_other)
+        self.assertEqual(other.database_name, "db_b")
+
+        missing, ambiguous_missing = find_migration_source_match(
+            db_alias="default",
+            database="db_c",
+            source_table="shared_photos",
+        )
+        self.assertFalse(ambiguous_missing)
+        self.assertIsNone(missing)
+
+        loose, ambiguous_loose = find_migration_source_match(
+            db_alias="default",
+            database="",
+            source_table="shared_photos",
+        )
+        self.assertTrue(ambiguous_loose)
+        self.assertIsNone(loose)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_orphan_source_map_does_not_skip_migration(self):
