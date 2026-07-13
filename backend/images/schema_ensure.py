@@ -88,10 +88,11 @@ def ensure_migration_tables() -> None:
           `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
           `source_table` varchar(64) NOT NULL,
           `source_id` varchar(64) NOT NULL,
+          `source_column` varchar(64) NOT NULL DEFAULT '' COMMENT 'BLOB 列名',
           `image_info_id` bigint(20) UNSIGNED NOT NULL,
           `migrated_at` datetime NOT NULL,
           PRIMARY KEY (`id`),
-          UNIQUE KEY `uk_source`(`source_table`, `source_id`),
+          UNIQUE KEY `uk_source`(`source_table`, `source_id`, `source_column`),
           KEY `idx_image_info`(`image_info_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='旧表与路径表映射'
         """,
@@ -219,6 +220,39 @@ def _mysql_index_exists(cursor, table: str, index_name: str) -> bool:
     return bool(cursor.fetchone()[0])
 
 
+def _mysql_index_columns(cursor, table: str, index_name: str) -> list[str] | None:
+    cursor.execute(
+        """
+        SELECT COLUMN_NAME
+        FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+          AND INDEX_NAME = %s
+        ORDER BY SEQ_IN_INDEX
+        """,
+        [table, index_name],
+    )
+    rows = cursor.fetchall()
+    if not rows:
+        return None
+    return [row[0] for row in rows]
+
+
+def _ensure_image_source_map_unique_index(cursor) -> None:
+    """Upgrade uk_source to (source_table, source_id, source_column) idempotently."""
+    desired = ["source_table", "source_id", "source_column"]
+    current = _mysql_index_columns(cursor, "image_source_map", "uk_source")
+    if current == desired:
+        return
+    if current is not None:
+        cursor.execute("ALTER TABLE `image_source_map` DROP INDEX `uk_source`")
+    cursor.execute(
+        "ALTER TABLE `image_source_map` ADD UNIQUE KEY `uk_source` "
+        "(`source_table`, `source_id`, `source_column`)"
+    )
+    logger.info("ensured image_source_map.uk_source columns=%s", desired)
+
+
 def ensure_blob_pr1_schema() -> None:
     """PR1 columns: source_column, blob_columns, object metadata for browse/migrate."""
     from django.db import connection
@@ -250,17 +284,23 @@ def ensure_blob_pr1_schema() -> None:
 
     try:
         with connection.cursor() as cursor:
-            for table, column, ddl in alters:
+            if not _mysql_column_exists(cursor, "image_source_map", "source_column"):
+                cursor.execute(
+                    "ALTER TABLE `image_source_map` "
+                    "ADD COLUMN `source_column` varchar(64) NOT NULL DEFAULT '' "
+                    "COMMENT 'BLOB 列名' AFTER `source_id`"
+                )
+                logger.info("added image_source_map.source_column")
+
+            _ensure_image_source_map_unique_index(cursor)
+
+            alters_without_source_column = [
+                item for item in alters if item[0:2] != ("image_source_map", "source_column")
+            ]
+            for table, column, ddl in alters_without_source_column:
                 if not _mysql_column_exists(cursor, table, column):
                     cursor.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {ddl}")
                     logger.info("added %s.%s", table, column)
-
-            if _mysql_index_exists(cursor, "image_source_map", "uk_source"):
-                cursor.execute("ALTER TABLE `image_source_map` DROP INDEX `uk_source`")
-            if not _mysql_index_exists(cursor, "image_source_map", "uk_source"):
-                cursor.execute(
-                    "ALTER TABLE `image_source_map` ADD UNIQUE KEY `uk_source` (`source_table`, `source_id`, `source_column`)"
-                )
 
             if not _mysql_column_exists(cursor, "blob_migration_job_error", "source_column"):
                 cursor.execute(
