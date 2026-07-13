@@ -108,7 +108,7 @@ class BlobMigrationSourceSerializer(serializers.Serializer):
     path_lookup_table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
     name_column = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
     suffix_column = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
-    category_id = serializers.IntegerField(min_value=1)
+    category_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     upload_user = serializers.CharField(required=False, allow_blank=True, default="migration", max_length=100)
     tags = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
     where_clause = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)

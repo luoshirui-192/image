@@ -4,11 +4,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { callWithRetry } from '@/utils/callWithRetry'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Connection, Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { Connection, Refresh, Search } from '@element-plus/icons-vue'
 import {
   createBlobMigrationSourceApi,
   createBlobTableViewApi,
-  createCategoryApi,
   createExternalDbConnectionApi,
   createBlobMigrationJobApi,
   cancelBlobMigrationJobApi,
@@ -25,7 +24,6 @@ import {
   listBlobMigrationJobsApi,
   listBlobMigrationSourcesApi,
   getBlobMigrationSourceApi,
-  listCategoriesApi,
   listExternalDbConnectionsApi,
   provisionExternalDbTableViewsApi,
   retryBlobMigrationJobApi,
@@ -42,7 +40,6 @@ const databases = ref([])
 const connections = ref([])
 const discoveredTables = ref([])
 const sources = ref([])
-const categories = ref([])
 const discovering = ref(false)
 const saving = ref(false)
 const savingView = ref(false)
@@ -68,7 +65,6 @@ const form = reactive({
   pathLookupTable: '',
   nameColumn: '',
   suffixColumn: '',
-  categoryId: null,
   tags: '',
   whereClause: '',
 })
@@ -80,10 +76,6 @@ const runOptions = reactive({
   skipExisting: true,
   warmThumbsAfter: true,
 })
-
-const categoryDialogVisible = ref(false)
-const categoryDialogSaving = ref(false)
-const newCategoryForm = reactive({ category_name: '', sort: 0 })
 
 const connForm = reactive({
   name: '',
@@ -230,15 +222,6 @@ function useConnection(row) {
   form.dbAlias = row.alias
 }
 
-async function loadCategories() {
-  try {
-    const res = await callWithRetry(() => listCategoriesApi())
-    categories.value = res.data || []
-  } catch {
-    categories.value = []
-  }
-}
-
 async function loadSources() {
   try {
     const res = await callWithRetry(() => listBlobMigrationSourcesApi({ includeStats: false }))
@@ -355,11 +338,6 @@ async function saveSource() {
     ElMessage.warning('请填写源表与 BLOB 列')
     return
   }
-  if (!form.categoryId) {
-    ElMessage.warning('请选择分类')
-    return
-  }
-
   saving.value = true
   try {
     await createBlobMigrationSourceApi({
@@ -367,7 +345,6 @@ async function saveSource() {
       name: form.name.trim() || `${form.sourceTable}.${form.blobColumns[0] || form.blobColumn}`,
       name_column: form.nameColumn.trim(),
       suffix_column: form.suffixColumn.trim(),
-      category_id: form.categoryId,
       tags: form.tags.trim(),
     })
     ElMessage.success('迁移配置已保存')
@@ -825,41 +802,8 @@ async function executeMigration() {
   }
 }
 
-function openCreateCategory() {
-  newCategoryForm.category_name = ''
-  newCategoryForm.sort = 0
-  categoryDialogVisible.value = true
-}
-
-function goManageCategories() {
-  router.push({ name: 'categories', query: { from: 'blob-migrate' } })
-}
-
-async function submitCreateCategory() {
-  const name = newCategoryForm.category_name.trim()
-  if (!name) {
-    ElMessage.warning('请输入分类名称')
-    return
-  }
-  categoryDialogSaving.value = true
-  try {
-    const res = await createCategoryApi({
-      category_name: name,
-      sort: Number(newCategoryForm.sort) || 0,
-    })
-    ElMessage.success('分类已创建')
-    categoryDialogVisible.value = false
-    await loadCategories()
-    if (res.data?.id) {
-      form.categoryId = res.data.id
-    }
-  } finally {
-    categoryDialogSaving.value = false
-  }
-}
-
 onMounted(async () => {
-  await Promise.all([loadConnections(), loadDatabases(), loadCategories(), loadSources(), loadJobHistory()])
+  await Promise.all([loadConnections(), loadDatabases(), loadSources(), loadJobHistory()])
   applyRoutePrefill()
 })
 
@@ -1121,24 +1065,6 @@ onUnmounted(() => {
                 <el-input v-model="form.suffixColumn" placeholder="可选" clearable />
               </el-form-item>
             </el-col>
-            <el-col :xs="24" :sm="16">
-              <el-form-item label="分类" required>
-                <div class="category-row">
-                  <el-select v-model="form.categoryId" placeholder="请选择" filterable style="width: 100%">
-                    <el-option
-                      v-for="cat in categories"
-                      :key="cat.id"
-                      :label="cat.category_name"
-                      :value="cat.id"
-                    />
-                  </el-select>
-                  <el-button type="primary" plain @click="openCreateCategory">
-                    <el-icon><Plus /></el-icon>
-                  </el-button>
-                  <el-button link type="primary" @click="goManageCategories">管理</el-button>
-                </div>
-              </el-form-item>
-            </el-col>
             <el-col :xs="24" :sm="24">
               <el-form-item label="WHERE 条件">
                 <el-input
@@ -1358,23 +1284,6 @@ onUnmounted(() => {
         </el-table>
       </section>
     </div>
-
-    <el-dialog v-model="categoryDialogVisible" title="新建分类" width="400px">
-      <el-form label-width="80px">
-        <el-form-item label="名称" required>
-          <el-input v-model="newCategoryForm.category_name" maxlength="100" />
-        </el-form-item>
-        <el-form-item label="排序">
-          <el-input-number v-model="newCategoryForm.sort" :min="0" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="categoryDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="categoryDialogSaving" @click="submitCreateCategory">
-          保存
-        </el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 

@@ -15,7 +15,6 @@ import SqlEditor from '@/components/SqlEditor.vue'
 import {
   deleteImageApi,
   downloadImageFile,
-  listCategoriesApi,
   updateImageApi,
 } from '@/api/images'
 import {
@@ -49,20 +48,17 @@ const resultTableRef = ref(null)
 const galleryItems = ref([])
 const galleryIndex = ref(-1)
 
-const categories = ref([])
 const editVisible = ref(false)
 const editSaving = ref(false)
 const editForm = reactive({
   id: null,
   image_name: '',
-  category_id: null,
   tags: '',
 })
 
 const IMAGE_NAME_FIELDS = ['image_name', 'name', 'filename']
 const UPLOAD_USER_FIELDS = ['upload_user', 'user', 'username']
 const SUFFIX_FIELDS = ['file_suffix', 'suffix']
-const CATEGORY_FIELDS = ['category_id']
 const TAGS_FIELDS = ['tags']
 
 const pathColumn = computed(() => {
@@ -120,15 +116,6 @@ function buildDeleteConfirmMessage(row) {
     '• 将立即删除 upload/ 中的文件、image_info 记录及 BLOB 迁移映射。',
     '• 此操作不可恢复；若来自 BLOB 迁移，需从源库重新迁移。',
   ].join('\n')
-}
-
-async function loadCategories() {
-  try {
-    const res = await listCategoriesApi()
-    categories.value = res.data || []
-  } catch {
-    categories.value = []
-  }
 }
 
 function loadDraft() {
@@ -342,8 +329,6 @@ function openEdit(row) {
   if (!canModifyImageRow(row)) return
   editForm.id = getIdFromRow(row)
   editForm.image_name = pickRowField(row, IMAGE_NAME_FIELDS)
-  const categoryRaw = pickRowField(row, CATEGORY_FIELDS)
-  editForm.category_id = categoryRaw != null && categoryRaw !== '' ? Number(categoryRaw) : null
   editForm.tags = pickRowField(row, TAGS_FIELDS) || ''
   editVisible.value = true
 }
@@ -353,15 +338,10 @@ async function submitEdit() {
     ElMessage.warning('图片名称不能为空')
     return
   }
-  if (!editForm.category_id) {
-    ElMessage.warning('请选择分类')
-    return
-  }
   editSaving.value = true
   try {
     await updateImageApi(editForm.id, {
       image_name: editForm.image_name.trim(),
-      category_id: editForm.category_id,
       tags: editForm.tags.trim(),
     })
     ElMessage.success('更新成功')
@@ -403,7 +383,6 @@ async function refreshResult() {
 onMounted(() => {
   loadDraft()
   loadTemplates()
-  loadCategories()
 })
 </script>
 
@@ -592,16 +571,6 @@ onMounted(() => {
       <el-form label-width="80px">
         <el-form-item label="名称" required>
           <el-input v-model="editForm.image_name" maxlength="255" />
-        </el-form-item>
-        <el-form-item label="分类" required>
-          <el-select v-model="editForm.category_id" placeholder="请选择分类" style="width: 100%">
-            <el-option
-              v-for="cat in categories"
-              :key="cat.id"
-              :label="cat.category_name"
-              :value="cat.id"
-            />
-          </el-select>
         </el-form-item>
         <el-form-item label="标签">
           <el-input v-model="editForm.tags" maxlength="500" placeholder="逗号分隔" />

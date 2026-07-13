@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 
 from django.utils import timezone
 
+from images.category_service import resolve_category_id
 from images.models import ImageCategory, ImageInfo
 from images.serializers import ImageCategorySerializer, ImageInfoSerializer, serialize_image_info
 from images.services import DuplicateBatchError, save_uploaded_files
@@ -87,14 +88,12 @@ class ImageUploadView(APIView):
             return error_response("请至少上传一个图片文件", code=4001, status=400)
 
         category_id = request.data.get("category_id")
-        if category_id in ("", None):
-            return error_response("上传时必须选择分类", code=4001, status=400)
         try:
-            parsed_category_id = int(category_id)
-        except (TypeError, ValueError):
-            return error_response("category_id 必须为整数", code=4001, status=400)
-        if parsed_category_id <= 0:
-            return error_response("必须选择有效分类", code=4001, status=400)
+            parsed_category_id = resolve_category_id(
+                None if category_id in ("", None) else category_id
+            )
+        except ValueError as exc:
+            return error_response(str(exc), code=4001, status=400)
 
         tags = str(request.data.get("tags", ""))
         overwrite = _parse_overwrite_param(request.data.get("overwrite"))

@@ -134,6 +134,19 @@ class ImageUploadAPITestCase(TestCase):
         record = ImageInfo.objects.get(pk=image["id"])
         self.assertTrue(record.image_path.startswith("upload/"))
 
+    def test_upload_defaults_category_when_omitted(self):
+        with self._settings():
+            self._auth(self.user)
+            _, png = make_test_png("default_cat.png")
+            response = self.client.post(
+                "/api/images/upload/",
+                {"file": png},
+                format="multipart",
+            )
+        self.assertEqual(response.status_code, 200)
+        image = response.data["data"]["items"][0]["image"]
+        self.assertEqual(image["category_id"], self.category.id)
+
     def test_upload_sets_local_upload_time(self):
         from django.utils import timezone
         from images.models import ImageInfo

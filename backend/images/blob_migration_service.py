@@ -28,6 +28,7 @@ from images.external_db_service import (
     list_database_aliases,
     validate_db_alias_reference,
 )
+from images.category_service import resolve_category_id
 from images.models import BlobMigrationJob, BlobMigrationJobError, BlobMigrationSource, ImageCategory, ImageInfo, ImageSourceMap
 from images.services import DuplicateImageError, save_image_bytes_for_migration
 from utils.file_security import detect_image_type, extension_from_filename, normalize_suffix
@@ -1735,7 +1736,7 @@ def create_migration_source(**fields) -> BlobMigrationSource:
         ),
         name_column=fields.get("name_column") or "",
         suffix_column=fields.get("suffix_column") or "",
-        category_id=fields["category_id"],
+        category_id=resolve_category_id(fields.get("category_id")),
         upload_user=fields.get("upload_user") or "migration",
         tags=(fields.get("tags") or "")[:500],
         where_clause=fields.get("where_clause") or "",

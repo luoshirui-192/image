@@ -10,8 +10,9 @@ from pathlib import Path
 from django.conf import settings
 from PIL import Image
 
+from images.category_service import resolve_category_id
+from images.models import ImageInfo
 from images.file_service import thumb_cache_path
-from images.models import ImageCategory, ImageInfo
 from utils.db_time import fetch_db_now
 from utils.file_security import UploadValidationError, validate_upload_file
 from utils.path_builder import build_relative_path, normalize_suffix
@@ -109,11 +110,7 @@ def _collect_batch_duplicates(
 
 
 def _resolve_category_id(category_id: int | None) -> int:
-    if category_id is None or category_id <= 0:
-        raise ValueError("必须选择有效分类")
-    if not ImageCategory.objects.filter(id=category_id).exists():
-        raise ValueError(f"分类不存在: id={category_id}")
-    return category_id
+    return resolve_category_id(category_id)
 
 
 def _read_image_dimensions(content: bytes) -> tuple[int, int]:

@@ -9,7 +9,6 @@ import {
   createBlobMigrationJobApi,
   createBlobMigrationSourceApi,
   createBlobTableViewApi,
-  createCategoryApi,
   deleteBlobTableViewApi,
   fetchBlobTableViewRowsApi,
   getBlobCatalogObjectApi,
@@ -21,7 +20,6 @@ import {
   listBlobTableViewsApi,
   updateBlobTableViewApi,
   getBlobMigrationSourceApi,
-  listCategoriesApi,
 } from '@/api/images'
 import {
   executeSqlApi,
@@ -126,7 +124,6 @@ const loadingSelectionMigrationStats = ref(false)
 const migrateDialogVisible = ref(false)
 const migrateSaving = ref(false)
 const migrateForm = reactive({
-  categoryId: null,
   nameColumn: '',
   suffixColumn: '',
   tags: '',
@@ -141,16 +138,10 @@ const createViewForm = reactive({
   whereClause: '',
   alsoMigrate: false,
   startMigration: true,
-  categoryId: null,
   nameColumn: '',
   suffixColumn: '',
   tags: '',
 })
-
-const categories = ref([])
-const categoryDialogVisible = ref(false)
-const categoryDialogSaving = ref(false)
-const newCategoryForm = reactive({ category_name: '', sort: 0 })
 
 const browseContext = computed(() => {
   if (activeView.value) {
@@ -676,7 +667,6 @@ function buildMigrationSourcePayload(view, form) {
     where_clause: view.where_clause || '',
     name_column: form.nameColumn.trim(),
     suffix_column: form.suffixColumn.trim(),
-    category_id: form.categoryId,
     tags: form.tags.trim(),
   }
 }
@@ -709,21 +699,15 @@ async function ensureMigrationSourceForView(view, form, catalogData = null) {
 async function openMigrateDialog() {
   const view = savedViewForSelection.value
   if (!view) return
-  migrateForm.categoryId = null
   migrateForm.nameColumn = ''
   migrateForm.suffixColumn = ''
   migrateForm.tags = ''
-  await loadCategories()
   migrateDialogVisible.value = true
 }
 
 async function submitSavedViewMigration() {
   const view = savedViewForSelection.value
   if (!view) return
-  if (!migrateForm.categoryId) {
-    ElMessage.warning('请选择迁移目标分类')
-    return
-  }
   migrateSaving.value = true
   try {
     const sourceId = await ensureMigrationSourceForView(view, migrateForm)
@@ -749,47 +733,6 @@ async function submitSavedViewMigration() {
   }
 }
 
-async function loadCategories() {
-  try {
-    const res = await listCategoriesApi()
-    categories.value = res.data || []
-  } catch {
-    categories.value = []
-  }
-}
-
-function openCreateCategory() {
-  newCategoryForm.category_name = ''
-  newCategoryForm.sort = 0
-  categoryDialogVisible.value = true
-}
-
-async function submitCreateCategory() {
-  const name = newCategoryForm.category_name.trim()
-  if (!name) {
-    ElMessage.warning('请输入分类名称')
-    return
-  }
-  categoryDialogSaving.value = true
-  try {
-    const res = await createCategoryApi({
-      category_name: name,
-      sort: Number(newCategoryForm.sort) || 0,
-    })
-    ElMessage.success('分类已创建')
-    categoryDialogVisible.value = false
-    await loadCategories()
-    if (res.data?.id) {
-      createViewForm.categoryId = res.data.id
-      migrateForm.categoryId = res.data.id
-    }
-  } catch (err) {
-    ElMessage.error(err.message || '创建分类失败')
-  } finally {
-    categoryDialogSaving.value = false
-  }
-}
-
 async function openCreateViewDialog() {
   if (!selectedCatalogObject.value) return
   const obj = selectedCatalogObject.value
@@ -800,7 +743,6 @@ async function openCreateViewDialog() {
   createViewForm.sourcePkColumn = 'id'
   createViewForm.alsoMigrate = false
   createViewForm.startMigration = true
-  createViewForm.categoryId = null
   createViewForm.nameColumn = ''
   createViewForm.suffixColumn = ''
   createViewForm.tags = ''
@@ -820,7 +762,6 @@ async function openCreateViewDialog() {
   } catch {
     // keep defaults from tree node
   }
-  await loadCategories()
   createViewDialogVisible.value = true
 }
 
@@ -828,10 +769,6 @@ async function submitCreateView() {
   if (!selectedCatalogObject.value) return
   if (!createViewForm.blobColumns.length) {
     ElMessage.warning('请至少选择一个 BLOB 列')
-    return
-  }
-  if (createViewForm.alsoMigrate && !createViewForm.categoryId) {
-    ElMessage.warning('请选择迁移目标分类')
     return
   }
   const obj = selectedCatalogObject.value
@@ -2002,25 +1939,6 @@ onUnmounted(() => {
           <span class="field-hint inline-hint">保存浏览配置的同时创建迁移任务配置</span>
         </el-form-item>
         <template v-if="createViewForm.alsoMigrate">
-          <el-form-item label="目标分类" required>
-            <div class="category-row">
-              <el-select
-                v-model="createViewForm.categoryId"
-                filterable
-                clearable
-                placeholder="选择分类"
-                style="flex: 1"
-              >
-                <el-option
-                  v-for="cat in categories"
-                  :key="cat.id"
-                  :label="cat.category_name"
-                  :value="cat.id"
-                />
-              </el-select>
-              <el-button @click="openCreateCategory">新建</el-button>
-            </div>
-          </el-form-item>
           <el-form-item label="文件名列">
             <el-input v-model="createViewForm.nameColumn" placeholder="可选，用于生成文件名" maxlength="64" />
           </el-form-item>
@@ -2049,25 +1967,6 @@ onUnmounted(() => {
         将「{{ savedViewForSelection?.source_table }}」的 BLOB 数据迁移到图片库，并启动后台任务。
       </p>
       <el-form label-width="110px">
-        <el-form-item label="目标分类" required>
-          <div class="category-row">
-            <el-select
-              v-model="migrateForm.categoryId"
-              filterable
-              clearable
-              placeholder="选择分类"
-              style="flex: 1"
-            >
-              <el-option
-                v-for="cat in categories"
-                :key="cat.id"
-                :label="cat.category_name"
-                :value="cat.id"
-              />
-            </el-select>
-            <el-button @click="openCreateCategory">新建</el-button>
-          </div>
-        </el-form-item>
         <el-form-item label="文件名列">
           <el-input v-model="migrateForm.nameColumn" placeholder="可选，用于生成文件名" maxlength="64" />
         </el-form-item>
@@ -2082,23 +1981,6 @@ onUnmounted(() => {
         <el-button @click="migrateDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="migrateSaving" @click="submitSavedViewMigration">
           开始迁移
-        </el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="categoryDialogVisible" title="新建分类" width="400px">
-      <el-form label-width="90px">
-        <el-form-item label="分类名称" required>
-          <el-input v-model="newCategoryForm.category_name" maxlength="100" />
-        </el-form-item>
-        <el-form-item label="排序">
-          <el-input-number v-model="newCategoryForm.sort" :min="0" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="categoryDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="categoryDialogSaving" @click="submitCreateCategory">
-          创建
         </el-button>
       </template>
     </el-dialog>
