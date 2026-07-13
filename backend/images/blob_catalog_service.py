@@ -131,42 +131,51 @@ def list_database_objects(
         blob_types = _mysql_blob_types_sql()
         with conn.cursor() as cursor:
             cursor.execute(
-                f"""
-                SELECT t.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE
-                FROM information_schema.TABLES t
-                JOIN information_schema.COLUMNS c
-                  ON c.TABLE_SCHEMA = t.TABLE_SCHEMA
-                 AND c.TABLE_NAME = t.TABLE_NAME
-                WHERE t.TABLE_SCHEMA = %s
-                  AND t.TABLE_TYPE IN ('BASE TABLE', 'VIEW')
-                  AND LOWER(c.DATA_TYPE) IN ({blob_types})
-                ORDER BY t.TABLE_TYPE, t.TABLE_NAME, c.ORDINAL_POSITION
+                """
+                SELECT TABLE_NAME, TABLE_TYPE
+                FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = %s
+                  AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+                ORDER BY TABLE_TYPE, TABLE_NAME
                 """,
                 [db_name],
             )
-            rows = cursor.fetchall()
+            table_rows = cursor.fetchall()
 
-    grouped: dict[str, dict[str, Any]] = {}
-    for table_name, table_type, column_name, data_type in rows:
-        obj_type = OBJECT_TYPE_VIEW if table_type == "VIEW" else OBJECT_TYPE_TABLE
-        if type_filter and obj_type != type_filter:
-            continue
-        entry = grouped.setdefault(
-            table_name,
-            {
-                "name": table_name,
-                "object_type": obj_type,
-                "blob_columns": [],
-            },
-        )
-        entry["blob_columns"].append(
+            cursor.execute(
+                f"""
+                SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = %s
+                  AND LOWER(DATA_TYPE) IN ({blob_types})
+                ORDER BY TABLE_NAME, ORDINAL_POSITION
+                """,
+                [db_name],
+            )
+            blob_rows = cursor.fetchall()
+
+    blob_by_table: dict[str, list[dict[str, Any]]] = {}
+    for table_name, column_name, data_type in blob_rows:
+        blob_by_table.setdefault(table_name, []).append(
             {
                 "column": column_name,
                 "data_type": (data_type or "").lower(),
             }
         )
 
-    objects = sorted(grouped.values(), key=lambda item: (item["object_type"], item["name"].lower()))
+    objects: list[dict[str, Any]] = []
+    for table_name, table_type in table_rows:
+        obj_type = OBJECT_TYPE_VIEW if table_type == "VIEW" else OBJECT_TYPE_TABLE
+        if type_filter and obj_type != type_filter:
+            continue
+        objects.append(
+            {
+                "name": table_name,
+                "object_type": obj_type,
+                "blob_columns": blob_by_table.get(table_name, []),
+            }
+        )
+
     return {
         "connection_id": ext_id,
         "db_alias": alias,

@@ -1490,9 +1490,6 @@ onUnmounted(() => {
             <div>{{ selectedCatalogObject.database }}.{{ selectedCatalogObject.label }}</div>
             <div class="field-hint">
               {{ selectedCatalogObject.objectType === 'view' ? '数据库视图' : '表' }}
-              <template v-if="selectedCatalogObject.blobColumns?.length">
-                · {{ selectedCatalogObject.blobColumns.map((c) => c.column).join(', ') }}
-              </template>
               <template v-if="savedViewForSelection?.row_count != null">
                 · {{ savedViewForSelection.row_count }} 行
               </template>

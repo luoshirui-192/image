@@ -1,15 +1,19 @@
 """Tests for blob catalog API (PR1 / PR4)."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from unittest.mock import MagicMock, patch
+
 from django.contrib.auth.hashers import make_password
 from django.db import connection
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
 from images.blob_catalog_service import (
     BlobCatalogError,
     list_catalog_connections,
     list_connection_databases,
+    list_database_objects,
 )
 from users.models import SysUser
 
@@ -105,7 +109,48 @@ class BlobCatalogTestCase(TestCase):
 
     def test_service_objects_error_message(self):
         with self.assertRaises(BlobCatalogError) as ctx:
-            from images.blob_catalog_service import list_database_objects
-
             list_database_objects("main", db_alias="default")
         self.assertIn("暂不支持", str(ctx.exception))
+
+
+class BlobCatalogObjectsListTest(SimpleTestCase):
+    def test_list_database_objects_includes_tables_without_blob_columns(self):
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.side_effect = [
+            [
+                ("users", "BASE TABLE"),
+                ("v_photos", "VIEW"),
+                ("logs", "BASE TABLE"),
+            ],
+            [
+                ("v_photos", "image_blob", "blob"),
+            ],
+        ]
+        mock_conn = MagicMock()
+        mock_conn.vendor = "mysql"
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        @contextmanager
+        def fake_session(_alias, database=None):
+            yield "external_1"
+
+        with patch("images.blob_catalog_service.db_alias_session", fake_session), patch(
+            "images.blob_catalog_service.connections"
+        ) as mock_connections, patch(
+            "images.blob_catalog_service._resolve_catalog_target",
+            return_value=("external_1", 1, "legacy_db"),
+        ):
+            mock_connections.__getitem__.return_value = mock_conn
+            payload = list_database_objects("legacy_db", db_alias="external_1")
+
+        self.assertEqual(payload["database"], "legacy_db")
+        self.assertEqual(len(payload["objects"]), 3)
+
+        by_name = {item["name"]: item for item in payload["objects"]}
+        self.assertEqual(by_name["users"]["blob_columns"], [])
+        self.assertEqual(by_name["logs"]["blob_columns"], [])
+        self.assertEqual(by_name["v_photos"]["object_type"], "view")
+        self.assertEqual(
+            by_name["v_photos"]["blob_columns"],
+            [{"column": "image_blob", "data_type": "blob"}],
+        )

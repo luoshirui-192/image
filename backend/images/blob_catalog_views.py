@@ -72,7 +72,7 @@ class BlobCatalogDatabasesView(APIView):
     ],
 )
 class BlobCatalogObjectsView(APIView):
-    """GET /api/images/blob-catalog/objects/ — list tables/views with BLOB columns."""
+    """GET /api/images/blob-catalog/objects/ — list all tables/views in a database."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
 
