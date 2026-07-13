@@ -73,6 +73,13 @@ class BlobMigrationSource(models.Model):
     database_name = models.CharField(max_length=64, default="")
     enabled = models.SmallIntegerField(default=1)
     last_run_at = models.DateTimeField(null=True, blank=True)
+    auto_sync_enabled = models.SmallIntegerField(default=0)
+    sync_interval_minutes = models.PositiveIntegerField(default=60)
+    sync_batch_size = models.PositiveIntegerField(default=200)
+    sync_last_run_at = models.DateTimeField(null=True, blank=True)
+    sync_last_checked_map_id = models.PositiveBigIntegerField(default=0)
+    change_track_column = models.CharField(max_length=64, default="")
+    change_track_mode = models.CharField(max_length=20, default="hash")
     create_time = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -92,6 +99,11 @@ class ImageSourceMap(models.Model):
     source_column = models.CharField(max_length=64, default="")
     image_info_id = models.PositiveBigIntegerField()
     migrated_at = models.DateTimeField()
+    source_content_hash = models.CharField(max_length=64, default="")
+    source_blob_length = models.PositiveBigIntegerField(default=0)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    sync_status = models.CharField(max_length=20, default="unknown")
+    last_sync_error = models.CharField(max_length=500, default="")
 
     class Meta:
         managed = False
@@ -205,6 +217,26 @@ class BlobMigrationJob(models.Model):
 
     def __str__(self) -> str:
         return f"job#{self.id} source={self.source_id} {self.status}"
+
+
+class BlobSyncRun(models.Model):
+    source_id = models.PositiveIntegerField(null=True, blank=True)
+    run_type = models.CharField(max_length=20, default="detect")
+    status = models.CharField(max_length=20, default="running")
+    checked = models.PositiveIntegerField(default=0)
+    changed = models.PositiveIntegerField(default=0)
+    resynced = models.PositiveIntegerField(default=0)
+    failed = models.PositiveIntegerField(default=0)
+    message = models.CharField(max_length=500, default="")
+    started_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = "blob_sync_run"
+        verbose_name = "BLOB 同步运行"
+        verbose_name_plural = "BLOB 同步运行"
+        ordering = ["-id"]
 
 
 class BlobMigrationJobError(models.Model):

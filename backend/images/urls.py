@@ -36,6 +36,13 @@ from images.blob_table_view_views import (
     BlobTableViewRowsView,
     BlobTableViewSchemaView,
 )
+from images.blob_sync_views import (
+    BlobMigrationSourceSyncBackfillView,
+    BlobMigrationSourceSyncRunView,
+    BlobMigrationSourceSyncSettingsView,
+    BlobMigrationSourceSyncStatusView,
+    BlobSyncGlobalBackfillView,
+)
 from images.external_db_views import (
     BlobMigrationDatabaseListView,
     ExternalDbConnectionDetailView,
@@ -53,6 +60,31 @@ urlpatterns = [
     path("blob-migration/discover/", BlobMigrationDiscoverView.as_view(), name="blob-migration-discover"),
     path("blob-migration/sources/", BlobMigrationSourceListCreateView.as_view(), name="blob-migration-sources"),
     path("blob-migration/sources/<int:pk>/", BlobMigrationSourceDetailView.as_view(), name="blob-migration-source-detail"),
+    path(
+        "blob-migration/sources/<int:pk>/sync/status/",
+        BlobMigrationSourceSyncStatusView.as_view(),
+        name="blob-migration-source-sync-status",
+    ),
+    path(
+        "blob-migration/sources/<int:pk>/sync/settings/",
+        BlobMigrationSourceSyncSettingsView.as_view(),
+        name="blob-migration-source-sync-settings",
+    ),
+    path(
+        "blob-migration/sources/<int:pk>/sync/backfill/",
+        BlobMigrationSourceSyncBackfillView.as_view(),
+        name="blob-migration-source-sync-backfill",
+    ),
+    path(
+        "blob-migration/sources/<int:pk>/sync/run/",
+        BlobMigrationSourceSyncRunView.as_view(),
+        name="blob-migration-source-sync-run",
+    ),
+    path(
+        "blob-migration/sync/backfill/",
+        BlobSyncGlobalBackfillView.as_view(),
+        name="blob-migration-sync-backfill-global",
+    ),
     path("blob-migration/run/", BlobMigrationRunView.as_view(), name="blob-migration-run"),
     path("blob-migration/jobs/", BlobMigrationJobListCreateView.as_view(), name="blob-migration-jobs"),
     path("blob-migration/jobs/retry/", BlobMigrationJobRetryView.as_view(), name="blob-migration-jobs-retry"),

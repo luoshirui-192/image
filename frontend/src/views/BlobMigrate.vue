@@ -29,6 +29,11 @@ import {
   listExternalDbConnectionsApi,
   retryBlobMigrationJobApi,
   runBlobMigrationApi,
+  getBlobMigrationSourceSyncStatusApi,
+  updateBlobMigrationSourceSyncSettingsApi,
+  backfillBlobMigrationSourceSyncApi,
+  runBlobMigrationSourceSyncApi,
+  backfillBlobSyncGlobalApi,
   testExternalDbConnectionApi,
   testSavedExternalDbConnectionApi,
 } from '@/api/images'
@@ -52,6 +57,10 @@ const jobHistory = ref([])
 const pollTimer = ref(null)
 const pollingJobId = ref(null)
 const jobRefreshSeq = ref(0)
+
+const syncStatusBySourceId = ref({})
+const syncLoading = ref(false)
+const globalBackfillLoading = ref(false)
 
 const form = reactive({
   name: '',
@@ -768,6 +777,94 @@ const jobIsPaused = computed(() => activeJob.value?.status === 'paused')
 
 const clearableJobCount = computed(() => jobHistory.value.length)
 
+async function loadSyncStatus(sourceId) {
+  if (!sourceId) return
+  try {
+    const res = await callWithRetry(() => getBlobMigrationSourceSyncStatusApi(sourceId))
+    syncStatusBySourceId.value = {
+      ...syncStatusBySourceId.value,
+      [sourceId]: res.data,
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function loadAllSyncStatuses() {
+  for (const src of sources.value) {
+    await loadSyncStatus(src.id)
+  }
+}
+
+async function toggleSourceAutoSync(sourceId, enabled) {
+  syncLoading.value = true
+  try {
+    const res = await updateBlobMigrationSourceSyncSettingsApi(sourceId, {
+      auto_sync_enabled: enabled,
+      refresh_change_track: true,
+    })
+    syncStatusBySourceId.value = {
+      ...syncStatusBySourceId.value,
+      [sourceId]: res.data,
+    }
+    ElMessage.success(enabled ? '已开启自动同步' : '已关闭自动同步')
+    await loadSources()
+  } catch (err) {
+    ElMessage.error(err.message || '更新失败')
+  } finally {
+    syncLoading.value = false
+  }
+}
+
+async function runSourceSyncBackfill(sourceId) {
+  syncLoading.value = true
+  try {
+    const res = await backfillBlobMigrationSourceSyncApi(sourceId, { batch_size: 200 })
+    ElMessage.success(res.message || '回填完成')
+    await loadSyncStatus(sourceId)
+  } catch (err) {
+    ElMessage.error(err.message || '回填失败')
+  } finally {
+    syncLoading.value = false
+  }
+}
+
+async function runSourceSyncNow(sourceId) {
+  syncLoading.value = true
+  try {
+    const res = await runBlobMigrationSourceSyncApi(sourceId)
+    ElMessage.success(res.message || '同步完成')
+    syncStatusBySourceId.value = {
+      ...syncStatusBySourceId.value,
+      [sourceId]: res.data,
+    }
+  } catch (err) {
+    ElMessage.error(err.message || '同步失败')
+  } finally {
+    syncLoading.value = false
+  }
+}
+
+async function runGlobalBackfill() {
+  globalBackfillLoading.value = true
+  try {
+    const res = await backfillBlobSyncGlobalApi({ batch_size: 200 })
+    ElMessage.success(res.message || '全局回填已提交')
+    await loadAllSyncStatuses()
+  } catch (err) {
+    ElMessage.error(err.message || '全局回填失败')
+  } finally {
+    globalBackfillLoading.value = false
+  }
+}
+
+function syncStatsLabel(sourceId) {
+  const data = syncStatusBySourceId.value[sourceId]
+  if (!data?.stats) return '—'
+  const s = data.stats
+  return `同步 ${s.in_sync || 0} · 变更 ${s.changed || 0} · 缺失 ${s.missing || 0} · 错误 ${s.error || 0}`
+}
+
 async function executeMigration() {
   if (!runOptions.sourceId) {
     ElMessage.warning('请选择迁移任务')
@@ -831,6 +928,7 @@ async function submitCreateCategory() {
 
 onMounted(async () => {
   await Promise.all([loadConnections(), loadDatabases(), loadCategories(), loadSources(), loadJobHistory()])
+  await loadAllSyncStatuses()
   applyRoutePrefill()
 })
 
@@ -1169,6 +1267,50 @@ onUnmounted(() => {
             <template #default="{ row }">
               <el-button link type="primary" @click="runOptions.sourceId = row.id">选用</el-button>
               <el-button link type="danger" @click="removeSource(row.id)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </section>
+
+      <section class="section">
+        <h3>4.1 外部 BLOB 自动同步</h3>
+        <p class="field-hint">
+          对已迁移映射检测外部 BLOB 指纹（LENGTH + SHA2）；变更后自动重迁并更新
+          <code>image_source_map</code>。当前环境源表无 <code>updated_at</code>，使用 hash 模式。
+        </p>
+        <div class="sync-actions">
+          <el-button :loading="globalBackfillLoading" @click="runGlobalBackfill">
+            全局指纹回填（所有已映射行）
+          </el-button>
+        </div>
+        <el-table :data="sources" size="small" border empty-text="请先保存迁移配置">
+          <el-table-column prop="id" label="ID" width="60" />
+          <el-table-column prop="name" label="名称" min-width="120" />
+          <el-table-column label="同步状态" min-width="260">
+            <template #default="{ row }">
+              <span>{{ syncStatsLabel(row.id) }}</span>
+              <div v-if="syncStatusBySourceId[row.id]" class="field-hint">
+                模式 {{ syncStatusBySourceId[row.id].change_track_mode || 'hash' }}
+                <template v-if="syncStatusBySourceId[row.id].sync_last_run_at">
+                  · 上次 {{ syncStatusBySourceId[row.id].sync_last_run_at }}
+                </template>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="自动同步" width="100">
+            <template #default="{ row }">
+              <el-switch
+                :model-value="Boolean(syncStatusBySourceId[row.id]?.auto_sync_enabled ?? row.auto_sync_enabled)"
+                :loading="syncLoading"
+                @change="(val) => toggleSourceAutoSync(row.id, val)"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="220">
+            <template #default="{ row }">
+              <el-button link type="primary" :loading="syncLoading" @click="loadSyncStatus(row.id)">刷新</el-button>
+              <el-button link type="primary" :loading="syncLoading" @click="runSourceSyncBackfill(row.id)">回填</el-button>
+              <el-button link type="success" :loading="syncLoading" @click="runSourceSyncNow(row.id)">立即同步</el-button>
             </template>
           </el-table-column>
         </el-table>

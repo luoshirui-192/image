@@ -156,6 +156,12 @@ class BlobMigrationSourceSerializer(serializers.Serializer):
                 "database_name": getattr(instance, "database_name", "") or "",
                 "enabled": instance.enabled,
                 "last_run_at": instance.last_run_at,
+                "auto_sync_enabled": bool(getattr(instance, "auto_sync_enabled", 0)),
+                "sync_interval_minutes": int(getattr(instance, "sync_interval_minutes", 0) or 60),
+                "sync_batch_size": int(getattr(instance, "sync_batch_size", 0) or 200),
+                "sync_last_run_at": getattr(instance, "sync_last_run_at", None),
+                "change_track_mode": getattr(instance, "change_track_mode", "") or "hash",
+                "change_track_column": getattr(instance, "change_track_column", "") or "",
                 "create_time": instance.create_time,
             }
         return super().to_representation(instance)
@@ -334,6 +340,20 @@ class BlobTableViewUpdateSerializer(serializers.Serializer):
     )
     where_clause = serializers.CharField(required=False, allow_blank=True, max_length=500)
     remark = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class BlobMigrationSourceSyncUpdateSerializer(serializers.Serializer):
+    auto_sync_enabled = serializers.BooleanField(required=False)
+    sync_interval_minutes = serializers.IntegerField(required=False, min_value=5, max_value=10080)
+    sync_batch_size = serializers.IntegerField(required=False, min_value=10, max_value=2000)
+    refresh_change_track = serializers.BooleanField(required=False, default=False)
+
+
+class BlobSyncBackfillSerializer(serializers.Serializer):
+    table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    batch_size = serializers.IntegerField(required=False, min_value=10, max_value=2000)
+    limit = serializers.IntegerField(required=False, min_value=1, max_value=500000)
+    dry_run = serializers.BooleanField(required=False, default=False)
 
 
 class BlobTableViewRowsSerializer(serializers.Serializer):

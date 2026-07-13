@@ -375,3 +375,77 @@ def ensure_blob_pr1_schema() -> None:
             )
     except Exception:
         logger.warning("ensure blob pr1 schema failed", exc_info=True)
+    ensure_blob_sync_schema()
+
+
+def ensure_blob_sync_schema() -> None:
+    """BLOB sync fingerprint columns + blob_sync_run table."""
+    from django.db import connection
+
+    if connection.vendor != "mysql":
+        return
+
+    map_alters = [
+        ("source_content_hash", "varchar(64) NOT NULL DEFAULT '' COMMENT '外部BLOB SHA256' AFTER `migrated_at`"),
+        ("source_blob_length", "bigint(20) UNSIGNED NOT NULL DEFAULT 0 COMMENT '外部BLOB字节数' AFTER `source_content_hash`"),
+        ("last_checked_at", "datetime NULL DEFAULT NULL COMMENT '上次检测时间' AFTER `source_blob_length`"),
+        (
+            "sync_status",
+            "varchar(20) NOT NULL DEFAULT 'unknown' "
+            "COMMENT 'unknown|in_sync|changed|missing|error|pending_resync' AFTER `last_checked_at`",
+        ),
+        ("last_sync_error", "varchar(500) NOT NULL DEFAULT '' AFTER `sync_status`"),
+    ]
+    source_alters = [
+        ("auto_sync_enabled", "tinyint(4) NOT NULL DEFAULT 0 AFTER `last_run_at`"),
+        ("sync_interval_minutes", "int(10) UNSIGNED NOT NULL DEFAULT 60 AFTER `auto_sync_enabled`"),
+        ("sync_batch_size", "int(10) UNSIGNED NOT NULL DEFAULT 200 AFTER `sync_interval_minutes`"),
+        ("sync_last_run_at", "datetime NULL DEFAULT NULL AFTER `sync_batch_size`"),
+        ("sync_last_checked_map_id", "bigint(20) UNSIGNED NOT NULL DEFAULT 0 AFTER `sync_last_run_at`"),
+        ("change_track_column", "varchar(64) NOT NULL DEFAULT '' AFTER `sync_last_checked_map_id`"),
+        ("change_track_mode", "varchar(20) NOT NULL DEFAULT 'hash' AFTER `change_track_column`"),
+    ]
+
+    try:
+        with connection.cursor() as cursor:
+            for column, ddl in map_alters:
+                if not _mysql_column_exists(cursor, "image_source_map", column):
+                    cursor.execute(f"ALTER TABLE `image_source_map` ADD COLUMN `{column}` {ddl}")
+                    logger.info("added image_source_map.%s", column)
+
+            for column, ddl in source_alters:
+                if not _mysql_column_exists(cursor, "blob_migration_source", column):
+                    cursor.execute(f"ALTER TABLE `blob_migration_source` ADD COLUMN `{column}` {ddl}")
+                    logger.info("added blob_migration_source.%s", column)
+
+            if not _mysql_index_exists(cursor, "image_source_map", "idx_sync_status"):
+                cursor.execute(
+                    "ALTER TABLE `image_source_map` ADD KEY `idx_sync_status` (`sync_status`, `last_checked_at`)"
+                )
+            if not _mysql_index_exists(cursor, "image_source_map", "idx_source_table_status"):
+                cursor.execute(
+                    "ALTER TABLE `image_source_map` ADD KEY `idx_source_table_status` "
+                    "(`source_table`, `sync_status`)"
+                )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS `blob_sync_run` (
+                  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+                  `source_id` int(10) UNSIGNED NULL DEFAULT NULL,
+                  `run_type` varchar(20) NOT NULL DEFAULT 'detect',
+                  `status` varchar(20) NOT NULL DEFAULT 'running',
+                  `checked` int(10) UNSIGNED NOT NULL DEFAULT 0,
+                  `changed` int(10) UNSIGNED NOT NULL DEFAULT 0,
+                  `resynced` int(10) UNSIGNED NOT NULL DEFAULT 0,
+                  `failed` int(10) UNSIGNED NOT NULL DEFAULT 0,
+                  `message` varchar(500) NOT NULL DEFAULT '',
+                  `started_at` datetime NOT NULL,
+                  `finished_at` datetime NULL DEFAULT NULL,
+                  PRIMARY KEY (`id`),
+                  KEY `idx_source_time` (`source_id`, `started_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='BLOB 同步运行记录'
+                """
+            )
+    except Exception:
+        logger.warning("ensure blob sync schema failed", exc_info=True)

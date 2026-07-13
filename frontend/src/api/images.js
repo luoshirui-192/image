@@ -130,6 +130,26 @@ export function deleteBlobMigrationSourceApi(id) {
   return request.delete(`/images/blob-migration/sources/${id}/`)
 }
 
+export function getBlobMigrationSourceSyncStatusApi(id) {
+  return request.get(`/images/blob-migration/sources/${id}/sync/status/`, { timeout: 60000 })
+}
+
+export function updateBlobMigrationSourceSyncSettingsApi(id, data) {
+  return request.patch(`/images/blob-migration/sources/${id}/sync/settings/`, data, { timeout: 60000 })
+}
+
+export function backfillBlobMigrationSourceSyncApi(id, data = {}) {
+  return request.post(`/images/blob-migration/sources/${id}/sync/backfill/`, data, { timeout: 600000 })
+}
+
+export function runBlobMigrationSourceSyncApi(id) {
+  return request.post(`/images/blob-migration/sources/${id}/sync/run/`, {}, { timeout: 600000 })
+}
+
+export function backfillBlobSyncGlobalApi(data = {}) {
+  return request.post('/images/blob-migration/sync/backfill/', data, { timeout: 600000 })
+}
+
 export function runBlobMigrationApi({ sourceId, batchSize = 50, dryRun = false, skipExisting = true }) {
   return request.post('/images/blob-migration/run/', {
     source_id: sourceId,

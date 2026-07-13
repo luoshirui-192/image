@@ -54,6 +54,10 @@ run_migration_jobs() {
   python manage.py process_blob_migration_jobs --once --max-jobs 1
 }
 
+run_blob_sync() {
+  python manage.py process_blob_sync --once --max-sources 1
+}
+
 echo "==> scheduler started (maintenance every ${INTERVAL_HOURS}h, migration poll every ${MIGRATION_POLL_SEC}s)"
 
 last_maintenance_epoch=$(date +%s)
@@ -63,6 +67,12 @@ while true; do
     :
   else
     echo "[scheduler] migration job worker failed (will retry)" >&2
+  fi
+
+  if run_blob_sync; then
+    :
+  else
+    echo "[scheduler] blob sync worker failed (will retry)" >&2
   fi
 
   now_epoch=$(date +%s)
