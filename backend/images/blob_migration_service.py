@@ -1634,6 +1634,8 @@ def create_migration_source(**fields) -> BlobMigrationSource:
         db_alias=db_alias,
         database_name=db_name,
         enabled=1,
+        auto_sync_enabled=1,
+        change_track_mode="hash",
         create_time=timezone.now(),
     )
     _validate_source_config(source)

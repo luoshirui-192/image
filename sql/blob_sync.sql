@@ -12,7 +12,7 @@ ALTER TABLE `image_source_map`
 -- MySQL 5.7 may not support IF NOT EXISTS on ADD COLUMN; schema_ensure handles idempotent alters.
 
 ALTER TABLE `blob_migration_source`
-  ADD COLUMN IF NOT EXISTS `auto_sync_enabled` tinyint(4) NOT NULL DEFAULT 0 AFTER `last_run_at`,
+  ADD COLUMN IF NOT EXISTS `auto_sync_enabled` tinyint(4) NOT NULL DEFAULT 1 AFTER `last_run_at`,
   ADD COLUMN IF NOT EXISTS `sync_interval_minutes` int(10) UNSIGNED NOT NULL DEFAULT 60 AFTER `auto_sync_enabled`,
   ADD COLUMN IF NOT EXISTS `sync_batch_size` int(10) UNSIGNED NOT NULL DEFAULT 200 AFTER `sync_interval_minutes`,
   ADD COLUMN IF NOT EXISTS `sync_last_run_at` datetime NULL DEFAULT NULL AFTER `sync_batch_size`,

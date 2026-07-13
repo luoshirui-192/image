@@ -73,7 +73,7 @@ class BlobMigrationSource(models.Model):
     database_name = models.CharField(max_length=64, default="")
     enabled = models.SmallIntegerField(default=1)
     last_run_at = models.DateTimeField(null=True, blank=True)
-    auto_sync_enabled = models.SmallIntegerField(default=0)
+    auto_sync_enabled = models.SmallIntegerField(default=1)
     sync_interval_minutes = models.PositiveIntegerField(default=60)
     sync_batch_size = models.PositiveIntegerField(default=200)
     sync_last_run_at = models.DateTimeField(null=True, blank=True)

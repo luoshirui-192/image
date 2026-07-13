@@ -12,6 +12,7 @@ from images.blob_sync_service import (
     backfill_source_sync_fingerprints,
     count_sync_stats,
     run_detect_and_resync_for_source,
+    run_global_data_sync,
 )
 from images.blob_migration_service import _source_db_session
 from images.models import BlobMigrationSource
@@ -148,7 +149,7 @@ class BlobMigrationSourceSyncBackfillView(APIView):
                 "failed": result.failed,
                 "errors": result.errors[:20],
             },
-            message="指纹回填完成" if not data.get("dry_run") else "预检完成",
+            message="数据同步完成" if not data.get("dry_run") else "预检完成",
         )
 
 
@@ -191,7 +192,7 @@ class BlobMigrationSourceSyncRunView(APIView):
 
 @extend_schema(tags=["blob-migration"], request=BlobSyncBackfillSerializer)
 class BlobSyncGlobalBackfillView(APIView):
-    """POST /api/images/blob-migration/sync/backfill/ — backfill all map rows."""
+    """POST /api/images/blob-migration/sync/backfill/ — global data sync for all mapped rows."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
 
@@ -201,26 +202,22 @@ class BlobSyncGlobalBackfillView(APIView):
             return error_response(_format_errors(serializer.errors), code=4001, status=400)
         data = serializer.validated_data
         try:
-            result = backfill_source_sync_fingerprints(
-                lookup_table=data.get("table") or None,
+            payload = run_global_data_sync(
                 batch_size=data.get("batch_size"),
                 limit=data.get("limit"),
                 dry_run=data.get("dry_run", False),
+                actor=request.user.username,
             )
         except BlobSyncError as exc:
             return error_response(str(exc), code=4001, status=400)
 
+        backfill = payload["backfill"]
         write_operate_log(
             request,
-            "blob_sync_backfill_all",
-            detail=f"checked={result.checked} changed={result.changed}",
+            "blob_sync_global",
+            detail=f"checked={backfill['checked']} changed={backfill['changed']}",
         )
         return success_response(
-            {
-                "checked": result.checked,
-                "changed": result.changed,
-                "failed": result.failed,
-                "errors": result.errors[:20],
-            },
-            message="全局指纹回填完成" if not data.get("dry_run") else "预检完成",
+            payload,
+            message="全局数据同步完成" if not data.get("dry_run") else "预检完成",
         )

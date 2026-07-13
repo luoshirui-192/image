@@ -156,7 +156,7 @@ class BlobMigrationSourceSerializer(serializers.Serializer):
                 "database_name": getattr(instance, "database_name", "") or "",
                 "enabled": instance.enabled,
                 "last_run_at": instance.last_run_at,
-                "auto_sync_enabled": bool(getattr(instance, "auto_sync_enabled", 0)),
+                "auto_sync_enabled": bool(getattr(instance, "auto_sync_enabled", 1)),
                 "sync_interval_minutes": int(getattr(instance, "sync_interval_minutes", 0) or 60),
                 "sync_batch_size": int(getattr(instance, "sync_batch_size", 0) or 200),
                 "sync_last_run_at": getattr(instance, "sync_last_run_at", None),

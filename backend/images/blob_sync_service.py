@@ -550,7 +550,7 @@ def run_detect_and_resync_for_source(source_id: int, *, actor: str = "blob_sync"
 def source_sync_due(source: BlobMigrationSource) -> bool:
     if not _sync_enabled_globally():
         return False
-    if not int(getattr(source, "auto_sync_enabled", 0) or 0):
+    if not int(getattr(source, "enabled", 0) or 0):
         return False
     interval = int(getattr(source, "sync_interval_minutes", 0) or 0) or int(
         getattr(settings, "BLOB_SYNC_DEFAULT_INTERVAL_MINUTES", 60)
@@ -566,7 +566,7 @@ def process_due_blob_sync(*, max_sources: int = 1) -> int:
     if not _sync_enabled_globally():
         return 0
     processed = 0
-    for source in BlobMigrationSource.objects.filter(enabled=1, auto_sync_enabled=1).order_by("id"):
+    for source in BlobMigrationSource.objects.filter(enabled=1).order_by("id"):
         if processed >= max_sources:
             break
         if not source_sync_due(source):
@@ -598,3 +598,51 @@ def count_sync_stats(source_id: int | None = None) -> dict[str, int]:
         stats[status] = stats.get(status, 0) + 1
     stats["total"] = qs.count()
     return stats
+
+
+def run_global_data_sync(
+    *,
+    batch_size: int | None = None,
+    limit: int | None = None,
+    dry_run: bool = False,
+    actor: str = "blob_sync",
+) -> dict:
+    """Scan all mapped rows and run detect/resync for every enabled migration source."""
+    backfill = backfill_source_sync_fingerprints(
+        batch_size=batch_size,
+        limit=limit,
+        dry_run=dry_run,
+    )
+    source_results: list[dict] = []
+    if not dry_run:
+        for source in BlobMigrationSource.objects.filter(enabled=1).order_by("id"):
+            try:
+                with _source_db_session(source) as alias:
+                    refresh_source_change_track(source, conn_alias=alias)
+                result = run_detect_and_resync_for_source(source.id, actor=actor)
+                source_results.append(
+                    {
+                        "source_id": source.id,
+                        "checked": result.checked,
+                        "changed": result.changed,
+                        "resynced": result.resynced,
+                        "failed": result.failed,
+                    }
+                )
+            except Exception as exc:
+                source_results.append(
+                    {
+                        "source_id": source.id,
+                        "error": str(exc)[:500],
+                    }
+                )
+    return {
+        "backfill": {
+            "checked": backfill.checked,
+            "changed": backfill.changed,
+            "failed": backfill.failed,
+            "errors": backfill.errors[:20],
+        },
+        "sources": source_results,
+        "stats": count_sync_stats(None),
+    }

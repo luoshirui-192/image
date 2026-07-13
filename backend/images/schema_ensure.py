@@ -397,7 +397,7 @@ def ensure_blob_sync_schema() -> None:
         ("last_sync_error", "varchar(500) NOT NULL DEFAULT '' AFTER `sync_status`"),
     ]
     source_alters = [
-        ("auto_sync_enabled", "tinyint(4) NOT NULL DEFAULT 0 AFTER `last_run_at`"),
+        ("auto_sync_enabled", "tinyint(4) NOT NULL DEFAULT 1 AFTER `last_run_at`"),
         ("sync_interval_minutes", "int(10) UNSIGNED NOT NULL DEFAULT 60 AFTER `auto_sync_enabled`"),
         ("sync_batch_size", "int(10) UNSIGNED NOT NULL DEFAULT 200 AFTER `sync_interval_minutes`"),
         ("sync_last_run_at", "datetime NULL DEFAULT NULL AFTER `sync_batch_size`"),
@@ -417,6 +417,10 @@ def ensure_blob_sync_schema() -> None:
                 if not _mysql_column_exists(cursor, "blob_migration_source", column):
                     cursor.execute(f"ALTER TABLE `blob_migration_source` ADD COLUMN `{column}` {ddl}")
                     logger.info("added blob_migration_source.%s", column)
+
+            cursor.execute(
+                "UPDATE `blob_migration_source` SET `auto_sync_enabled` = 1 WHERE `auto_sync_enabled` = 0"
+            )
 
             if not _mysql_index_exists(cursor, "image_source_map", "idx_sync_status"):
                 cursor.execute(
