@@ -94,7 +94,14 @@ def map_queryset_for_uid(
     uid = normalize_source_uid(source_uid)
     qs = ImageSourceMap.objects.filter(image_info_id__in=_live_image_subquery())
     if is_valid_source_uid(uid):
-        qs = qs.filter(source_uid=uid)
+        scoped = qs.filter(source_uid=uid)
+        if scoped.exists() or not legacy_map_lookup_enabled() or not lookup_tables:
+            qs = scoped
+        else:
+            qs = qs.filter(
+                Q(source_uid="") | Q(source_uid__isnull=True),
+                source_table__in=lookup_tables,
+            )
     elif lookup_tables and legacy_map_lookup_enabled():
         qs = qs.filter(source_table__in=lookup_tables)
     else:

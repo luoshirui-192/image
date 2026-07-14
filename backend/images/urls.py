@@ -35,6 +35,7 @@ from images.blob_migration_views import (
 )
 from images.blob_table_view_views import (
     BlobTableViewDetailView,
+    BlobTableViewExportToConnectionView,
     BlobTableViewListCreateView,
     BlobTableViewPreviewSchemaView,
     BlobTableViewRowsView,
@@ -123,6 +124,11 @@ urlpatterns = [
     path("blob-migration/table-views/", BlobTableViewListCreateView.as_view(), name="blob-table-view-list"),
     path("blob-migration/table-views/<int:pk>/schema/", BlobTableViewSchemaView.as_view(), name="blob-table-view-schema"),
     path("blob-migration/table-views/<int:pk>/rows/", BlobTableViewRowsView.as_view(), name="blob-table-view-rows"),
+    path(
+        "blob-migration/table-views/<int:pk>/export-to-connection/",
+        BlobTableViewExportToConnectionView.as_view(),
+        name="blob-table-view-export-to-connection",
+    ),
     path("blob-migration/table-views/<int:pk>/", BlobTableViewDetailView.as_view(), name="blob-table-view-detail"),
     path(
         "blob-migration/table-views/<int:pk>/link-source/",
@@ -134,6 +140,11 @@ urlpatterns = [
     path("blob-browse/", BlobTableViewListCreateView.as_view(), name="blob-browse-list"),
     path("blob-browse/<int:pk>/schema/", BlobTableViewSchemaView.as_view(), name="blob-browse-schema"),
     path("blob-browse/<int:pk>/rows/", BlobTableViewRowsView.as_view(), name="blob-browse-rows"),
+    path(
+        "blob-browse/<int:pk>/export-to-connection/",
+        BlobTableViewExportToConnectionView.as_view(),
+        name="blob-browse-export-to-connection",
+    ),
     path("blob-browse/<int:pk>/", BlobTableViewDetailView.as_view(), name="blob-browse-detail"),
     path("blob-catalog/connections/", BlobCatalogConnectionsView.as_view(), name="blob-catalog-connections"),
     path("blob-catalog/databases/", BlobCatalogDatabasesView.as_view(), name="blob-catalog-databases"),

@@ -10,6 +10,7 @@ import {
   createBlobMigrationSourceApi,
   createBlobTableViewApi,
   deleteBlobTableViewApi,
+  exportBlobTableViewToConnectionApi,
   fetchBlobTableViewRowsApi,
   getBlobCatalogObjectApi,
   listBlobCatalogConnectionsApi,
@@ -18,6 +19,7 @@ import {
   listBlobMigrationSourcesApi,
   listBlobMigrationMapStatsApi,
   listBlobTableViewsApi,
+  listExternalDbConnectionsApi,
   updateBlobTableViewApi,
   getBlobMigrationSourceApi,
 } from '@/api/images'
@@ -128,6 +130,18 @@ const migrateForm = reactive({
   nameColumn: '',
   suffixColumn: '',
   tags: '',
+})
+
+const exportDialogVisible = ref(false)
+const exportSaving = ref(false)
+const exportConnections = ref([])
+const exportDatabases = ref([])
+const loadingExportDatabases = ref(false)
+const exportForm = reactive({
+  connectionId: null,
+  database: '',
+  tableName: '',
+  ifExists: 'fail',
 })
 
 const createViewDialogVisible = ref(false)
@@ -750,6 +764,91 @@ async function submitSavedViewMigration() {
     ElMessage.error(err.message || '启动迁移失败')
   } finally {
     migrateSaving.value = false
+  }
+}
+
+async function loadExportConnections() {
+  try {
+    const res = await callWithRetry(() => listExternalDbConnectionsApi())
+    exportConnections.value = (res.data || []).filter((item) => item.enabled !== 0)
+  } catch {
+    exportConnections.value = []
+  }
+}
+
+async function loadExportDatabases(connectionId) {
+  exportDatabases.value = []
+  exportForm.database = ''
+  if (!connectionId) return
+  loadingExportDatabases.value = true
+  try {
+    const res = await callWithRetry(() =>
+      listBlobCatalogDatabasesApi({ connectionId }),
+    )
+    const list = res.data?.databases || res.data || []
+    exportDatabases.value = Array.isArray(list)
+      ? list.map((item) => (typeof item === 'string' ? item : item.name || item.database || '')).filter(Boolean)
+      : []
+    const preferred = exportConnections.value.find((c) => c.id === connectionId)?.db_name || ''
+    if (preferred && exportDatabases.value.includes(preferred)) {
+      exportForm.database = preferred
+    } else if (exportDatabases.value.length === 1) {
+      exportForm.database = exportDatabases.value[0]
+    }
+  } catch (err) {
+    ElMessage.error(err.message || '加载目标库列表失败')
+  } finally {
+    loadingExportDatabases.value = false
+  }
+}
+
+async function openExportDialog() {
+  const view = savedViewForSelection.value
+  if (!view) return
+  exportForm.connectionId = null
+  exportForm.database = ''
+  exportForm.tableName = view.source_table || ''
+  exportForm.ifExists = 'fail'
+  exportDatabases.value = []
+  await loadExportConnections()
+  exportDialogVisible.value = true
+}
+
+async function onExportConnectionChange(connectionId) {
+  await loadExportDatabases(connectionId)
+}
+
+async function submitExportToConnection() {
+  const view = savedViewForSelection.value
+  if (!view?.id) return
+  if (!exportForm.connectionId) {
+    ElMessage.warning('请选择目标连接')
+    return
+  }
+  if (!exportForm.database) {
+    ElMessage.warning('请选择目标数据库')
+    return
+  }
+  if (!exportForm.tableName.trim()) {
+    ElMessage.warning('请填写目标表名')
+    return
+  }
+  exportSaving.value = true
+  try {
+    const res = await exportBlobTableViewToConnectionApi(view.id, {
+      target_connection_id: exportForm.connectionId,
+      target_database: exportForm.database,
+      target_table: exportForm.tableName.trim(),
+      if_exists: exportForm.ifExists,
+    })
+    const rows = res.data?.rows_written ?? 0
+    const table = res.data?.target_table || exportForm.tableName
+    ElMessage.success(`已导出 ${rows} 行到 ${exportForm.database}.${table}`)
+    exportDialogVisible.value = false
+  } catch (err) {
+    ElMessage.error(err.message || '导出失败')
+  } finally {
+    exportSaving.value = false
   }
 }
 
@@ -1614,6 +1713,9 @@ onUnmounted(() => {
                 >
                   一键迁移
                 </el-button>
+                <el-button size="small" type="success" plain @click="openExportDialog">
+                  导出到连接
+                </el-button>
                 <el-button size="small" plain @click="refreshActiveView">刷新</el-button>
                 <el-button size="small" type="danger" plain @click="removeView(savedViewForSelection)">
                   删除配置
@@ -2001,6 +2103,57 @@ onUnmounted(() => {
         <el-button @click="migrateDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="migrateSaving" @click="submitSavedViewMigration">
           开始迁移
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="exportDialogVisible" title="导出到连接" width="560px">
+      <p class="field-hint migrate-dialog-desc">
+        将「{{ savedViewForSelection?.source_table }}」写成目标库物理表：其余列不变，BLOB 列填路径（未迁移为空）。
+      </p>
+      <el-form label-width="110px">
+        <el-form-item label="目标连接" required>
+          <el-select
+            v-model="exportForm.connectionId"
+            placeholder="选择外部库连接"
+            filterable
+            style="width: 100%"
+            @change="onExportConnectionChange"
+          >
+            <el-option
+              v-for="conn in exportConnections"
+              :key="conn.id"
+              :label="`${conn.name} (${conn.host})`"
+              :value="conn.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="目标数据库" required>
+          <el-select
+            v-model="exportForm.database"
+            placeholder="选择数据库"
+            filterable
+            :loading="loadingExportDatabases"
+            style="width: 100%"
+          >
+            <el-option v-for="db in exportDatabases" :key="db" :label="db" :value="db" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="目标表名" required>
+          <el-input v-model="exportForm.tableName" maxlength="64" placeholder="默认与源表同名" />
+        </el-form-item>
+        <el-form-item label="已存在时">
+          <el-radio-group v-model="exportForm.ifExists">
+            <el-radio label="fail">失败（不覆盖）</el-radio>
+            <el-radio label="replace">替换（删表重建）</el-radio>
+            <el-radio label="truncate">清空后写入</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="exportDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="exportSaving" @click="submitExportToConnection">
+          开始导出
         </el-button>
       </template>
     </el-dialog>

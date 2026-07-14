@@ -7,6 +7,10 @@ from drf_spectacular.utils import extend_schema
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
+from images.blob_simulated_export_service import (
+    SimulatedExportError,
+    export_simulated_table_to_connection,
+)
 from images.blob_table_view_service import (
     BlobTableViewError,
     count_view_rows,
@@ -20,6 +24,7 @@ from images.blob_table_view_service import (
 from images.external_db_service import list_database_aliases
 from images.models import BlobTableView
 from images.serializers import (
+    BlobSimulatedExportSerializer,
     BlobTableViewCreateSerializer,
     BlobTableViewPreviewSchemaSerializer,
     BlobTableViewRowsSerializer,
@@ -205,3 +210,43 @@ class BlobTableViewPreviewSchemaView(APIView):
         except BlobTableViewError as exc:
             return error_response(str(exc), code=4001, status=400)
         return success_response(schema)
+
+
+@extend_schema(tags=["blob-table-view"], request=BlobSimulatedExportSerializer)
+class BlobTableViewExportToConnectionView(APIView):
+    """POST /api/images/blob-browse/{id}/export-to-connection/ — write path table to another DB."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def post(self, request, pk: int):
+        serializer = BlobSimulatedExportSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(_format_errors(serializer.errors), code=4001, status=400)
+        data = serializer.validated_data
+        try:
+            result = export_simulated_table_to_connection(
+                pk,
+                target_connection_id=data.get("target_connection_id"),
+                target_db_alias=data.get("target_db_alias") or None,
+                target_database=data.get("target_database") or "",
+                target_table=data.get("target_table") or "",
+                if_exists=data.get("if_exists") or "fail",
+            )
+        except SimulatedExportError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        except BlobTableViewError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        except Exception:
+            logger.exception("export_simulated_table failed view_id=%s", pk)
+            return error_response("导出到目标库失败", code=5001, status=500)
+
+        write_operate_log(
+            request,
+            "blob_table_export_to_connection",
+            detail=(
+                f"view_id={pk} target={result.get('target_db_alias')}."
+                f"{result.get('target_database')}.{result.get('target_table')} "
+                f"rows={result.get('rows_written')}"
+            ),
+        )
+        return success_response(result, message="已导出到目标库")

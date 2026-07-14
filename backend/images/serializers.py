@@ -386,3 +386,23 @@ class BlobMigrationSourceRebindSerializer(serializers.Serializer):
 
 class BlobTableViewLinkSourceSerializer(serializers.Serializer):
     source_uid = serializers.CharField(max_length=36, trim_whitespace=True)
+
+
+class BlobSimulatedExportSerializer(serializers.Serializer):
+    target_connection_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    target_db_alias = serializers.CharField(required=False, allow_blank=True, default="", max_length=32)
+    target_database = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    target_table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    if_exists = serializers.ChoiceField(
+        choices=["fail", "replace", "truncate"],
+        required=False,
+        default="fail",
+    )
+
+    def validate(self, attrs):
+        conn_id = attrs.get("target_connection_id")
+        alias = (attrs.get("target_db_alias") or "").strip()
+        if not conn_id and not alias:
+            raise serializers.ValidationError("请提供 target_connection_id 或 target_db_alias")
+        attrs["target_db_alias"] = alias
+        return attrs

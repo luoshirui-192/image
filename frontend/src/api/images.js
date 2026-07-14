@@ -303,6 +303,10 @@ export function fetchBlobTableViewRowsApi(id, { offset = 0, limit = 100, include
   })
 }
 
+export function exportBlobTableViewToConnectionApi(id, data) {
+  return request.post(`/images/blob-browse/${id}/export-to-connection/`, data, { timeout: 600000 })
+}
+
 export function getBlobTableViewSchemaApi(id) {
   return request.get(`/images/blob-migration/table-views/${id}/schema/`)
 }
