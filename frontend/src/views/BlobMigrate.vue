@@ -652,7 +652,7 @@ async function resumePausedJob(job) {
     const res = await resumeBlobMigrationJobApi(job.id)
     setActiveJob(res.data)
     running.value = true
-    ElMessage.success(res.message || '已排队，scheduler 将继续执行')
+    ElMessage.success(res.message || '已继续，正在后台启动')
     startJobPolling(job.id)
     await loadJobHistory()
   } catch (err) {

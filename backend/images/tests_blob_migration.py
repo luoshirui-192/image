@@ -715,13 +715,16 @@ class BlobMigrationTestCase(TestCase):
 
     @override_settings(UPLOAD_ROOT=None)
     def test_api_create_migration_job(self):
+        from unittest.mock import patch
+
         upload_root = str(self.upload_root)
         self.client.force_authenticate(user=self.admin)
-        res = self.client.post(
-            "/api/images/blob-migration/jobs/",
-            {"source_id": self.source.id, "batch_size": 10, "run_all": True},
-            format="json",
-        )
+        with patch("images.blob_migration_views.kick_migration_job_async"):
+            res = self.client.post(
+                "/api/images/blob-migration/jobs/",
+                {"source_id": self.source.id, "batch_size": 10, "run_all": True},
+                format="json",
+            )
         self.assertEqual(res.status_code, 201)
         self.assertEqual(res.json()["data"]["status"], "pending")
 
@@ -748,6 +751,8 @@ class BlobMigrationTestCase(TestCase):
 
     @override_settings(UPLOAD_ROOT=None)
     def test_api_pause_and_resume_pending_job(self):
+        from unittest.mock import patch
+
         self.client.force_authenticate(user=self.admin)
         job = create_migration_job(
             source_id=self.source.id,
@@ -759,7 +764,8 @@ class BlobMigrationTestCase(TestCase):
         self.assertEqual(pause_res.status_code, 200)
         self.assertEqual(pause_res.json()["data"]["status"], "paused")
 
-        resume_res = self.client.post(f"/api/images/blob-migration/jobs/{job.id}/resume/")
+        with patch("images.blob_migration_views.kick_migration_job_async"):
+            resume_res = self.client.post(f"/api/images/blob-migration/jobs/{job.id}/resume/")
         self.assertEqual(resume_res.status_code, 200)
         self.assertEqual(resume_res.json()["data"]["status"], "pending")
 

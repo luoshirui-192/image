@@ -535,18 +535,20 @@ def _kick_job_estimate_async(job_id: int) -> None:
 
 
 def execute_migration_job(job_id: int) -> BlobMigrationJob:
+    """Claim a pending job and run it.
+
+    Only the claimant that transitions pending→running executes batches.
+    Concurrent kicks (API thread + scheduler) are safe: the loser exits here.
+    """
     with transaction.atomic():
         job = (
             BlobMigrationJob.objects.select_for_update()
-            .filter(
-                pk=job_id,
-                status__in={BlobMigrationJob.STATUS_PENDING, BlobMigrationJob.STATUS_RUNNING},
-            )
+            .filter(pk=job_id, status=BlobMigrationJob.STATUS_PENDING)
             .first()
         )
         if not job:
             return _load_job(job_id)
-        if job.cancel_requested or job.status == BlobMigrationJob.STATUS_CANCELLED:
+        if job.cancel_requested:
             now = timezone.now()
             BlobMigrationJob.objects.filter(pk=job_id).update(
                 status=BlobMigrationJob.STATUS_CANCELLED,
@@ -555,14 +557,13 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
                 message=job.message or "已取消",
             )
             return _load_job(job_id)
-        if job.status == BlobMigrationJob.STATUS_PENDING:
-            now = timezone.now()
-            BlobMigrationJob.objects.filter(pk=job_id).update(
-                status=BlobMigrationJob.STATUS_RUNNING,
-                started_at=now,
-                updated_at=now,
-                message="迁移进行中",
-            )
+        now = timezone.now()
+        BlobMigrationJob.objects.filter(pk=job_id).update(
+            status=BlobMigrationJob.STATUS_RUNNING,
+            started_at=job.started_at or now,
+            updated_at=now,
+            message="迁移进行中",
+        )
 
     job = _load_job(job_id)
     if job.status != BlobMigrationJob.STATUS_RUNNING or job.cancel_requested:
@@ -617,18 +618,33 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
 
 
 def process_pending_migration_jobs(*, max_jobs: int = 1, job_id: int | None = None) -> int:
-    """Claim and run pending jobs. Returns count started."""
+    """Claim and run pending jobs. Returns count of jobs executed."""
     if job_id is not None:
         job = _load_job(job_id)
-        if job.status not in ACTIVE_STATUSES:
+        if job.status != BlobMigrationJob.STATUS_PENDING:
+            logger.info(
+                "process_pending skip job_id=%s status=%s (need pending)",
+                job_id,
+                job.status,
+            )
             return 0
         execute_migration_job(job_id)
         return 1
 
+    pending_ids = list(
+        BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_PENDING)
+        .order_by("id")
+        .values_list("id", flat=True)[: max(1, max_jobs)]
+    )
+    if not pending_ids:
+        return 0
+    logger.info("process_pending claiming job_ids=%s", pending_ids)
     started = 0
-    pending = BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_PENDING).order_by("id")
-    for job in pending[: max(1, max_jobs)]:
-        execute_migration_job(job.id)
+    for jid in pending_ids:
+        before = _load_job(jid)
+        if before.status != BlobMigrationJob.STATUS_PENDING:
+            continue
+        execute_migration_job(jid)
         started += 1
     return started
 

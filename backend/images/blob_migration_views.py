@@ -13,6 +13,7 @@ from images.blob_migration_job_service import (
     create_migration_job,
     delete_migration_job,
     export_job_errors_csv,
+    kick_migration_job_async,
     list_migration_jobs,
     pause_migration_job,
     resume_migration_job,
@@ -282,9 +283,10 @@ class BlobMigrationJobListCreateView(APIView):
             "blob_migration_job",
             detail=f"job_id={job.id} source_id={job.source_id} run_all={job.run_all}",
         )
+        kick_migration_job_async(job.id)
         return success_response(
             serialize_migration_job(job),
-            message="迁移任务已创建，scheduler 将自动开始（约 10 秒内）",
+            message="迁移任务已创建，正在后台启动",
             status=201,
         )
 
@@ -374,7 +376,8 @@ class BlobMigrationJobResumeView(APIView):
         except JobServiceError as exc:
             return error_response(str(exc), code=4001, status=400)
         write_operate_log(request, "blob_migration_job_resume", detail=f"job_id={job.id}")
-        return success_response(serialize_migration_job(job), message="已排队，scheduler 将继续执行")
+        kick_migration_job_async(job.id)
+        return success_response(serialize_migration_job(job), message="已继续，正在后台启动")
 
 
 @extend_schema(tags=["blob-migration"], request=BlobMigrationJobRetrySerializer)
@@ -410,7 +413,8 @@ class BlobMigrationJobRetryView(APIView):
             "blob_migration_job_retry",
             detail=f"job_id={job.id} parent={parent.id}",
         )
-        return success_response(serialize_migration_job(job), message="重试任务已创建，scheduler 将自动开始", status=201)
+        kick_migration_job_async(job.id)
+        return success_response(serialize_migration_job(job), message="重试任务已创建，正在后台启动", status=201)
 
 
 @extend_schema(tags=["blob-migration"])
