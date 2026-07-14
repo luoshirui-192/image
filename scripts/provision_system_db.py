@@ -24,8 +24,17 @@ from pathlib import Path
 
 try:
     import MySQLdb
-except ImportError as exc:
-    raise SystemExit("需要 MySQLdb（mysqlclient）。请先: pip install mysqlclient") from exc
+except ImportError:
+    try:
+        import pymysql as MySQLdb
+
+        MySQLdb.install_as_MySQLdb()
+    except ImportError as exc:
+        raise SystemExit(
+            "需要 MySQL 驱动。请先安装其一:\n"
+            "  pip install pymysql\n"
+            "  或: pip install mysqlclient"
+        ) from exc
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL_DIR = ROOT / "sql"
