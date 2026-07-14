@@ -167,10 +167,12 @@ def resume_migration_job(job_id: int) -> BlobMigrationJob:
         raise JobServiceError("只能继续已暂停的任务")
     _assert_no_active_job(job.source_id, exclude_job_id=job.id)
     now = timezone.now()
+    # Clear estimate so the worker re-counts total_with_blob (progress includes skips).
     BlobMigrationJob.objects.filter(pk=job.pk).update(
         status=BlobMigrationJob.STATUS_PENDING,
         pause_requested=0,
         cancel_requested=0,
+        total_estimate=0,
         message="已排队，等待继续…",
         updated_at=now,
     )
@@ -259,6 +261,8 @@ def _job_progress_display(job: BlobMigrationJob) -> tuple[int, int, float]:
     total = max(estimate, done) if estimate > 0 else (done if done > 0 else 0)
     if job.status == BlobMigrationJob.STATUS_COMPLETED:
         percent = 100.0 if total > 0 or done == 0 else 100.0
+    elif job.status == BlobMigrationJob.STATUS_PAUSED and total > 0:
+        percent = min(99.0, round(100.0 * done / total, 2))
     else:
         percent = 0.0
     return done, total, percent
@@ -451,8 +455,19 @@ def _resolve_final_job_status(job: BlobMigrationJob) -> tuple[str, str]:
 
 
 def _refresh_job_estimate_for_ui(job: BlobMigrationJob, *, touch_message: bool = True) -> BlobMigrationJob:
-    """Best-effort COUNT for the progress bar. Never affects whether batches run."""
-    if job.retry_failed_only or int(job.total_estimate or 0) > 0:
+    """Best-effort COUNT for the progress bar. Never affects whether batches run.
+
+    Denominator is always total_with_blob (rows×blob cols to scan), not pending.
+    skip_existing still skips writes, but the UI counts skipped into progress, so
+    pending-only estimates make the bar jump to ~100% after early skips.
+    """
+    if job.retry_failed_only:
+        return job
+    existing = int(job.total_estimate or 0)
+    handled = _job_handled_count(job)
+    # Skip only when we already have a real COUNT that still covers handled progress.
+    # (Synced-from-handled estimates equal handled and need a fresh remote COUNT.)
+    if existing > 0 and existing > handled:
         return job
 
     if touch_message:
@@ -462,11 +477,8 @@ def _refresh_job_estimate_for_ui(job: BlobMigrationJob, *, touch_message: bool =
         )
     try:
         prepare_migration_source(_load_source(job.source_id))
-        stats = count_migration_candidates(job.source_id, use_cache=True)
-        if bool(job.skip_existing):
-            estimate = int(stats.get("pending") or 0)
-        else:
-            estimate = int(stats.get("total_with_blob") or 0)
+        stats = count_migration_candidates(job.source_id, use_cache=False)
+        estimate = int(stats.get("total_with_blob") or 0)
     except Exception:
         logger.warning(
             "count_migration_candidates failed job_id=%s source_id=%s",
@@ -474,7 +486,7 @@ def _refresh_job_estimate_for_ui(job: BlobMigrationJob, *, touch_message: bool =
             job.source_id,
             exc_info=True,
         )
-        if touch_message and _job_handled_count(job) == 0:
+        if touch_message and handled == 0:
             BlobMigrationJob.objects.filter(pk=job.pk).update(
                 message="统计未完成，正在扫描迁移…",
                 updated_at=timezone.now(),
@@ -482,11 +494,12 @@ def _refresh_job_estimate_for_ui(job: BlobMigrationJob, *, touch_message: bool =
         job.refresh_from_db()
         return job
 
+    estimate = max(estimate, handled, existing)
     updates: dict[str, Any] = {
         "total_estimate": max(0, estimate),
         "updated_at": timezone.now(),
     }
-    if touch_message and _job_handled_count(job) == 0:
+    if touch_message and handled == 0:
         updates["message"] = (
             f"迁移进行中（预估 {estimate}）" if estimate > 0 else "迁移进行中（扫描确认中）"
         )

@@ -470,12 +470,15 @@ function jobProgressCount(job) {
 
 function jobProgressTotal(job) {
   if (!job) return 0
-  if (job.display_total != null && Number(job.display_total) > 0) {
-    return Number(job.display_total)
-  }
+  const fromJob = Math.max(
+    Number(job.display_total || 0),
+    Number(job.total_estimate || 0),
+  )
   const stats = liveStatsForJob(job)
-  if (stats) return Number(stats.total_with_blob || 0)
-  return Number(job.total_estimate || 0)
+  const fromStats = stats ? Number(stats.total_with_blob || 0) : 0
+  // Prefer the larger known denominator so a stale pending-only estimate
+  // is not preferred over a correct source total when paused.
+  return Math.max(fromJob, fromStats)
 }
 
 function formatJobProgress(job) {
