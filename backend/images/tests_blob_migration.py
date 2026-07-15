@@ -14,13 +14,21 @@ from rest_framework.test import APIClient
 
 from images.blob_migration_job_service import create_migration_job, execute_migration_job, serialize_migration_job
 from images.blob_migration_service import (
+    _prepare_migration_batch,
     count_migration_candidates,
     create_migration_source,
     find_migration_source_match,
     prepare_migration_source,
     run_blob_migration,
 )
-from images.models import BlobMigrationJob, BlobMigrationSource, BlobTableView, ImageInfo, ImageSourceMap
+from images.models import (
+    BlobMigrationJob,
+    BlobMigrationJobError,
+    BlobMigrationSource,
+    BlobTableView,
+    ImageInfo,
+    ImageSourceMap,
+)
 from users.models import SysUser
 
 SQLITE_TABLES = """
@@ -564,6 +572,46 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(second.succeeded, 0)
             self.assertEqual(ImageInfo.objects.filter(is_delete=0).count(), 1)
 
+    @override_settings(
+        UPLOAD_ROOT=None,
+        BLOB_MIGRATION_SKIP_SCAN_WINDOW=3,
+        BLOB_MIGRATION_SKIP_SCAN_MAX_PER_BATCH=20,
+    )
+    def test_skip_existing_scan_jumps_to_pending_rows(self):
+        """skip_existing should scan past migrated PKs until it fills a pending batch."""
+        upload_root = str(self.upload_root)
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM legacy_photos")
+            for i in range(1, 9):
+                cursor.execute(
+                    "INSERT INTO legacy_photos (id, title, photo) VALUES (?, ?, ?)",
+                    [i, f"p{i}.png", make_png_bytes((i * 10, 20, 30))],
+                )
+
+        with override_settings(UPLOAD_ROOT=upload_root):
+            # Migrate ids 1..6 so a resume must jump over them to reach 7..8.
+            first = run_blob_migration(self.source.id, batch_size=10, dry_run=False)
+            self.assertEqual(first.succeeded, 8)
+
+            ImageSourceMap.objects.filter(source_id__in=["7", "8"]).delete()
+            self.assertEqual(ImageSourceMap.objects.filter(source_table="legacy_photos").count(), 6)
+
+            prepared = _prepare_migration_batch(
+                self.source,
+                after_pk="",
+                batch_size=2,
+                skip_existing=True,
+            )
+            self.assertEqual(prepared.last_pk, "8")
+            self.assertEqual(len(prepared.blob_rows), 2)
+            self.assertEqual({str(r["id"]) for r in prepared.blob_rows}, {"7", "8"})
+            self.assertGreaterEqual(len(prepared.pre_skipped), 6)
+
+            second = run_blob_migration(self.source.id, batch_size=2, dry_run=False, skip_existing=True)
+            self.assertEqual(second.succeeded, 2)
+            self.assertGreaterEqual(second.skipped, 6)
+            self.assertEqual(ImageSourceMap.objects.filter(source_table="legacy_photos").count(), 8)
+
     @override_settings(UPLOAD_ROOT=None)
     def test_map_stats_api(self):
         now = timezone.now()
@@ -765,6 +813,62 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(finished.succeeded, 1)
             payload = serialize_migration_job(finished)
             self.assertEqual(payload["percent"], 100.0)
+
+    @override_settings(UPLOAD_ROOT=None, BLOB_MIGRATION_UPLOAD_WORKERS=1)
+    def test_retry_failed_job_batch_migrates_and_marks_retried(self):
+        upload_root = str(self.upload_root)
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM legacy_photos")
+            for i, color in enumerate([(10, 20, 30), (40, 50, 60), (70, 80, 90)], start=1):
+                cursor.execute(
+                    "INSERT INTO legacy_photos (id, title, photo) VALUES (?, ?, ?)",
+                    [i, f"r{i}.png", make_png_bytes(color)],
+                )
+
+        parent = create_migration_job(
+            source_id=self.source.id,
+            created_by="blob_admin",
+            batch_size=10,
+            run_all=True,
+            warm_thumbs_after=False,
+        )
+        BlobMigrationJob.objects.filter(pk=parent.pk).update(
+            status=BlobMigrationJob.STATUS_CANCELLED,
+            failed=3,
+        )
+        now = timezone.now()
+        for pk in ("1", "2", "3"):
+            BlobMigrationJobError.objects.create(
+                job_id=parent.id,
+                source_pk=pk,
+                source_column="photo",
+                filename=f"r{pk}.png",
+                error_message="simulated",
+                retried=0,
+                create_time=now,
+            )
+
+        with override_settings(UPLOAD_ROOT=upload_root):
+            retry_job = create_migration_job(
+                source_id=self.source.id,
+                created_by="blob_admin",
+                batch_size=2,
+                run_all=True,
+                skip_existing=False,
+                warm_thumbs_after=False,
+                retry_failed_only=True,
+                parent_job_id=parent.id,
+            )
+            finished = execute_migration_job(retry_job.id)
+
+        self.assertEqual(finished.status, BlobMigrationJob.STATUS_COMPLETED)
+        self.assertEqual(finished.succeeded, 3)
+        self.assertEqual(finished.failed, 0)
+        self.assertEqual(
+            BlobMigrationJobError.objects.filter(job_id=parent.id, retried=1).count(),
+            3,
+        )
+        self.assertEqual(ImageSourceMap.objects.filter(source_table="legacy_photos").count(), 3)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_api_create_migration_job(self):

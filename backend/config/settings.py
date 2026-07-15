@@ -193,6 +193,10 @@ LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "90"))
 # BLOB migration jobs (background worker)
 BLOB_MIGRATION_BATCH_SIZE = int(os.getenv("BLOB_MIGRATION_BATCH_SIZE", "100"))
 BLOB_MIGRATION_BATCH_MAX = int(os.getenv("BLOB_MIGRATION_BATCH_MAX", "500"))
+# When skip_existing, scan this many light PKs per round while seeking pending rows.
+BLOB_MIGRATION_SKIP_SCAN_WINDOW = int(os.getenv("BLOB_MIGRATION_SKIP_SCAN_WINDOW", "2000"))
+# Cap light-row examination per batch call (keeps progress updates flowing on skip-only stretches).
+BLOB_MIGRATION_SKIP_SCAN_MAX_PER_BATCH = int(os.getenv("BLOB_MIGRATION_SKIP_SCAN_MAX_PER_BATCH", "10000"))
 BLOB_MIGRATION_UPLOAD_WORKERS = int(os.getenv("BLOB_MIGRATION_UPLOAD_WORKERS", "3"))
 BLOB_MIGRATION_POLL_SECONDS = int(os.getenv("BLOB_MIGRATION_POLL_SECONDS", "30"))
 BLOB_MIGRATION_SKIP_DIMENSIONS = os.getenv("BLOB_MIGRATION_SKIP_DIMENSIONS", "true").lower() in {
