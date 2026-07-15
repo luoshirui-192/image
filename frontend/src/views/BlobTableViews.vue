@@ -841,9 +841,41 @@ async function submitExportToConnection() {
       target_table: exportForm.tableName.trim(),
       if_exists: exportForm.ifExists,
     })
-    const rows = res.data?.rows_written ?? 0
-    const table = res.data?.target_table || exportForm.tableName
-    ElMessage.success(`已导出 ${rows} 行到 ${exportForm.database}.${table}`)
+    const data = res.data || {}
+    const rows = data.rows_written ?? 0
+    const table = data.target_table || exportForm.tableName
+    const viewName = data.target_view_name || ''
+    const targetViewId = Number(data.target_view_id || 0)
+    await loadViews()
+    if (targetViewId && views.value.some((v) => v.id === targetViewId)) {
+      const targetView = views.value.find((v) => v.id === targetViewId)
+      activeViewId.value = targetViewId
+      rightTab.value = 'browse'
+      if (targetView) {
+        selectedCatalogObject.value = {
+          label: targetView.source_table,
+          nodeType: 'object',
+          connection: {
+            alias: targetView.db_alias,
+            id: exportForm.connectionId,
+          },
+          database: targetView.database_name || exportForm.database,
+          objectType: targetView.source_object_type || 'table',
+          blobColumns: [],
+          leaf: true,
+        }
+      }
+      const action = data.target_view_created ? '已创建浏览配置' : '已复用浏览配置'
+      ElMessage.success(
+        `已导出 ${rows} 行到 ${exportForm.database}.${table}，${action}「${viewName || table}」`,
+      )
+    } else if (data.target_view_error) {
+      ElMessage.warning(
+        `已导出 ${rows} 行到 ${exportForm.database}.${table}，但浏览配置未创建：${data.target_view_error}`,
+      )
+    } else {
+      ElMessage.success(`已导出 ${rows} 行到 ${exportForm.database}.${table}`)
+    }
     exportDialogVisible.value = false
   } catch (err) {
     ElMessage.error(err.message || '导出失败')

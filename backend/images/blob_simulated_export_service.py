@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from django.db import connections
+from django.utils import timezone
 
 from images.blob_migration_service import BLOB_TYPES_MYSQL, validate_identifier
 from images.blob_schema_helpers import parse_blob_columns
@@ -12,13 +13,15 @@ from images.blob_table_view_service import (
     MAX_ROW_LIMIT,
     BlobTableViewError,
     _load_view,
+    _parse_display_columns,
     _quote_ident,
     _serialize_cell,
+    create_table_view,
     fetch_simulated_table_rows,
     validate_db_alias,
 )
 from images.external_db_service import db_alias_session, external_alias, parse_external_alias
-from images.models import ExternalDbConnection
+from images.models import BlobTableView, ExternalDbConnection
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +248,72 @@ def _flatten_row(row: dict, column_names: list[str], path_columns: set[str]) -> 
     return values
 
 
+def _find_existing_target_view(
+    *,
+    target_alias: str,
+    target_database: str,
+    target_table: str,
+) -> BlobTableView | None:
+    qs = BlobTableView.objects.filter(db_alias=target_alias, source_table=target_table)
+    db = (target_database or "").strip()
+    if db:
+        return qs.filter(database_name=db).first()
+    return qs.filter(database_name=db).first() or qs.first()
+
+
+def _ensure_target_browse_view(
+    source_view: BlobTableView,
+    *,
+    target_alias: str,
+    target_database: str,
+    target_table: str,
+    target_columns: list[str],
+) -> dict[str, Any]:
+    """Create or reuse a browse config for the exported path table."""
+    remark = f"自 view#{source_view.id} {source_view.source_table} 导出"
+    existing = _find_existing_target_view(
+        target_alias=target_alias,
+        target_database=target_database,
+        target_table=target_table,
+    )
+    if existing is not None:
+        BlobTableView.objects.filter(pk=existing.pk).update(
+            remark=remark[:500],
+            update_time=timezone.now(),
+        )
+        existing.refresh_from_db()
+        return {
+            "target_view_id": existing.id,
+            "target_view_created": False,
+            "target_view_name": existing.name,
+        }
+
+    col_set = set(target_columns)
+    try:
+        source_display = _parse_display_columns(source_view.display_columns)
+    except BlobTableViewError:
+        source_display = []
+    display_cols = [c for c in source_display if c in col_set] or None
+
+    created = create_table_view(
+        name=f"{target_table}（路径导出）",
+        db_alias=target_alias,
+        database_name=target_database or None,
+        source_table=target_table,
+        source_object_type="table",
+        source_pk_column=source_view.source_pk_column or "id",
+        blob_column="",
+        blob_columns=[],
+        display_columns=display_cols,
+        remark=remark,
+    )
+    return {
+        "target_view_id": created.id,
+        "target_view_created": True,
+        "target_view_name": created.name,
+    }
+
+
 def export_simulated_table_to_connection(
     view_id: int,
     *,
@@ -340,7 +409,7 @@ def export_simulated_table_to_connection(
                 break
             offset += len(rows)
 
-    return {
+    result: dict[str, Any] = {
         "view_id": view.id,
         "source_table": view.source_table,
         "source_db_alias": view.db_alias,
@@ -358,3 +427,25 @@ def export_simulated_table_to_connection(
             for c in export_cols
         ],
     }
+
+    try:
+        view_meta = _ensure_target_browse_view(
+            view,
+            target_alias=target_alias,
+            target_database=target_db,
+            target_table=dest_table,
+            target_columns=column_names,
+        )
+        result.update(view_meta)
+    except Exception as exc:
+        logger.warning(
+            "ensure target browse view failed after export view_id=%s target=%s.%s: %s",
+            view.id,
+            target_db,
+            dest_table,
+            exc,
+            exc_info=True,
+        )
+        result["target_view_error"] = str(exc)[:500]
+
+    return result

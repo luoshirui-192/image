@@ -281,7 +281,41 @@ class SimulatedExportTestCase(TestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json()["data"]["rows_written"], 2)
+        body = res.json()["data"]
+        self.assertEqual(body["rows_written"], 2)
+        self.assertTrue(body.get("target_view_id"))
+        self.assertTrue(body.get("target_view_created"))
         rows = self._read_export_rows()
         self.assertEqual(rows[0][2], "2026/01/a.png")
         self.assertEqual(rows[1][2], "")
+
+    def test_export_creates_target_browse_view(self):
+        from images.models import BlobTableView
+
+        result = export_simulated_table_to_connection(
+            self.view.id,
+            target_db_alias="default",
+            target_table=EXPORT_TABLE,
+            if_exists="fail",
+        )
+        self.assertTrue(result.get("target_view_created"))
+        self.assertTrue(result.get("target_view_id"))
+        target = BlobTableView.objects.get(pk=result["target_view_id"])
+        self.assertEqual(target.db_alias, "default")
+        self.assertEqual(target.source_table, EXPORT_TABLE)
+        self.assertEqual((target.blob_column or "").strip(), "")
+        self.assertEqual((target.blob_columns or "").strip(), "")
+        self.assertIn("路径导出", target.name)
+
+        again = export_simulated_table_to_connection(
+            self.view.id,
+            target_db_alias="default",
+            target_table=EXPORT_TABLE,
+            if_exists="replace",
+        )
+        self.assertFalse(again.get("target_view_created"))
+        self.assertEqual(again.get("target_view_id"), result["target_view_id"])
+        self.assertEqual(
+            BlobTableView.objects.filter(db_alias="default", source_table=EXPORT_TABLE).count(),
+            1,
+        )
