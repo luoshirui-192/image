@@ -1886,8 +1886,10 @@ onUnmounted(() => {
                           :image-path="item.cell.path"
                           :size="112"
                           :lazy="false"
+                          clickable
                         />
                         <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
+                        <div class="row-preview-zoom-hint">点击图片放大</div>
                       </div>
                     </div>
                     <div v-else class="row-preview-empty">
@@ -2023,8 +2025,10 @@ onUnmounted(() => {
                           :image-path="item.cell.path"
                           :size="120"
                           :lazy="false"
+                          clickable
                         />
                         <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
+                        <div class="row-preview-zoom-hint">点击图片放大</div>
                       </div>
                     </div>
                     <div v-else class="row-preview-empty">
@@ -2677,6 +2681,13 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.row-preview-zoom-hint {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--el-color-primary);
+  line-height: 1.2;
 }
 
 .row-preview-empty {
