@@ -269,18 +269,46 @@ def _ensure_target_browse_view(
     target_table: str,
     target_columns: list[str],
 ) -> dict[str, Any]:
-    """Create or reuse a browse config for the exported path table."""
+    """Create or reuse a browse config for the exported path table.
+
+    Keeps the same logical path mapping as the source view so image preview
+    still resolves via image_source_map (原表与导出表都可浏览预览).
+    """
+    from images.blob_schema_helpers import parse_blob_columns, primary_blob_column, serialize_blob_columns
+
     remark = f"自 view#{source_view.id} {source_view.source_table} 导出"
+    blob_cols = [
+        c
+        for c in parse_blob_columns(source_view.blob_columns, source_view.blob_column)
+        if c in set(target_columns)
+    ]
+    path_lookup = (
+        (source_view.path_lookup_table or "").strip()
+        or (source_view.source_table or "").strip()
+    )
+    source_uid = (getattr(source_view, "source_uid", "") or "").strip()
+    mappings_raw = getattr(source_view, "blob_column_path_mappings", "") or ""
+
     existing = _find_existing_target_view(
         target_alias=target_alias,
         target_database=target_database,
         target_table=target_table,
     )
     if existing is not None:
-        BlobTableView.objects.filter(pk=existing.pk).update(
-            remark=remark[:500],
-            update_time=timezone.now(),
-        )
+        updates: dict[str, Any] = {
+            "remark": remark[:500],
+            "update_time": timezone.now(),
+        }
+        if blob_cols:
+            updates["blob_columns"] = serialize_blob_columns(blob_cols)
+            updates["blob_column"] = primary_blob_column(None, blob_cols[0])
+        if path_lookup:
+            updates["path_lookup_table"] = path_lookup
+        if source_uid:
+            updates["source_uid"] = source_uid
+        if mappings_raw:
+            updates["blob_column_path_mappings"] = mappings_raw
+        BlobTableView.objects.filter(pk=existing.pk).update(**updates)
         existing.refresh_from_db()
         return {
             "target_view_id": existing.id,
@@ -302,11 +330,22 @@ def _ensure_target_browse_view(
         source_table=target_table,
         source_object_type="table",
         source_pk_column=source_view.source_pk_column or "id",
-        blob_column="",
-        blob_columns=[],
+        blob_column=blob_cols[0] if blob_cols else "",
+        blob_columns=blob_cols or None,
+        path_lookup_table=path_lookup or None,
         display_columns=display_cols,
         remark=remark,
     )
+    patch: dict[str, Any] = {"update_time": timezone.now()}
+    if source_uid:
+        patch["source_uid"] = source_uid
+    if mappings_raw:
+        patch["blob_column_path_mappings"] = mappings_raw
+    if path_lookup and (created.path_lookup_table or "").strip() != path_lookup:
+        patch["path_lookup_table"] = path_lookup
+    if len(patch) > 1:
+        BlobTableView.objects.filter(pk=created.pk).update(**patch)
+        created.refresh_from_db()
     return {
         "target_view_id": created.id,
         "target_view_created": True,

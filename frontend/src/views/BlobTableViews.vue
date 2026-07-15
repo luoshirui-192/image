@@ -844,34 +844,17 @@ async function submitExportToConnection() {
     const data = res.data || {}
     const rows = data.rows_written ?? 0
     const table = data.target_table || exportForm.tableName
-    const viewName = data.target_view_name || ''
-    const targetViewId = Number(data.target_view_id || 0)
+    const viewName = data.target_view_name || table
     await loadViews()
-    if (targetViewId && views.value.some((v) => v.id === targetViewId)) {
-      const targetView = views.value.find((v) => v.id === targetViewId)
-      activeViewId.value = targetViewId
-      rightTab.value = 'browse'
-      if (targetView) {
-        selectedCatalogObject.value = {
-          label: targetView.source_table,
-          nodeType: 'object',
-          connection: {
-            alias: targetView.db_alias,
-            id: exportForm.connectionId,
-          },
-          database: targetView.database_name || exportForm.database,
-          objectType: targetView.source_object_type || 'table',
-          blobColumns: [],
-          leaf: true,
-        }
-      }
-      const action = data.target_view_created ? '已创建浏览配置' : '已复用浏览配置'
-      ElMessage.success(
-        `已导出 ${rows} 行到 ${exportForm.database}.${table}，${action}「${viewName || table}」`,
-      )
-    } else if (data.target_view_error) {
+    // 留在原表：导出是复制，不是搬家；目标库在目录里另有「已保存」配置可打开。
+    if (data.target_view_error) {
       ElMessage.warning(
         `已导出 ${rows} 行到 ${exportForm.database}.${table}，但浏览配置未创建：${data.target_view_error}`,
+      )
+    } else if (data.target_view_id) {
+      const action = data.target_view_created ? '已创建' : '已更新'
+      ElMessage.success(
+        `已导出 ${rows} 行到 ${exportForm.database}.${table}，${action}浏览配置「${viewName}」。原表仍可继续浏览预览。`,
       )
     } else {
       ElMessage.success(`已导出 ${rows} 行到 ${exportForm.database}.${table}`)
@@ -2141,7 +2124,8 @@ onUnmounted(() => {
 
     <el-dialog v-model="exportDialogVisible" title="导出到连接" width="560px">
       <p class="field-hint migrate-dialog-desc">
-        将「{{ savedViewForSelection?.source_table }}」写成目标库物理表：其余列不变，BLOB 列填路径（未迁移为空）。
+        将「{{ savedViewForSelection?.source_table }}」复制写成目标库物理表（BLOB 列填路径，未迁移为空）。
+        原库表不受影响，两边都可浏览；目标侧会自动挂浏览配置并支持图片预览。
       </p>
       <el-form label-width="110px">
         <el-form-item label="目标连接" required>

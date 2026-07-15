@@ -290,6 +290,7 @@ class SimulatedExportTestCase(TestCase):
         self.assertEqual(rows[1][2], "")
 
     def test_export_creates_target_browse_view(self):
+        from images.blob_table_view_service import fetch_simulated_table_rows
         from images.models import BlobTableView
 
         result = export_simulated_table_to_connection(
@@ -303,9 +304,17 @@ class SimulatedExportTestCase(TestCase):
         target = BlobTableView.objects.get(pk=result["target_view_id"])
         self.assertEqual(target.db_alias, "default")
         self.assertEqual(target.source_table, EXPORT_TABLE)
-        self.assertEqual((target.blob_column or "").strip(), "")
-        self.assertEqual((target.blob_columns or "").strip(), "")
+        self.assertEqual(target.blob_column, "photo")
+        self.assertIn("photo", target.blob_columns)
+        self.assertEqual(target.path_lookup_table, "legacy_photos")
+        self.assertEqual(target.source_uid, self.view.source_uid)
         self.assertIn("路径导出", target.name)
+
+        page = fetch_simulated_table_rows(target, offset=0, limit=10)
+        row1 = next(r for r in page["rows"] if str(r.get("id")) == "1")
+        self.assertEqual(row1["photo"]["status"], "migrated")
+        self.assertEqual(row1["photo"]["image_info_id"], self.image.id)
+        self.assertEqual(row1["photo"]["path"], "2026/01/a.png")
 
         again = export_simulated_table_to_connection(
             self.view.id,
@@ -319,3 +328,7 @@ class SimulatedExportTestCase(TestCase):
             BlobTableView.objects.filter(db_alias="default", source_table=EXPORT_TABLE).count(),
             1,
         )
+        # Source view still browsable after export.
+        source_page = fetch_simulated_table_rows(self.view, offset=0, limit=10)
+        self.assertEqual(len(source_page["rows"]), 2)
+        self.assertEqual(source_page["rows"][0]["photo"]["status"], "migrated")
