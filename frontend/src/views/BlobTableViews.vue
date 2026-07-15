@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, VideoPlay, View } from '@element-plus/icons-vue'
 import ImagePreview from '@/components/ImagePreview.vue'
+import ImageLightbox from '@/components/ImageLightbox.vue'
 import SqlEditor from '@/components/SqlEditor.vue'
 import {
   createBlobMigrationJobApi,
@@ -80,6 +81,53 @@ const selectedRowPreviewItems = computed(() => {
 const selectedPreviewRowIndex = computed(() => {
   if (!selectedRow.value) return -1
   return tableRows.value.indexOf(selectedRow.value)
+})
+
+const browseLightboxOpen = ref(false)
+const browseLightboxColumn = ref('')
+const browseLightboxImageId = ref(null)
+const browseLightboxPath = ref('')
+const browseLightboxTitle = ref('')
+
+function syncBrowseLightboxFromRow() {
+  if (!browseLightboxOpen.value) return
+  const items = selectedRowPreviewItems.value
+  if (!items.length) {
+    browseLightboxOpen.value = false
+    return
+  }
+  const match =
+    items.find((item) => item.column === browseLightboxColumn.value)
+    || items[0]
+  browseLightboxColumn.value = match.column
+  browseLightboxImageId.value = match.cell?.image_info_id ?? null
+  browseLightboxPath.value = match.cell?.path || ''
+  browseLightboxTitle.value = match.title || match.cell?.path || match.column
+}
+
+function openBrowseLightbox(item) {
+  if (!item?.cell?.image_info_id && !item?.cell?.path) return
+  browseLightboxColumn.value = item.column
+  browseLightboxImageId.value = item.cell?.image_info_id ?? null
+  browseLightboxPath.value = item.cell?.path || ''
+  browseLightboxTitle.value = item.title || item.cell?.path || item.column
+  browseLightboxOpen.value = true
+}
+
+async function onBrowseLightboxPrev() {
+  goPrevPreviewRow()
+  await nextTick()
+  syncBrowseLightboxFromRow()
+}
+
+async function onBrowseLightboxNext() {
+  await goNextPreviewRow()
+  await nextTick()
+  syncBrowseLightboxFromRow()
+}
+
+watch(selectedRow, () => {
+  syncBrowseLightboxFromRow()
 })
 
 function rowIdentityKey(row) {
@@ -1887,9 +1935,10 @@ onUnmounted(() => {
                           :size="112"
                           :lazy="false"
                           clickable
+                          @click="openBrowseLightbox(item)"
                         />
                         <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
-                        <div class="row-preview-zoom-hint">点击图片放大</div>
+                        <div class="row-preview-zoom-hint">点击图片放大 · 放大后 ↑↓ 换行</div>
                       </div>
                     </div>
                     <div v-else class="row-preview-empty">
@@ -2026,9 +2075,10 @@ onUnmounted(() => {
                           :size="120"
                           :lazy="false"
                           clickable
+                          @click="openBrowseLightbox(item)"
                         />
                         <div class="row-preview-path" :title="item.title">{{ item.title }}</div>
-                        <div class="row-preview-zoom-hint">点击图片放大</div>
+                        <div class="row-preview-zoom-hint">点击图片放大 · 放大后 ↑↓ 换行</div>
                       </div>
                     </div>
                     <div v-else class="row-preview-empty">
@@ -2102,6 +2152,15 @@ onUnmounted(() => {
         </el-button>
       </template>
     </el-dialog>
+
+    <ImageLightbox
+      v-model="browseLightboxOpen"
+      :image-id="browseLightboxImageId"
+      :image-path="browseLightboxPath"
+      :title="browseLightboxTitle"
+      @prev="onBrowseLightboxPrev"
+      @next="onBrowseLightboxNext"
+    />
 
     <el-dialog v-model="migrateDialogVisible" title="一键迁移" width="520px">
       <p class="field-hint migrate-dialog-desc">

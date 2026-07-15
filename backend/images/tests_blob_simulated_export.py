@@ -332,3 +332,27 @@ class SimulatedExportTestCase(TestCase):
         source_page = fetch_simulated_table_rows(self.view, offset=0, limit=10)
         self.assertEqual(len(source_page["rows"]), 2)
         self.assertEqual(source_page["rows"][0]["photo"]["status"], "migrated")
+
+    def test_export_preview_from_stored_path_without_map_uid(self):
+        """Path-export table preview works even when maps lack source_uid."""
+        from images.blob_table_view_service import fetch_simulated_table_rows
+        from images.models import BlobTableView, ImageSourceMap
+
+        # Ensure map is legacy (empty uid) while view may carry a uid.
+        ImageSourceMap.objects.filter(source_table="legacy_photos").update(source_uid="")
+        self.view.source_uid = "11111111-1111-4111-8111-111111111111"
+        self.view.save(update_fields=["source_uid"])
+
+        result = export_simulated_table_to_connection(
+            self.view.id,
+            target_db_alias="default",
+            target_table=EXPORT_TABLE,
+            if_exists="fail",
+        )
+        target = BlobTableView.objects.get(pk=result["target_view_id"])
+        page = fetch_simulated_table_rows(target, offset=0, limit=10)
+        row1 = next(r for r in page["rows"] if str(r.get("id")) == "1")
+        self.assertEqual(row1["photo"]["status"], "migrated")
+        self.assertEqual(row1["photo"]["image_info_id"], self.image.id)
+        row2 = next(r for r in page["rows"] if str(r.get("id")) == "2")
+        self.assertEqual(row2["photo"]["status"], "no_data")

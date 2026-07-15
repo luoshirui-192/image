@@ -640,6 +640,63 @@ def _build_path_cell(
     }
 
 
+def _path_cell_from_stored_path(path_value: Any) -> dict:
+    """Build a path cell from a varchar path column (path-export tables)."""
+    path = str(path_value or "").strip()
+    if not path:
+        return {
+            "display": "无数据",
+            "path": "",
+            "image_info_id": None,
+            "status": PATH_STATUS_NO_DATA,
+        }
+    image = (
+        ImageInfo.objects.filter(image_path=path, is_delete=0)
+        .order_by("-id")
+        .only("id", "image_path")
+        .first()
+    )
+    if image is None:
+        # Path string exists but image_info is gone / not found.
+        return {
+            "display": path,
+            "path": path,
+            "image_info_id": None,
+            "status": PATH_STATUS_DELETED,
+        }
+    return {
+        "display": path,
+        "path": path,
+        "image_info_id": image.id,
+        "status": PATH_STATUS_MIGRATED,
+    }
+
+
+def _stored_path_blob_columns(
+    remote_cols: list[VirtualColumn],
+    blob_cols: list[str],
+) -> set[str]:
+    """BLOB config columns that are physically varchar/path (exported path tables)."""
+    remote = {c.name: c for c in remote_cols}
+    stored: set[str] = set()
+    for name in blob_cols:
+        col = remote.get(name)
+        if col is not None and not col.is_blob:
+            stored.add(name)
+    return stored
+
+
+def _merge_path_cell_prefer_preview(map_cell: dict, stored_cell: dict) -> dict:
+    """Prefer map cell when it already has preview id; else use stored path cell."""
+    if map_cell.get("image_info_id"):
+        if not map_cell.get("path") and stored_cell.get("path"):
+            return {**map_cell, "path": stored_cell["path"], "display": stored_cell["path"]}
+        return map_cell
+    if stored_cell.get("image_info_id") or stored_cell.get("path"):
+        return stored_cell
+    return map_cell
+
+
 def _load_path_map(
     source_table: str,
     source_ids: list[str],
@@ -811,12 +868,17 @@ def fetch_simulated_table_rows(
 
         path_mappings = resolve_effective_path_mappings(view, conn, blob_cols)
         remote_col_names = {c.name for c in remote_cols}
+        stored_path_cols = _stored_path_blob_columns(remote_cols, blob_cols)
         select_names = _augment_select_names(
             [c.name for c in display_cols if not c.is_path_substitute],
             pk=pk,
             path_mappings=path_mappings or None,
             remote_col_names=remote_col_names,
         )
+        # Path-export tables store former BLOB values as varchar paths — fetch them.
+        for col_name in stored_path_cols:
+            if col_name in remote_col_names and col_name not in select_names:
+                select_names.append(col_name)
         select_sql = ", ".join(_quote_ident(name) for name in select_names)
         order_sql = _quote_ident(pk)
         sql = (
@@ -853,8 +915,10 @@ def fetch_simulated_table_rows(
             )
         else:
             source_ids = [str(row[pk_index]) for row in raw_rows]
+            # Always look up maps via configured path_lookup_table (original source),
+            # not the physical export table name.
             legacy_path_map = _load_path_map(
-                view.source_table,
+                _path_lookup_table(view),
                 source_ids,
                 blob_columns=blob_cols,
                 path_lookup_table=_path_lookup_table(view),
@@ -873,6 +937,14 @@ def fetch_simulated_table_rows(
             legacy_path_map=legacy_path_map,
             pk_index=pk_index,
         )
+        # For path-export varchar columns, nonempty path string means "has data".
+        for row_idx, raw in enumerate(raw_rows):
+            for col_name in stored_path_cols:
+                if col_name not in col_names:
+                    continue
+                raw_val = raw[col_names.index(col_name)]
+                if str(raw_val or "").strip():
+                    blob_presence[row_idx][col_name] = True
 
     pk_index = col_names.index(pk) if pk in col_names else 0
 
@@ -881,12 +953,14 @@ def fetch_simulated_table_rows(
         item: dict[str, Any] = {}
         source_id = str(raw[pk_index])
         for idx, name in enumerate(col_names):
+            if name in blob_cols:
+                continue
             item[name] = _serialize_cell(raw[idx])
         if per_row_path_maps is not None:
             row_paths = per_row_path_maps[row_idx]
             for blob_col in blob_cols:
                 mapping = next((m for m in path_mappings if m["view_column"] == blob_col), None)
-                item[blob_col] = _build_path_cell(
+                map_cell = _build_path_cell(
                     source_table=view.source_table,
                     source_id=source_id,
                     path_map=row_paths.get(blob_col, {}),
@@ -894,16 +968,26 @@ def fetch_simulated_table_rows(
                     source_column=mapping["source_column"] if mapping else None,
                     has_blob_data=blob_presence[row_idx].get(blob_col, False),
                 )
+                if blob_col in stored_path_cols and blob_col in col_names:
+                    stored_cell = _path_cell_from_stored_path(raw[col_names.index(blob_col)])
+                    item[blob_col] = _merge_path_cell_prefer_preview(map_cell, stored_cell)
+                else:
+                    item[blob_col] = map_cell
         else:
             row_paths = legacy_path_map.get(source_id, {})
             for blob_col in blob_cols:
-                item[blob_col] = _build_path_cell(
+                map_cell = _build_path_cell(
                     source_table=view.source_table,
                     source_id=source_id,
                     path_map=row_paths,
                     blob_column=blob_col,
                     has_blob_data=blob_presence[row_idx].get(blob_col, False),
                 )
+                if blob_col in stored_path_cols and blob_col in col_names:
+                    stored_cell = _path_cell_from_stored_path(raw[col_names.index(blob_col)])
+                    item[blob_col] = _merge_path_cell_prefer_preview(map_cell, stored_cell)
+                else:
+                    item[blob_col] = map_cell
         rows.append(item)
 
     # COUNT only on the first page (offset=0) so UI can show "loaded / total" without
