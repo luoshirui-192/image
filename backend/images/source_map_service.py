@@ -130,36 +130,83 @@ def upsert_source_map(
     map_column: str,
     image_info_id: int,
 ) -> ImageSourceMap:
+    """Insert or update a map row.
+
+    DB unique key is uk_source=(source_table, source_id, source_column). Lookups by
+    source_uid alone can miss legacy rows (empty source_uid) and cause Duplicate entry.
+    """
+    from django.db import IntegrityError, transaction
+
     uid = ensure_migration_source_uid(source)
     table = (lookup_table or "").strip()
     column = (map_column or "").strip()
-    defaults = {
-        "image_info_id": image_info_id,
-        "migrated_at": timezone.now(),
-        "source_table": table,
-        "migration_source_id": source.pk,
-    }
+    sid = str(map_source_id)
+    now = timezone.now()
 
-    if is_valid_source_uid(uid):
-        row, _ = ImageSourceMap.objects.update_or_create(
-            source_uid=uid,
-            source_id=str(map_source_id),
-            source_column=column,
-            defaults=defaults,
+    def _apply(row: ImageSourceMap) -> ImageSourceMap:
+        row.image_info_id = image_info_id
+        row.migrated_at = now
+        row.source_table = table
+        row.migration_source_id = source.pk
+        if is_valid_source_uid(uid):
+            row.source_uid = uid
+        row.save(
+            update_fields=[
+                "image_info_id",
+                "migrated_at",
+                "source_table",
+                "migration_source_id",
+                "source_uid",
+            ]
         )
         return row
 
-    row, _ = ImageSourceMap.objects.update_or_create(
+    # 1) Prefer the physical unique key (covers legacy empty-uid rows).
+    existing = ImageSourceMap.objects.filter(
         source_table=table,
-        source_id=str(map_source_id),
+        source_id=sid,
         source_column=column,
-        defaults={
-            "image_info_id": image_info_id,
-            "migrated_at": timezone.now(),
-            "migration_source_id": source.pk,
-        },
-    )
-    return row
+    ).first()
+    if existing is not None:
+        return _apply(existing)
+
+    # 2) Row may already be keyed by source_uid from a prior rewrite.
+    if is_valid_source_uid(uid):
+        existing = ImageSourceMap.objects.filter(
+            source_uid=uid,
+            source_id=sid,
+            source_column=column,
+        ).first()
+        if existing is not None:
+            return _apply(existing)
+
+    try:
+        with transaction.atomic():
+            return ImageSourceMap.objects.create(
+                source_table=table,
+                source_id=sid,
+                source_column=column,
+                source_uid=uid if is_valid_source_uid(uid) else "",
+                image_info_id=image_info_id,
+                migrated_at=now,
+                migration_source_id=source.pk,
+            )
+    except IntegrityError:
+        # Concurrent insert won the race on uk_source — update that row.
+        existing = ImageSourceMap.objects.filter(
+            source_table=table,
+            source_id=sid,
+            source_column=column,
+        ).first()
+        if existing is None and is_valid_source_uid(uid):
+            existing = ImageSourceMap.objects.filter(
+                source_uid=uid,
+                source_id=sid,
+                source_column=column,
+            ).first()
+        if existing is None:
+            raise
+        return _apply(existing)
 
 
 def count_live_map_entries_for_source(source: BlobMigrationSource) -> int:
@@ -211,9 +258,18 @@ def migrated_key_set_for_batch(
         base = base.filter(source_column__in=cols)
 
     if is_valid_source_uid(uid):
-        rows = base.filter(source_uid=uid)
-        if not rows.exists() and legacy_map_lookup_enabled():
-            rows = base.filter(Q(source_uid="") | Q(source_uid__isnull=True), source_table=lookup_table)
+        # Union uid-scoped + legacy empty-uid rows for this lookup table so
+        # skip_existing does not miss older maps and then hit uk_source on insert.
+        if legacy_map_lookup_enabled():
+            rows = base.filter(
+                Q(source_uid=uid)
+                | (
+                    (Q(source_uid="") | Q(source_uid__isnull=True))
+                    & Q(source_table=lookup_table)
+                )
+            )
+        else:
+            rows = base.filter(source_uid=uid)
     else:
         rows = base.filter(source_table=lookup_table)
 

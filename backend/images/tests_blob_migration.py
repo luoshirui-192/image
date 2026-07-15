@@ -632,6 +632,59 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(ImageInfo.objects.filter(is_delete=0).count(), 1)
 
     @override_settings(UPLOAD_ROOT=None)
+    def test_upsert_updates_legacy_map_when_source_has_uid(self):
+        """uk_source is (table,id,column); upsert must not insert a second row for same key."""
+        from images.source_map_service import upsert_source_map
+
+        upload_root = str(self.upload_root)
+        uid = "33333333-3333-4333-8333-333333333333"
+        now = timezone.now()
+        BlobMigrationSource.objects.filter(pk=self.source.pk).update(source_uid=uid)
+        self.source.refresh_from_db()
+        image = ImageInfo.objects.create(
+            image_name="legacy.png",
+            image_path="2026/01/legacy.png",
+            upload_time=now,
+            update_time=now,
+            upload_user="test",
+            is_delete=0,
+        )
+        ImageSourceMap.objects.create(
+            source_uid="",
+            source_table="legacy_photos",
+            source_id="1",
+            source_column="photo",
+            image_info_id=image.id,
+            migrated_at=now,
+        )
+        new_image = ImageInfo.objects.create(
+            image_name="new.png",
+            image_path="2026/01/new.png",
+            upload_time=now,
+            update_time=now,
+            upload_user="test",
+            is_delete=0,
+        )
+        with override_settings(UPLOAD_ROOT=upload_root):
+            row = upsert_source_map(
+                source=self.source,
+                lookup_table="legacy_photos",
+                map_source_id="1",
+                map_column="photo",
+                image_info_id=new_image.id,
+            )
+        self.assertEqual(row.source_uid, uid)
+        self.assertEqual(row.image_info_id, new_image.id)
+        self.assertEqual(
+            ImageSourceMap.objects.filter(
+                source_table="legacy_photos",
+                source_id="1",
+                source_column="photo",
+            ).count(),
+            1,
+        )
+
+    @override_settings(UPLOAD_ROOT=None)
     def test_find_migration_source_match_by_source_uid(self):
         uid = "22222222-2222-4222-8222-222222222222"
         now = timezone.now()
