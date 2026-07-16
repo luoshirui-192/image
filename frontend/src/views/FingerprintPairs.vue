@@ -113,19 +113,32 @@ function stopPoll() {
 }
 
 async function pollImportJob(jobId) {
+  if (jobId == null) {
+    stopPoll()
+    importing.value = false
+    ElMessage.error('导入任务 ID 无效，请确认已拉取最新代码并重建 web/backend')
+    return
+  }
   try {
     const res = await fetchFingerprintImportJobApi(jobId)
-    importJob.value = res.data
-    const status = res.data.status
+    const job = res?.data
+    if (!job || typeof job !== 'object') {
+      stopPoll()
+      importing.value = false
+      ElMessage.error('导入进度接口返回异常（可能未建 fingerprint_import_job 表或后端未更新）')
+      return
+    }
+    importJob.value = job
+    const status = job.status
     if (status === 'completed' || status === 'failed' || status === 'cancelled') {
       stopPoll()
       importing.value = false
       if (status === 'completed') {
-        ElMessage.success(res.data.message || '导入完成')
+        ElMessage.success(job.message || '导入完成')
       } else if (status === 'failed') {
-        ElMessage.error(res.data.message || res.data.last_error || '导入失败')
+        ElMessage.error(job.message || job.last_error || '导入失败')
       } else {
-        ElMessage.warning(res.data.message || '已取消')
+        ElMessage.warning(job.message || '已取消')
       }
       await loadMeta()
       await loadPairs()
@@ -145,7 +158,12 @@ async function onZipChange(uploadFile) {
   stopPoll()
   try {
     const res = await importFingerprintZipApi(file, { algo_version: '1.0', skip_existing: true })
-    const job = res.data.job
+    const job = res?.data?.job
+    if (!job?.id) {
+      importing.value = false
+      ElMessage.error('未拿到导入任务（请确认机器 A 已 git pull 到 a9675f2 并重建 backend/web）')
+      return
+    }
     importJob.value = job
     ElMessage.success('导入任务已启动，可关闭页面，后台继续处理')
     await pollImportJob(job.id)
