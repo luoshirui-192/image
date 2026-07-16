@@ -11,5 +11,6 @@ mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DATABASE}" < /sql/optimize_inde
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DATABASE}" < /sql/fix_mysql57_triggers.sql
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DATABASE}" < /sql/seed_test_data.sql
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DATABASE}" < /sql/blob_migration.sql
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DATABASE}" < /sql/fingerprint_pairs.sql
 
-echo "[init-app] database ${MYSQL_DATABASE} ready (with blob_migration tables)"
+echo "[init-app] database ${MYSQL_DATABASE} ready (with blob_migration + fingerprint tables)"

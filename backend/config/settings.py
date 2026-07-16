@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "users",
     "images",
+    "fingerprints",
     "sqlquery",
     "logs",
 ]

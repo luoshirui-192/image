@@ -58,6 +58,7 @@ services:
       GUNICORN_BIND: "0.0.0.0:8000"
     volumes:
       - ./upload:/app/upload
+      - ./templates:/app/templates
       - thumb_cache:/app/backend/thumb_cache
     expose:
       - "8000"
@@ -78,6 +79,7 @@ services:
       MAINTENANCE_INTERVAL_HOURS: ${MAINTENANCE_INTERVAL_HOURS:-24}
     volumes:
       - ./upload:/app/upload
+      - ./templates:/app/templates
       - thumb_cache:/app/backend/thumb_cache
 
   web:

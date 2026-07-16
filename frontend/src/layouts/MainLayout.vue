@@ -10,6 +10,8 @@ import {
 
   Connection,
 
+  CopyDocument,
+
   Document,
 
   Expand,
@@ -81,6 +83,8 @@ const iconMap = {
   FolderOpened,
 
   Document,
+
+  CopyDocument,
 
   Connection,
 

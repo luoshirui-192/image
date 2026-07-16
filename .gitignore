@@ -69,3 +69,9 @@ docs/code-walkthrough/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Fingerprint ISO templates (keep structure)
+templates/*
+!templates/.gitkeep
+!templates/README.md
+

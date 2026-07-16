@@ -35,6 +35,14 @@ export const MENU_ITEMS = [
     description: '目录、表数据、SQL 查询与多图预览',
   },
   {
+    path: 'fingerprint-pairs',
+    name: 'fingerprint-pairs',
+    title: '指纹对比',
+    icon: 'CopyDocument',
+    adminOnly: false,
+    description: '成对指纹入库、筛选与多层特征叠加对比',
+  },
+  {
     path: 'logs',
     name: 'logs',
     title: '操作日志',
@@ -76,6 +84,9 @@ export function resolveActiveMenuPath(routePath, query = {}) {
   }
   if (path === 'blob-views' || path.startsWith('blob-views/') || path === 'sql-query' || path === 'sql') {
     return '/blob-browse'
+  }
+  if (path.startsWith('fingerprint-pairs/')) {
+    return '/fingerprint-pairs'
   }
   const match = MENU_ITEMS.find((item) => {
     if (item.path === '') {

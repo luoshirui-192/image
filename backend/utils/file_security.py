@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import BinaryIO
 
 from utils.path_builder import (
+    TEMPLATES_PREFIX,
     UPLOAD_PREFIX,
     is_valid_relative_path,
+    is_valid_template_path,
     normalize_relative_path,
     normalize_suffix,
+    project_root_from_upload_root,
     resolve_upload_file,
 )
 
@@ -210,7 +213,7 @@ def assert_safe_relative_path(relative_path: str) -> str:
     Validate relative path before DB storage or file access.
 
     Rules:
-    - Must start with upload/ prefix (via normalize + regex)
+    - Must start with upload/ or templates/ prefix
     - No .., encoded dots, null bytes, backslashes
     - Must match layered path pattern from path_builder
     """
@@ -221,32 +224,98 @@ def assert_safe_relative_path(relative_path: str) -> str:
         raise PathSecurityError("路径包含非法字符或目录穿越片段")
 
     rel = normalize_relative_path(relative_path)
-    if not rel.startswith(f"{UPLOAD_PREFIX}/"):
-        raise PathSecurityError(f"路径必须以 {UPLOAD_PREFIX}/ 开头")
+    if rel.startswith(f"{UPLOAD_PREFIX}/"):
+        if not is_valid_relative_path(rel):
+            raise PathSecurityError(f"路径格式不合法: {relative_path}")
+        return rel
 
-    if not is_valid_relative_path(rel):
-        raise PathSecurityError(f"路径格式不合法: {relative_path}")
+    if rel.startswith(f"{TEMPLATES_PREFIX}/"):
+        if not is_valid_template_path(rel):
+            raise PathSecurityError(f"模板路径格式不合法: {relative_path}")
+        return rel
 
-    return rel
+    raise PathSecurityError(
+        f"路径必须以 {UPLOAD_PREFIX}/ 或 {TEMPLATES_PREFIX}/ 开头"
+    )
+
+
+def get_templates_base_dir(upload_root: Path | str) -> Path:
+    """Return resolved absolute path to the templates/ directory."""
+    return project_root_from_upload_root(upload_root) / TEMPLATES_PREFIX
 
 
 def resolve_safe_upload_file(upload_root: Path | str, relative_path: str) -> Path:
     """
     Resolve relative path to absolute file path with traversal protection.
 
-    After resolution, ensures the file path stays inside upload/ directory
+    After resolution, ensures the file path stays inside upload/ or templates/
     (guards against symlinks or unexpected path manipulation).
     """
     rel = assert_safe_relative_path(relative_path)
     abs_path = resolve_upload_file(upload_root, rel).resolve()
-    base_dir = get_upload_base_dir(upload_root)
+    if rel.startswith(f"{TEMPLATES_PREFIX}/"):
+        base_dir = get_templates_base_dir(upload_root)
+        scope = TEMPLATES_PREFIX
+    else:
+        base_dir = get_upload_base_dir(upload_root)
+        scope = UPLOAD_PREFIX
 
     try:
         abs_path.relative_to(base_dir)
     except ValueError as exc:
-        raise PathSecurityError("路径解析后超出 upload 目录范围") from exc
+        raise PathSecurityError(f"路径解析后超出 {scope} 目录范围") from exc
 
     return abs_path
+
+
+def validate_template_file(
+    filename: str,
+    content: bytes | BinaryIO,
+    *,
+    allowed_suffixes: set[str] | frozenset[str],
+    max_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
+) -> ValidatedUpload:
+    """
+    Validate fingerprint template upload (ISO FMR / algorithm-specific).
+
+    Allowed suffixes come from layer-type config (e.g. bidiso, neuiso).
+    """
+    ext = extension_from_filename(filename)
+    if not ext:
+        raise UploadValidationError("文件缺少有效扩展名")
+    if ext in BLOCKED_EXTENSIONS:
+        raise UploadValidationError(f"禁止上传的文件类型: .{ext}")
+
+    allowed = {normalize_suffix(s) for s in allowed_suffixes}
+    if ext not in allowed:
+        raise UploadValidationError(
+            f"不支持的模板类型 .{ext}，允许: {', '.join(sorted(allowed))}"
+        )
+
+    if isinstance(content, bytes):
+        size = len(content)
+        head = content[:32]
+    else:
+        pos = content.tell()
+        data = content.read()
+        size = len(data)
+        head = data[:32]
+        content.seek(pos)
+
+    if size <= 0:
+        raise UploadValidationError("文件内容为空")
+    if size > max_bytes:
+        raise UploadValidationError(f"文件大小超过限制 ({max_bytes // (1024 * 1024)} MB)")
+
+    # ISO 19794-2 Finger Minutiae Record magic: FMR\0
+    if not head.startswith(b"FMR\x00"):
+        raise UploadValidationError("模板内容不是有效的 ISO FMR 特征（缺少 FMR 头）")
+
+    return ValidatedUpload(
+        suffix=ext,
+        mime_type="application/octet-stream",
+        size=size,
+    )
 
 
 # ---------------------------------------------------------------------------

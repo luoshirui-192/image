@@ -1,11 +1,13 @@
 """
 Upload path builder — layered storage layout (Step 8).
 
-Relative path format:
+Relative path formats:
     upload/{YYYYMMDD}/{category_id}/{uuid}.{suffix}
+    templates/{YYYYMMDD}/{uuid}.{suffix}
 
-Example:
+Examples:
     upload/20260630/2/550e8400-e29b-41d4-a716-446655440001.jpg
+    templates/20260716/550e8400-e29b-41d4-a716-446655440001.bidiso
 """
 from __future__ import annotations
 
@@ -19,10 +21,21 @@ from zoneinfo import ZoneInfo
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 UPLOAD_PREFIX = "upload"
+TEMPLATES_PREFIX = "templates"
+
+UUID_RE = (
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
 
 # upload/20260630/2/550e8400-e29b-41d4-a716-446655440001.jpg
 RELATIVE_PATH_RE = re.compile(
-    r"^upload/(\d{8})/(\d+)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([a-z0-9]+)$",
+    rf"^upload/(\d{{8}})/(\d+)/({UUID_RE})\.([a-z0-9]+)$",
+    re.IGNORECASE,
+)
+
+# templates/20260716/550e8400-e29b-41d4-a716-446655440001.bidiso
+TEMPLATE_PATH_RE = re.compile(
+    rf"^templates/(\d{{8}})/({UUID_RE})\.([a-z0-9]+)$",
     re.IGNORECASE,
 )
 
@@ -37,6 +50,17 @@ class ParsedUploadPath:
     @property
     def relative_path(self) -> str:
         return build_relative_path(self.category_id, self.suffix, file_uuid=self.file_uuid, date_str=self.date_str)
+
+
+@dataclass(frozen=True)
+class ParsedTemplatePath:
+    date_str: str
+    file_uuid: str
+    suffix: str
+
+    @property
+    def relative_path(self) -> str:
+        return build_template_relative_path(self.suffix, file_uuid=self.file_uuid, date_str=self.date_str)
 
 
 def normalize_suffix(suffix: str) -> str:
@@ -93,29 +117,52 @@ def build_relative_path(
     return f"{UPLOAD_PREFIX}/{day}/{category_id}/{uid}.{ext}"
 
 
+def build_template_relative_path(
+    suffix: str,
+    *,
+    file_uuid: str | None = None,
+    date_str: str | None = None,
+    when: date | datetime | None = None,
+) -> str:
+    """Build DB-stored relative path under templates/ (fingerprint ISO templates)."""
+    ext = normalize_suffix(suffix)
+    if not ext:
+        raise ValueError("suffix is required")
+
+    uid = file_uuid or str(uuid.uuid4())
+    day = date_str or format_date_str(when)
+    if not re.fullmatch(r"\d{8}", day):
+        raise ValueError("date_str must be YYYYMMDD")
+
+    return f"{TEMPLATES_PREFIX}/{day}/{uid}.{ext}"
+
+
 def build_absolute_path(upload_root: Path | str, relative_path: str) -> Path:
     """Alias for resolve_upload_file."""
     return resolve_upload_file(upload_root, relative_path)
+
+
+def project_root_from_upload_root(upload_root: Path | str) -> Path:
+    """Return project root that contains both upload/ and templates/."""
+    root = Path(upload_root).resolve()
+    if root.name == UPLOAD_PREFIX:
+        return root.parent
+    return root
 
 
 def resolve_upload_file(upload_root: Path | str, relative_path: str) -> Path:
     """
     Resolve absolute file path from DB relative path.
 
-    upload_root points to the `upload/` directory itself; relative_path includes `upload/` prefix.
+    upload_root points to the `upload/` directory itself; relative_path includes
+    `upload/` or `templates/` prefix under the project root.
     """
     rel = normalize_relative_path(relative_path)
-    if not is_valid_relative_path(rel):
-        raise ValueError(f"invalid upload relative path: {relative_path}")
+    if not is_valid_storage_path(rel):
+        raise ValueError(f"invalid storage relative path: {relative_path}")
 
-    # relative_path: upload/20260630/2/uuid.jpg -> project_root/upload/20260630/2/uuid.jpg
-    root = Path(upload_root).resolve()
-    if root.name == UPLOAD_PREFIX:
-        project_root = root.parent
-    else:
-        project_root = root
-
-    return project_root.joinpath(*rel.split("/"))
+    # relative_path: upload/... or templates/... -> project_root/<rel>
+    return project_root_from_upload_root(upload_root).joinpath(*rel.split("/"))
 
 
 def ensure_parent_dir(upload_root: Path | str, relative_path: str) -> Path:
@@ -135,6 +182,17 @@ def is_valid_relative_path(relative_path: str) -> bool:
     return RELATIVE_PATH_RE.match(normalize_relative_path(relative_path)) is not None
 
 
+def is_valid_template_path(relative_path: str) -> bool:
+    """Validate path matches templates/{date}/{uuid}.{suffix}."""
+    return TEMPLATE_PATH_RE.match(normalize_relative_path(relative_path)) is not None
+
+
+def is_valid_storage_path(relative_path: str) -> bool:
+    """Validate image upload path or fingerprint template path."""
+    rel = normalize_relative_path(relative_path)
+    return is_valid_relative_path(rel) or is_valid_template_path(rel)
+
+
 def parse_relative_path(relative_path: str) -> ParsedUploadPath:
     """Parse relative path into components."""
     rel = normalize_relative_path(relative_path)
@@ -146,6 +204,21 @@ def parse_relative_path(relative_path: str) -> ParsedUploadPath:
     return ParsedUploadPath(
         date_str=date_str,
         category_id=int(category_id),
+        file_uuid=file_uuid.lower(),
+        suffix=normalize_suffix(suffix),
+    )
+
+
+def parse_template_path(relative_path: str) -> ParsedTemplatePath:
+    """Parse template relative path into components."""
+    rel = normalize_relative_path(relative_path)
+    match = TEMPLATE_PATH_RE.match(rel)
+    if not match:
+        raise ValueError(f"cannot parse template path: {relative_path}")
+
+    date_str, file_uuid, suffix = match.groups()
+    return ParsedTemplatePath(
+        date_str=date_str,
         file_uuid=file_uuid.lower(),
         suffix=normalize_suffix(suffix),
     )
