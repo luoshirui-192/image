@@ -96,6 +96,29 @@ CREATE TABLE IF NOT EXISTS fingerprint_feature_layer (
     minutiae_json TEXT,
     create_time DATETIME NULL
 );
+CREATE TABLE IF NOT EXISTS fingerprint_import_job (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    zip_path VARCHAR(500) NOT NULL DEFAULT '',
+    zip_name VARCHAR(255) NOT NULL DEFAULT '',
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    algo_version VARCHAR(64) NOT NULL DEFAULT '1.0',
+    tags VARCHAR(500) NOT NULL DEFAULT '',
+    skip_existing SMALLINT NOT NULL DEFAULT 1,
+    category_id INTEGER NULL,
+    total_estimate INTEGER NOT NULL DEFAULT 0,
+    processed INTEGER NOT NULL DEFAULT 0,
+    succeeded INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    cancel_requested SMALLINT NOT NULL DEFAULT 0,
+    message VARCHAR(500) NOT NULL DEFAULT '',
+    last_error VARCHAR(500) NOT NULL DEFAULT '',
+    created_by VARCHAR(100) NOT NULL DEFAULT '',
+    create_time DATETIME NULL,
+    started_at DATETIME NULL,
+    finished_at DATETIME NULL,
+    updated_at DATETIME NULL
+);
 """
 
 
@@ -212,19 +235,38 @@ class FingerprintAPITestCase(TestCase):
         keys2 = {item["layer_key"] for item in res2.data["data"]["items"]}
         self.assertIn("customiso", keys2)
 
-    def test_import_zip_list_compare_toggle(self):
-        zip_bytes = make_pair_zip()
-        upload = SimpleUploadedFile("sample.zip", zip_bytes, content_type="application/zip")
+    def _wait_job(self, job_id: int, timeout: float = 30.0):
+        import time
+
+        from fingerprints.models import FingerprintImportJob
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            job = FingerprintImportJob.objects.get(pk=job_id)
+            if job.status in {"completed", "failed", "cancelled"}:
+                return job
+            time.sleep(0.05)
+        raise AssertionError(f"import job {job_id} timed out")
+
+    def _import_zip_async(self, zip_bytes: bytes, name: str = "sample.zip", algo_version: str = "1.0"):
+        upload = SimpleUploadedFile(name, zip_bytes, content_type="application/zip")
         res = self.client.post(
             "/api/fingerprints/pairs/import-zip/",
-            {"file": upload, "algo_version": "1.0"},
+            {"file": upload, "algo_version": algo_version},
             format="multipart",
         )
-        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn(res.status_code, {200, 202}, res.data)
         self.assertEqual(res.data["code"], 0)
-        self.assertGreaterEqual(res.data["data"]["imported"], 1)
-        pair_id = res.data["data"]["items"][0]["pair_id"]
-        self.assertEqual(res.data["data"]["items"][0]["layer_count"], 4)
+        job_id = res.data["data"]["job"]["id"]
+        job = self._wait_job(job_id)
+        self.assertEqual(job.status, "completed", job.message)
+        return job
+
+    def test_import_zip_list_compare_toggle(self):
+        zip_bytes = make_pair_zip()
+        job = self._import_zip_async(zip_bytes)
+        self.assertGreaterEqual(job.succeeded, 1)
+        self.assertEqual(job.total_estimate, 1)
 
         # templates landed under templates/
         template_files = list((self.project_root / "templates").rglob("*"))
@@ -236,6 +278,7 @@ class FingerprintAPITestCase(TestCase):
         )
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.data["data"]["total"], 1)
+        pair_id = listed.data["data"]["items"][0]["id"]
 
         compare = self.client.get(f"/api/fingerprints/pairs/{pair_id}/compare/")
         self.assertEqual(compare.status_code, 200)
@@ -255,14 +298,9 @@ class FingerprintAPITestCase(TestCase):
 
     def test_version_compare_colors(self):
         zip_bytes = make_pair_zip()
-        upload = SimpleUploadedFile("v1.zip", zip_bytes, content_type="application/zip")
-        r1 = self.client.post(
-            "/api/fingerprints/pairs/import-zip/",
-            {"file": upload, "algo_version": "1.0"},
-            format="multipart",
-        )
-        self.assertEqual(r1.status_code, 200, r1.data)
-        pair_id = r1.data["data"]["items"][0]["pair_id"]
+        self._import_zip_async(zip_bytes, name="v1.zip", algo_version="1.0")
+        listed = self.client.get("/api/fingerprints/pairs/")
+        pair_id = listed.data["data"]["items"][0]["id"]
 
         from fingerprints.models import FingerprintFeatureLayer
         from fingerprints.services import _decode_and_cache, _save_template

@@ -213,6 +213,9 @@ BLOB_SYNC_USE_MYSQL_SHA2 = os.getenv("BLOB_SYNC_USE_MYSQL_SHA2", "true").lower()
 BLOB_SYNC_MAX_RESYNC_PER_RUN = int(os.getenv("BLOB_SYNC_MAX_RESYNC_PER_RUN", "50"))
 BLOB_MAP_LEGACY_LOOKUP = os.getenv("BLOB_MAP_LEGACY_LOOKUP", "true").lower() in {"1", "true", "yes", "on"}
 
+# Fingerprint zip import (background workers for pair uploads)
+FP_IMPORT_WORKERS = int(os.getenv("FP_IMPORT_WORKERS", "4"))
+
 # ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------

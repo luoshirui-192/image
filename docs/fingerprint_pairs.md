@@ -32,7 +32,9 @@ MinIO 下同样是相对路径对象键，前缀不变。
 1. 拉取本分支并重启 backend / web
 2. MySQL 会在启动时自动 `CREATE TABLE IF NOT EXISTS`（也可手动执行 `sql/fingerprint_pairs.sql`）
 3. 确保运行环境可写项目根下 `templates/`（或 MinIO 可写对应前缀）
-4. 浏览器打开「指纹对比」→ 导入小样本 zip（勿提交整包 batmatch_out）
+4. 浏览器打开「指纹对比」→ **导入整包 zip**（后台任务，带进度条；可并行多对上传）
+
+环境变量 `FP_IMPORT_WORKERS`（默认 4）控制同时导入几对。
 
 ## API 摘要
 

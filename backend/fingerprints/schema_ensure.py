@@ -68,6 +68,32 @@ CREATE TABLE IF NOT EXISTS `fingerprint_feature_layer` (
   KEY `idx_fp_layer_version` (`algo_name`, `algo_version`),
   KEY `idx_fp_layer_side_type` (`pair_id`, `side`, `layer_type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `fingerprint_import_job` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `zip_path` varchar(500) NOT NULL DEFAULT '',
+  `zip_name` varchar(255) NOT NULL DEFAULT '',
+  `status` varchar(20) NOT NULL DEFAULT 'pending',
+  `algo_version` varchar(64) NOT NULL DEFAULT '1.0',
+  `tags` varchar(500) NOT NULL DEFAULT '',
+  `skip_existing` smallint NOT NULL DEFAULT 1,
+  `category_id` int unsigned DEFAULT NULL,
+  `total_estimate` int unsigned NOT NULL DEFAULT 0,
+  `processed` int unsigned NOT NULL DEFAULT 0,
+  `succeeded` int unsigned NOT NULL DEFAULT 0,
+  `failed` int unsigned NOT NULL DEFAULT 0,
+  `skipped` int unsigned NOT NULL DEFAULT 0,
+  `cancel_requested` smallint NOT NULL DEFAULT 0,
+  `message` varchar(500) NOT NULL DEFAULT '',
+  `last_error` varchar(500) NOT NULL DEFAULT '',
+  `created_by` varchar(100) NOT NULL DEFAULT '',
+  `create_time` datetime DEFAULT NULL,
+  `started_at` datetime DEFAULT NULL,
+  `finished_at` datetime DEFAULT NULL,
+  `updated_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_fp_import_status` (`status`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
 

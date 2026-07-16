@@ -4,13 +4,19 @@ from __future__ import annotations
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
+from fingerprints.job_service import (
+    cancel_import_job,
+    create_import_job,
+    kick_import_job_async,
+    save_upload_to_staging,
+    serialize_import_job,
+)
 from fingerprints.layer_config import list_layer_types, seed_default_layer_types
-from fingerprints.models import FingerprintFeatureLayer, FingerprintLayerType, FingerprintPair
+from fingerprints.models import FingerprintFeatureLayer, FingerprintImportJob, FingerprintLayerType, FingerprintPair
 from fingerprints.services import (
     FingerprintImportError,
     build_compare_payload,
     import_from_uploaded_files,
-    import_from_zip,
     list_pairs,
     serialize_pair,
 )
@@ -113,7 +119,7 @@ class FingerprintPairListView(APIView):
 
 
 class FingerprintPairImportZipView(APIView):
-    """POST /api/fingerprints/pairs/import-zip/ — upload batmatch_out zip."""
+    """POST /api/fingerprints/pairs/import-zip/ — start background zip import job."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
 
@@ -136,36 +142,63 @@ class FingerprintPairImportZipView(APIView):
             category_id = None
 
         try:
-            results = import_from_zip(
-                upload.read(),
-                upload_user=_username(request),
-                tags=tags,
+            zip_path = save_upload_to_staging(upload, filename=getattr(upload, "name", "upload.zip"))
+            job = create_import_job(
+                zip_path=str(zip_path),
+                zip_name=getattr(upload, "name", zip_path.name),
+                created_by=_username(request),
                 algo_version=algo_version,
-                category_id=category_id,
+                tags=tags,
                 skip_existing=skip_existing,
+                category_id=category_id,
             )
-        except FingerprintImportError as exc:
-            return error_response(str(exc), code=4001, status=400)
+            kick_import_job_async(job.id)
         except Exception as exc:
-            return error_response(f"导入失败: {exc}", code=1, status=500)
+            return error_response(f"创建导入任务失败: {exc}", code=1, status=500)
 
+        job = FingerprintImportJob.objects.get(pk=job.id)
         return success_response(
-            {
-                "imported": sum(1 for r in results if not r.skipped),
-                "skipped": sum(1 for r in results if r.skipped),
-                "items": [
-                    {
-                        "pair_id": r.pair_id,
-                        "batch_name": r.batch_name,
-                        "finger_position": r.finger_position,
-                        "layer_count": r.layer_count,
-                        "skipped": r.skipped,
-                        "message": r.message,
-                    }
-                    for r in results
-                ],
-            }
+            {"job": serialize_import_job(job), "async": True},
+            message="导入任务已启动",
+            status=202,
         )
+
+
+class FingerprintImportJobListView(APIView):
+    """GET /api/fingerprints/import-jobs/"""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request):
+        limit = 20
+        try:
+            limit = min(100, max(1, int(request.query_params.get("limit", 20))))
+        except (TypeError, ValueError):
+            pass
+        rows = list(FingerprintImportJob.objects.all().order_by("-id")[:limit])
+        return success_response({"items": [serialize_import_job(row) for row in rows]})
+
+
+class FingerprintImportJobDetailView(APIView):
+    """GET/POST /api/fingerprints/import-jobs/{id}/  POST action=cancel"""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request, pk: int):
+        job = FingerprintImportJob.objects.filter(id=pk).first()
+        if not job:
+            return error_response("导入任务不存在", code=4041, status=404)
+        return success_response(serialize_import_job(job))
+
+    def post(self, request, pk: int):
+        action = str(request.data.get("action") or "").strip().lower()
+        if action != "cancel":
+            return error_response("仅支持 action=cancel", code=4001, status=400)
+        try:
+            job = cancel_import_job(pk)
+        except FingerprintImportError as exc:
+            return error_response(str(exc), code=4041, status=404)
+        return success_response(serialize_import_job(job), message="cancel requested")
 
 
 class FingerprintPairImportFilesView(APIView):

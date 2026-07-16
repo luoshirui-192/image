@@ -1,9 +1,11 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  cancelFingerprintImportJobApi,
   deleteFingerprintPairApi,
+  fetchFingerprintImportJobApi,
   fetchFingerprintMetaApi,
   fetchFingerprintPairsApi,
   importFingerprintZipApi,
@@ -12,6 +14,8 @@ import {
 const router = useRouter()
 const loading = ref(false)
 const importing = ref(false)
+const importJob = ref(null)
+const pollTimer = ref(null)
 const rows = ref([])
 const total = ref(0)
 const meta = reactive({
@@ -101,19 +105,66 @@ async function onDelete(row) {
   }
 }
 
+function stopPoll() {
+  if (pollTimer.value) {
+    clearInterval(pollTimer.value)
+    pollTimer.value = null
+  }
+}
+
+async function pollImportJob(jobId) {
+  try {
+    const res = await fetchFingerprintImportJobApi(jobId)
+    importJob.value = res.data
+    const status = res.data.status
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+      stopPoll()
+      importing.value = false
+      if (status === 'completed') {
+        ElMessage.success(res.data.message || '导入完成')
+      } else if (status === 'failed') {
+        ElMessage.error(res.data.message || res.data.last_error || '导入失败')
+      } else {
+        ElMessage.warning(res.data.message || '已取消')
+      }
+      await loadMeta()
+      await loadPairs()
+    }
+  } catch (err) {
+    stopPoll()
+    importing.value = false
+    ElMessage.error(err.message || '查询导入进度失败')
+  }
+}
+
 async function onZipChange(uploadFile) {
   const file = uploadFile.raw
   if (!file) return
   importing.value = true
+  importJob.value = null
+  stopPoll()
   try {
     const res = await importFingerprintZipApi(file, { algo_version: '1.0', skip_existing: true })
-    ElMessage.success(`导入完成：新增 ${res.data.imported}，跳过 ${res.data.skipped}`)
-    await loadMeta()
-    await loadPairs()
+    const job = res.data.job
+    importJob.value = job
+    ElMessage.success('导入任务已启动，可关闭页面，后台继续处理')
+    await pollImportJob(job.id)
+    if (importing.value) {
+      pollTimer.value = setInterval(() => pollImportJob(job.id), 1500)
+    }
   } catch (err) {
-    ElMessage.error(err.message || '导入失败')
-  } finally {
     importing.value = false
+    ElMessage.error(err.message || '导入失败')
+  }
+}
+
+async function onCancelImport() {
+  if (!importJob.value?.id) return
+  try {
+    await cancelFingerprintImportJobApi(importJob.value.id)
+    ElMessage.info('已请求取消')
+  } catch (err) {
+    ElMessage.error(err.message || '取消失败')
   }
 }
 
@@ -121,6 +172,8 @@ onMounted(async () => {
   await loadMeta()
   await loadPairs()
 })
+
+onBeforeUnmount(stopPoll)
 </script>
 
 <template>
@@ -130,16 +183,36 @@ onMounted(async () => {
         <h2>指纹成对对比</h2>
         <p>筛选 batmatch 风格配对，进入双栏特征叠加对比</p>
       </div>
-      <el-upload
-        :show-file-list="false"
-        accept=".zip"
-        :disabled="importing"
-        :auto-upload="false"
-        :on-change="onZipChange"
-      >
-        <el-button type="primary" :loading="importing">导入 zip</el-button>
-      </el-upload>
+      <div class="import-actions">
+        <el-upload
+          :show-file-list="false"
+          accept=".zip"
+          :disabled="importing"
+          :auto-upload="false"
+          :on-change="onZipChange"
+        >
+          <el-button type="primary" :loading="importing">导入整包 zip</el-button>
+        </el-upload>
+        <el-button v-if="importing && importJob" @click="onCancelImport">取消导入</el-button>
+      </div>
     </div>
+
+    <el-card v-if="importJob" shadow="never" class="import-progress">
+      <div class="import-progress-head">
+        <strong>{{ importJob.zip_name || '导入任务' }}</strong>
+        <span>{{ importJob.status }} · {{ importJob.message }}</span>
+      </div>
+      <el-progress
+        :percentage="Number(importJob.percent || 0)"
+        :status="importJob.status === 'failed' ? 'exception' : (importJob.status === 'completed' ? 'success' : undefined)"
+      />
+      <div class="import-progress-meta">
+        进度 {{ importJob.processed || 0 }}/{{ importJob.total_estimate || '?' }}
+        · 成功 {{ importJob.succeeded || 0 }}
+        · 跳过 {{ importJob.skipped || 0 }}
+        · 失败 {{ importJob.failed || 0 }}
+      </div>
+    </el-card>
 
     <el-card shadow="never" class="fp-filters">
       <el-form :inline="true" @submit.prevent="onSearch">
@@ -238,6 +311,23 @@ onMounted(async () => {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
+}
+.import-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.import-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.import-progress-meta {
+  margin-top: 6px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 .fp-title h2 {
   margin: 0 0 4px;

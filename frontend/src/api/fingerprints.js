@@ -37,8 +37,20 @@ export function importFingerprintZipApi(file, { tags, algo_version, skip_existin
   if (category_id != null) form.append('category_id', String(category_id))
   return request.post('/fingerprints/pairs/import-zip/', form, {
     onUploadProgress,
-    timeout: 300000,
+    timeout: 600000,
   })
+}
+
+export function fetchFingerprintImportJobApi(id) {
+  return request.get(`/fingerprints/import-jobs/${id}/`)
+}
+
+export function fetchFingerprintImportJobsApi(params = {}) {
+  return request.get('/fingerprints/import-jobs/', { params })
+}
+
+export function cancelFingerprintImportJobApi(id) {
+  return request.post(`/fingerprints/import-jobs/${id}/`, { action: 'cancel' })
 }
 
 export function importFingerprintFilesApi(files, { batch_name, match_score, tags, algo_version, category_id } = {}) {

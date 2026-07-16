@@ -4,13 +4,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
 from django.conf import settings
+from django.db import close_old_connections, connection
 from django.db.models import Q
 
 from fingerprints.iso_decode import (
@@ -42,11 +45,6 @@ SAMPLE_NAME_RE = re.compile(
     r"^(?P<person>\d+)_(?P<hand>left|right)_(?P<finger>thumb|index|middle|ring|little)$",
     re.IGNORECASE,
 )
-FINGER_POSITIONS = {
-    f"{hand}_{finger}"
-    for hand in ("left", "right")
-    for finger in ("thumb", "index", "middle", "ring", "little")
-}
 
 
 class FingerprintImportError(Exception):
@@ -175,10 +173,10 @@ def import_pair_directory(
             )
 
     now = fetch_db_now()
-    image_ids: list[int] = []
-    image_names: list[str] = []
-    person_ids: list[str] = []
-    for person_id, stem, files in samples:
+
+    def _save_one_bmp(item: tuple[str, str, dict[str, Path]]) -> tuple[str, ImageInfo]:
+        person_id, _stem, files = item
+        close_old_connections()
         bmp_path = files["bmp"]
         content = bmp_path.read_bytes()
         try:
@@ -191,9 +189,22 @@ def import_pair_directory(
             )
         except DuplicateImageError as exc:
             image = exc.existing
-        image_ids.append(image.id)
-        image_names.append(image.image_name)
-        person_ids.append(person_id)
+        finally:
+            close_old_connections()
+        return person_id, image
+
+    # Upload left/right bmps in parallel on MySQL/MinIO; sqlite tests stay serial.
+    from django.db import connection as db_connection
+
+    if db_connection.vendor == "sqlite":
+        bmp_results = [_save_one_bmp(item) for item in samples]
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            bmp_results = list(pool.map(_save_one_bmp, samples))
+
+    image_ids = [img.id for _pid, img in bmp_results]
+    image_names = [img.image_name for _pid, img in bmp_results]
+    person_ids = [pid for pid, _img in bmp_results]
 
     pair = FingerprintPair.objects.create(
         batch_name=batch_name,
@@ -213,7 +224,7 @@ def import_pair_directory(
         update_time=now,
     )
 
-    layer_count = 0
+    template_jobs: list[tuple[str, Path, LayerTypeInfo]] = []
     sides = ("left", "right")
     for side, (_person, _stem, files) in zip(sides, samples):
         for suffix, path in files.items():
@@ -223,63 +234,119 @@ def import_pair_directory(
             if layer_info is None:
                 logger.warning("skip unknown template suffix=%s file=%s", suffix, path.name)
                 continue
-            content = path.read_bytes()
-            try:
-                template_path, file_suffix, file_size = _save_template(
-                    filename=path.name,
-                    content=content,
-                    layer_info=layer_info,
-                    algo_version=algo_version,
-                )
-                count, cache = _decode_and_cache(
-                    content,
-                    setlen=layer_info.default_setlen,
-                    setang=layer_info.default_setang,
-                )
-            except (UploadValidationError, IsoDecodeError) as exc:
-                raise FingerprintImportError(f"{path.name}: {exc}") from exc
+            template_jobs.append((side, path, layer_info))
 
-            FingerprintFeatureLayer.objects.create(
-                pair_id=pair.id,
-                side=side,
-                layer_type=layer_info.layer_key,
-                algo_name=layer_info.default_algo_name,
+    def _save_one_template(job: tuple[str, Path, LayerTypeInfo]) -> dict:
+        side, path, layer_info = job
+        close_old_connections()
+        content = path.read_bytes()
+        try:
+            template_path, file_suffix, file_size = _save_template(
+                filename=path.name,
+                content=content,
+                layer_info=layer_info,
                 algo_version=algo_version,
-                template_path=template_path,
-                file_suffix=file_suffix,
-                file_hash=compute_hash(content),
-                file_size=file_size,
+            )
+            count, cache = _decode_and_cache(
+                content,
                 setlen=layer_info.default_setlen,
                 setang=layer_info.default_setang,
-                minutiae_count=count,
-                minutiae_json=cache,
-                create_time=now,
             )
-            layer_count += 1
+        except (UploadValidationError, IsoDecodeError) as exc:
+            raise FingerprintImportError(f"{path.name}: {exc}") from exc
+        finally:
+            close_old_connections()
+        return {
+            "side": side,
+            "layer_info": layer_info,
+            "template_path": template_path,
+            "file_suffix": file_suffix,
+            "file_size": file_size,
+            "content_hash": compute_hash(content),
+            "count": count,
+            "cache": cache,
+        }
+
+    layer_rows: list[dict] = []
+    if template_jobs:
+        if connection.vendor == "sqlite":
+            layer_rows = [_save_one_template(job) for job in template_jobs]
+        else:
+            with ThreadPoolExecutor(max_workers=min(4, len(template_jobs))) as pool:
+                futures = [pool.submit(_save_one_template, job) for job in template_jobs]
+                for fut in as_completed(futures):
+                    layer_rows.append(fut.result())
+
+    for row in layer_rows:
+        info: LayerTypeInfo = row["layer_info"]
+        FingerprintFeatureLayer.objects.create(
+            pair_id=pair.id,
+            side=row["side"],
+            layer_type=info.layer_key,
+            algo_name=info.default_algo_name,
+            algo_version=algo_version,
+            template_path=row["template_path"],
+            file_suffix=row["file_suffix"],
+            file_hash=row["content_hash"],
+            file_size=row["file_size"],
+            setlen=info.default_setlen,
+            setang=info.default_setang,
+            minutiae_count=row["count"],
+            minutiae_json=row["cache"],
+            create_time=now,
+        )
 
     return PairImportResult(
         pair_id=pair.id,
         batch_name=batch_name,
         finger_position=finger_position,
-        layer_count=layer_count,
+        layer_count=len(layer_rows),
     )
 
 
+def _dir_looks_like_pair(path: Path) -> bool:
+    """True when directory has exactly two fingerprint bmps (same finger position)."""
+    if not path.is_dir():
+        return False
+    bmps = [p for p in path.iterdir() if p.is_file() and normalize_suffix(p.suffix) == "bmp"]
+    if len(bmps) != 2:
+        return False
+    positions: set[str] = set()
+    for bmp in bmps:
+        try:
+            _person, position = parse_sample_stem(bmp.stem)
+        except FingerprintImportError:
+            return False
+        positions.add(position)
+    return len(positions) == 1
+
+
 def discover_pair_dirs(root: Path) -> list[Path]:
-    """Find batmatch pair directories under root (root itself or children)."""
+    """
+    Find batmatch pair directories under root.
+
+    Accepts:
+    - directories named like 101-1.111219
+    - any directory containing exactly two fingerprint-named bmps
+    Walks nested wrappers such as batmatch_out/batmatch_out/...
+    """
     if not root.exists():
         return []
-    if PAIR_DIR_RE.match(root.name) and root.is_dir():
-        return [root]
-    dirs = [p for p in sorted(root.iterdir()) if p.is_dir() and PAIR_DIR_RE.match(p.name)]
-    if dirs:
-        return dirs
-    # nested batmatch_out/batmatch_out/...
-    nested = []
-    for child in sorted(root.iterdir()):
-        if child.is_dir():
-            nested.extend(discover_pair_dirs(child))
-    return nested
+
+    found: list[Path] = []
+    seen: set[str] = set()
+    for dirpath, _dirnames, _filenames in os.walk(root):
+        path = Path(dirpath)
+        if not (_dir_looks_like_pair(path) or (PAIR_DIR_RE.match(path.name) and _dir_looks_like_pair(path))):
+            # still accept PAIR_DIR_RE even if bmp count temporarily odd? prefer strict
+            if not _dir_looks_like_pair(path):
+                continue
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(path)
+    return sorted(found, key=lambda p: p.name)
 
 
 def import_from_zip(
@@ -291,6 +358,7 @@ def import_from_zip(
     category_id: int | None = None,
     skip_existing: bool = True,
 ) -> list[PairImportResult]:
+    """Synchronous import (tests / small zips). Prefer background job for full packages."""
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="fp_import_") as tmp:

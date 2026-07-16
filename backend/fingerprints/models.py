@@ -80,3 +80,42 @@ class FingerprintFeatureLayer(models.Model):
 
     def __str__(self) -> str:
         return f"{self.pair_id}:{self.side}:{self.layer_type}@{self.algo_version}"
+
+
+class FingerprintImportJob(models.Model):
+    """Background zip import for batmatch-style fingerprint packages."""
+
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_CANCELLED = "cancelled"
+
+    zip_path = models.CharField(max_length=500, default="")
+    zip_name = models.CharField(max_length=255, default="")
+    status = models.CharField(max_length=20, default=STATUS_PENDING)
+    algo_version = models.CharField(max_length=64, default="1.0")
+    tags = models.CharField(max_length=500, default="")
+    skip_existing = models.SmallIntegerField(default=1)
+    category_id = models.PositiveIntegerField(null=True, blank=True)
+    total_estimate = models.PositiveIntegerField(default=0)
+    processed = models.PositiveIntegerField(default=0)
+    succeeded = models.PositiveIntegerField(default=0)
+    failed = models.PositiveIntegerField(default=0)
+    skipped = models.PositiveIntegerField(default=0)
+    cancel_requested = models.SmallIntegerField(default=0)
+    message = models.CharField(max_length=500, default="")
+    last_error = models.CharField(max_length=500, default="")
+    created_by = models.CharField(max_length=100, default="")
+    create_time = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = "fingerprint_import_job"
+        ordering = ["-id"]
+
+    def __str__(self) -> str:
+        return f"fp-import-{self.id}:{self.status}"
