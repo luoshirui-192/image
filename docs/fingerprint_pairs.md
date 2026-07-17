@@ -27,12 +27,32 @@ MinIO 下同样是相对路径对象键，前缀不变。
 
 按 `fingerprint_layer_type` 可为每种特征类型单独配置。
 
+## 成对筛选（已实现）
+
+列表/左侧树通过 `GET /api/fingerprints/pairs/` 查询，支持：
+
+| 参数 | 作用 |
+|------|------|
+| `finger_position` | 指位，如 `right_ring` |
+| `batch_name` | 批次目录名模糊匹配 |
+| `score_min` / `score_max` | 匹配分数区间 |
+| `layer_type` | 是否含某特征层（bidiso/neuiso/…） |
+| `algo_version` | 算法版本 |
+| `keyword` | 人名 ID / 文件名 / 批次 / 标签 |
+
+导入时已按 batmatch 目录解析成「一对」写入 `fingerprint_pair`，筛选作用在这对记录上，不是单张图。
+
+## 界面
+
+- 左侧：按指位分组的树 + 筛选条件
+- 右侧：选中后即时双栏对比（不跳转新页）
+- 每侧图片下方独立勾选 Bidiso / neuiso 等特征层
+
 ## 机器 A 上线
 
 1. 拉取本分支并重启 backend / web
-2. MySQL 会在启动时自动 `CREATE TABLE IF NOT EXISTS`（也可手动执行 `sql/fingerprint_pairs.sql`）
-3. 确保运行环境可写项目根下 `templates/`（或 MinIO 可写对应前缀）
-4. 浏览器打开「指纹对比」→ **导入整包 zip**（后台任务，带进度条；可并行多对上传）
+2. 表会自动创建，或执行 `sql/fingerprint_pairs.sql`
+3. 打开「指纹对比」→ 导入 zip → 左侧树点选配对即可对比
 
 环境变量 `FP_IMPORT_WORKERS`（默认 4）控制同时导入几对。
 
