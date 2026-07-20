@@ -46,7 +46,10 @@ MinIO 下同样是相对路径对象键，前缀不变。
 
 - 左侧：按指位分组的树 + 筛选条件
 - 右侧：选中后即时双栏对比（不跳转新页）
-- 每侧图片下方独立勾选 Bidiso / neuiso 等特征层
+- 每侧图片下方独立勾选特征层
+- 版本对比：**叠色**（同图多 version 不同色）或 **分列**（同图左右两列各一 version）
+- 导入 zip 时填写 `algo_version`；同一配对再导新版本会**合并特征层**（相同版本跳过）
+- 管理员「特征类型」可增删启用类型（扩到约 6 种只加配置）
 
 ## 机器 A 上线
 
@@ -59,10 +62,11 @@ MinIO 下同样是相对路径对象键，前缀不变。
 ## API 摘要
 
 - `GET /api/fingerprints/layer-types/` — 动态勾选配置
-- `POST /api/fingerprints/layer-types/` — 管理员新增特征类型（扩到 6 种无需改前端结构）
-- `POST /api/fingerprints/pairs/import-zip/` — 导入 zip
+- `POST /api/fingerprints/layer-types/` — 管理员新增特征类型
+- `PATCH /api/fingerprints/layer-types/{id}/` — 管理员更新（启用/颜色/解码参数等）
+- `POST /api/fingerprints/pairs/import-zip/` — 导入 zip（表单字段 `algo_version`；同配对新版本合并层）
 - `GET /api/fingerprints/pairs/` — 列表筛选
-- `GET /api/fingerprints/pairs/{id}/compare/?layers=bidiso,neuiso&versions=1.0` — 对比数据
+- `GET /api/fingerprints/pairs/{id}/compare/` — 对比数据（含 `available_algo_versions` / 各层 `color`）
 
 ## 扩展特征类型
 

@@ -296,42 +296,24 @@ class FingerprintAPITestCase(TestCase):
             self.assertEqual(layer["layer_type"], "bidiso")
             self.assertGreater(layer["minutiae"]["count"], 0)
 
-    def test_version_compare_colors(self):
+    def test_version_merge_and_colors(self):
         zip_bytes = make_pair_zip()
-        self._import_zip_async(zip_bytes, name="v1.zip", algo_version="1.0")
+        job1 = self._import_zip_async(zip_bytes, name="v1.zip", algo_version="1.0")
+        self.assertGreaterEqual(job1.succeeded, 1)
+
+        # Same package, new algo_version → merge layers onto existing pair
+        job2 = self._import_zip_async(zip_bytes, name="v2.zip", algo_version="2.0")
+        self.assertGreaterEqual(job2.succeeded, 1)
+
         listed = self.client.get("/api/fingerprints/pairs/")
+        self.assertEqual(listed.data["data"]["total"], 1)
         pair_id = listed.data["data"]["items"][0]["id"]
+        versions = listed.data["data"]["items"][0]["algo_versions"]
+        self.assertEqual(sorted(versions), ["1.0", "2.0"])
 
-        from fingerprints.models import FingerprintFeatureLayer
-        from fingerprints.services import _decode_and_cache, _save_template
-        from fingerprints.layer_config import get_layer_type
-        from utils.db_time import fetch_db_now
-
-        content = build_minimal_fmr([(11, 12, 13, 1)])
-        info = get_layer_type("bidiso")
-        path, suffix, size = _save_template(
-            filename="extra.bidiso",
-            content=content,
-            layer_info=info,
-            algo_version="2.0",
-        )
-        count, cache = _decode_and_cache(content, setlen=0, setang=256)
-        FingerprintFeatureLayer.objects.create(
-            pair_id=pair_id,
-            side="left",
-            layer_type="bidiso",
-            algo_name="bidiso",
-            algo_version="2.0",
-            template_path=path,
-            file_suffix=suffix,
-            file_hash="x",
-            file_size=size,
-            setlen=0,
-            setang=256,
-            minutiae_count=count,
-            minutiae_json=cache,
-            create_time=fetch_db_now(),
-        )
+        # Same version again → skipped
+        job3 = self._import_zip_async(zip_bytes, name="v1b.zip", algo_version="1.0")
+        self.assertGreaterEqual(job3.skipped, 1)
 
         compare = self.client.get(
             f"/api/fingerprints/pairs/{pair_id}/compare/",
@@ -340,8 +322,20 @@ class FingerprintAPITestCase(TestCase):
         colors = {
             (layer["side"], layer["algo_version"]): layer["color"]
             for layer in compare.data["data"]["layers"]
-            if layer["side"] == "left"
+            if layer["side"] == "left" and layer["layer_type"] == "bidiso"
         }
         self.assertIn(("left", "1.0"), colors)
         self.assertIn(("left", "2.0"), colors)
         self.assertNotEqual(colors[("left", "1.0")], colors[("left", "2.0")])
+
+    def test_layer_type_patch(self):
+        self.client.force_authenticate(user=self.admin)
+        listed = self.client.get("/api/fingerprints/layer-types/", {"enabled_only": "0"})
+        bidiso = next(i for i in listed.data["data"]["items"] if i["layer_key"] == "bidiso")
+        res = self.client.patch(
+            f"/api/fingerprints/layer-types/{bidiso['id']}/",
+            {"label": "BidisoV2", "color": "#ff0000"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["data"]["label"], "BidisoV2")

@@ -3,18 +3,23 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchImageBlob } from '@/api/images'
+import { useAuthStore } from '@/stores/auth'
 import {
   cancelFingerprintImportJobApi,
+  createFingerprintLayerTypeApi,
   deleteFingerprintPairApi,
   fetchFingerprintCompareApi,
   fetchFingerprintImportJobApi,
+  fetchFingerprintLayerTypesApi,
   fetchFingerprintMetaApi,
   fetchFingerprintPairsApi,
   importFingerprintZipApi,
+  updateFingerprintLayerTypeApi,
 } from '@/api/fingerprints'
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 
 const loading = ref(false)
 const compareLoading = ref(false)
@@ -24,7 +29,23 @@ const pollTimer = ref(null)
 const rows = ref([])
 const total = ref(0)
 const selectedPairId = ref(null)
-const treeRef = ref(null)
+
+const importDialogVisible = ref(false)
+const importFile = ref(null)
+const importVersion = ref('1.0')
+
+const typeDialogVisible = ref(false)
+const typeLoading = ref(false)
+const typeRows = ref([])
+const typeForm = reactive({
+  layer_key: '',
+  label: '',
+  color: '#43a047',
+  suffixes: '',
+  default_setlen: 0,
+  default_setang: 256,
+  sort_order: 100,
+})
 
 const meta = reactive({
   finger_positions: [],
@@ -45,6 +66,7 @@ const filters = reactive({
 const payload = ref(null)
 const showLabels = ref(true)
 const zoom = ref(1)
+const versionMode = ref('overlay') // overlay | split
 const leftTypes = ref([])
 const rightTypes = ref([])
 const selectedVersions = ref([])
@@ -54,6 +76,10 @@ const leftUrl = ref('')
 const rightUrl = ref('')
 const leftCanvas = ref(null)
 const rightCanvas = ref(null)
+const leftCanvasA = ref(null)
+const leftCanvasB = ref(null)
+const rightCanvasA = ref(null)
+const rightCanvasB = ref(null)
 const leftImg = ref(null)
 const rightImg = ref(null)
 
@@ -78,9 +104,14 @@ const checkboxOptions = computed(() => {
 
 const availableVersions = computed(() => payload.value?.available_algo_versions || [])
 
+/** In split mode use the first two checked versions (sorted). */
+const splitVersions = computed(() => {
+  const sorted = [...selectedVersions.value].sort()
+  return sorted.slice(0, 2)
+})
+
 const selectedPair = computed(() => rows.value.find((r) => r.id === selectedPairId.value) || null)
 
-/** Left tree: group pairs by finger_position (blob-browse style). */
 const treeData = computed(() => {
   const groups = new Map()
   for (const row of rows.value) {
@@ -106,7 +137,9 @@ const treeData = computed(() => {
 
 function formatPairLabel(row) {
   const score = row.match_score != null ? ` · ${row.match_score}` : ''
-  return `${row.batch_name || `#${row.id}`}${score}`
+  const vers = (row.algo_versions || []).join('/')
+  const verPart = vers ? ` [${vers}]` : ''
+  return `${row.batch_name || `#${row.id}`}${score}${verPart}`
 }
 
 async function loadMeta() {
@@ -119,10 +152,7 @@ async function loadMeta() {
 async function loadPairs() {
   loading.value = true
   try {
-    const params = {
-      page: 1,
-      page_size: 500,
-    }
+    const params = { page: 1, page_size: 500 }
     for (const key of ['keyword', 'finger_position', 'batch_name', 'layer_type', 'algo_version']) {
       if (filters[key]) params[key] = filters[key]
     }
@@ -131,7 +161,6 @@ async function loadPairs() {
     const res = await fetchFingerprintPairsApi(params)
     rows.value = res.data.items || []
     total.value = res.data.total || 0
-
     if (selectedPairId.value && !rows.value.some((r) => r.id === selectedPairId.value)) {
       selectedPairId.value = null
       clearCompare()
@@ -206,7 +235,6 @@ async function pollImportJob(jobId) {
   if (jobId == null) {
     stopPoll()
     importing.value = false
-    ElMessage.error('导入任务 ID 无效')
     return
   }
   try {
@@ -228,6 +256,7 @@ async function pollImportJob(jobId) {
       else ElMessage.warning(job.message || '已取消')
       await loadMeta()
       await loadPairs()
+      if (selectedPairId.value) await loadCompare(selectedPairId.value)
     }
   } catch (err) {
     stopPoll()
@@ -236,22 +265,43 @@ async function pollImportJob(jobId) {
   }
 }
 
-async function onZipChange(uploadFile) {
-  const file = uploadFile.raw
-  if (!file) return
+function openImportDialog() {
+  importFile.value = null
+  importVersion.value = '1.0'
+  importDialogVisible.value = true
+}
+
+function onImportFileChange(uploadFile) {
+  importFile.value = uploadFile.raw || null
+}
+
+async function submitImport() {
+  if (!importFile.value) {
+    ElMessage.warning('请选择 zip 文件')
+    return
+  }
+  const ver = (importVersion.value || '').trim()
+  if (!ver) {
+    ElMessage.warning('请填写算法版本')
+    return
+  }
   importing.value = true
   importJob.value = null
+  importDialogVisible.value = false
   stopPoll()
   try {
-    const res = await importFingerprintZipApi(file, { algo_version: '1.0', skip_existing: true })
+    const res = await importFingerprintZipApi(importFile.value, {
+      algo_version: ver,
+      skip_existing: true,
+    })
     const job = res?.data?.job
     if (!job?.id) {
       importing.value = false
-      ElMessage.error('未拿到导入任务，请确认后端已更新')
+      ElMessage.error('未拿到导入任务')
       return
     }
     importJob.value = job
-    ElMessage.success('导入任务已启动')
+    ElMessage.success(`已启动导入（版本 ${ver}）：已有配对会合并新版本特征层`)
     await pollImportJob(job.id)
     if (importing.value) {
       pollTimer.value = setInterval(() => pollImportJob(job.id), 1500)
@@ -272,6 +322,66 @@ async function onCancelImport() {
   }
 }
 
+async function openTypeDialog() {
+  typeDialogVisible.value = true
+  await loadTypeRows()
+}
+
+async function loadTypeRows() {
+  typeLoading.value = true
+  try {
+    const res = await fetchFingerprintLayerTypesApi({ enabled_only: '0' })
+    typeRows.value = res.data.items || []
+  } catch (err) {
+    ElMessage.error(err.message || '加载特征类型失败')
+  } finally {
+    typeLoading.value = false
+  }
+}
+
+async function submitNewType() {
+  if (!auth.isAdmin) {
+    ElMessage.error('仅管理员可新增')
+    return
+  }
+  const key = (typeForm.layer_key || '').trim().toLowerCase()
+  const suffixes = (typeForm.suffixes || key).trim().toLowerCase()
+  if (!key || !suffixes) {
+    ElMessage.warning('layer_key 与 suffixes 必填')
+    return
+  }
+  try {
+    await createFingerprintLayerTypeApi({
+      layer_key: key,
+      label: typeForm.label || key,
+      color: typeForm.color || '#888888',
+      suffixes,
+      default_setlen: Number(typeForm.default_setlen) || 0,
+      default_setang: Number(typeForm.default_setang) || 256,
+      sort_order: Number(typeForm.sort_order) || 100,
+    })
+    ElMessage.success('已新增特征类型')
+    typeForm.layer_key = ''
+    typeForm.label = ''
+    typeForm.suffixes = ''
+    await loadTypeRows()
+    await loadMeta()
+  } catch (err) {
+    ElMessage.error(err.message || '新增失败')
+  }
+}
+
+async function toggleTypeEnabled(row) {
+  if (!auth.isAdmin) return
+  try {
+    await updateFingerprintLayerTypeApi(row.id, { enabled: !row.enabled })
+    await loadTypeRows()
+    await loadMeta()
+  } catch (err) {
+    ElMessage.error(err.message || '更新失败')
+  }
+}
+
 function revokeUrls() {
   if (leftUrl.value) URL.revokeObjectURL(leftUrl.value)
   if (rightUrl.value) URL.revokeObjectURL(rightUrl.value)
@@ -289,6 +399,9 @@ async function loadCompare(pairId) {
     leftTypes.value = [...(res.data.available_layer_types || [])]
     rightTypes.value = [...(res.data.available_layer_types || [])]
     selectedVersions.value = [...(res.data.available_algo_versions || [])]
+    if (selectedVersions.value.length >= 2) {
+      versionMode.value = versionMode.value || 'overlay'
+    }
     layersReady.value = true
 
     revokeUrls()
@@ -321,19 +434,22 @@ function loadImage(url) {
   })
 }
 
-function layerVisible(layer, side) {
+function layerVisible(layer, side, versionFilter) {
   const types = side === 'left' ? leftTypes.value : rightTypes.value
   if (!types.includes(layer.layer_type)) return false
+  if (versionFilter != null) {
+    return layer.algo_version === versionFilter
+  }
   if (selectedVersions.value.length && !selectedVersions.value.includes(layer.algo_version)) {
     return false
   }
   return true
 }
 
-function drawSide(canvasEl, imgEl, side) {
+function drawSide(canvasEl, imgEl, side, versionFilter = null) {
   if (!canvasEl || !imgEl || !payload.value) return
   const layers = (payload.value.layers || []).filter(
-    (l) => l.side === side && layerVisible(l, side),
+    (l) => l.side === side && layerVisible(l, side, versionFilter),
   )
   const width = imgEl.naturalWidth || imgEl.width
   const height = imgEl.naturalHeight || imgEl.height
@@ -376,16 +492,27 @@ async function drawBoth() {
   if (!leftUrl.value || !rightUrl.value) return
   leftImg.value = await loadImage(leftUrl.value)
   rightImg.value = await loadImage(rightUrl.value)
+  await nextTick()
   redrawBoth()
 }
 
 function redrawBoth() {
-  if (leftImg.value) drawSide(leftCanvas.value, leftImg.value, 'left')
-  if (rightImg.value) drawSide(rightCanvas.value, rightImg.value, 'right')
+  if (!leftImg.value || !rightImg.value) return
+  if (versionMode.value === 'split' && splitVersions.value.length >= 2) {
+    const [va, vb] = splitVersions.value
+    drawSide(leftCanvasA.value, leftImg.value, 'left', va)
+    drawSide(leftCanvasB.value, leftImg.value, 'left', vb)
+    drawSide(rightCanvasA.value, rightImg.value, 'right', va)
+    drawSide(rightCanvasB.value, rightImg.value, 'right', vb)
+  } else {
+    drawSide(leftCanvas.value, leftImg.value, 'left', null)
+    drawSide(rightCanvas.value, rightImg.value, 'right', null)
+  }
 }
 
-watch([leftTypes, rightTypes, selectedVersions, showLabels, zoom], () => {
+watch([leftTypes, rightTypes, selectedVersions, showLabels, zoom, versionMode], async () => {
   if (!layersReady.value) return
+  await nextTick()
   redrawBoth()
 })
 
@@ -410,18 +537,11 @@ onBeforeUnmount(() => {
     <div class="fp-toolbar">
       <div class="fp-title">
         <h2>指纹成对对比</h2>
-        <p>左侧筛选/选择配对，右侧即时对比（无需跳转）</p>
+        <p>左树选配对 · 右栏对比 · 支持多特征类型与多算法版本</p>
       </div>
       <div class="import-actions">
-        <el-upload
-          :show-file-list="false"
-          accept=".zip"
-          :disabled="importing"
-          :auto-upload="false"
-          :on-change="onZipChange"
-        >
-          <el-button type="primary" :loading="importing">导入整包 zip</el-button>
-        </el-upload>
+        <el-button v-if="auth.isAdmin" @click="openTypeDialog">特征类型</el-button>
+        <el-button type="primary" :loading="importing" @click="openImportDialog">导入 zip</el-button>
         <el-button v-if="importing && importJob" @click="onCancelImport">取消导入</el-button>
       </div>
     </div>
@@ -449,65 +569,30 @@ onBeforeUnmount(() => {
           <strong>配对目录</strong>
           <span class="muted">共 {{ total }} 对</span>
         </div>
-
         <div class="filter-box">
-          <el-input
-            v-model="filters.keyword"
-            clearable
-            size="small"
-            placeholder="关键词"
-            @keyup.enter="onSearch"
-          />
-          <el-select
-            v-model="filters.finger_position"
-            clearable
-            size="small"
-            placeholder="指位"
-            style="width: 100%"
-          >
+          <el-input v-model="filters.keyword" clearable size="small" placeholder="关键词" @keyup.enter="onSearch" />
+          <el-select v-model="filters.finger_position" clearable size="small" placeholder="指位" style="width: 100%">
             <el-option v-for="p in meta.finger_positions" :key="p" :label="p" :value="p" />
           </el-select>
-          <el-select
-            v-model="filters.layer_type"
-            clearable
-            size="small"
-            placeholder="特征层"
-            style="width: 100%"
-          >
-            <el-option
-              v-for="t in meta.layer_types"
-              :key="t.layer_key"
-              :label="t.label"
-              :value="t.layer_key"
-            />
+          <el-select v-model="filters.layer_type" clearable size="small" placeholder="特征层" style="width: 100%">
+            <el-option v-for="t in meta.layer_types" :key="t.layer_key" :label="t.label" :value="t.layer_key" />
+          </el-select>
+          <el-select v-model="filters.algo_version" clearable size="small" placeholder="算法版本" style="width: 100%">
+            <el-option v-for="v in meta.algo_versions" :key="v" :label="v" :value="v" />
           </el-select>
           <div class="score-row">
-            <el-input-number
-              v-model="filters.score_min"
-              :controls="false"
-              size="small"
-              placeholder="分min"
-              style="width: 100%"
-            />
+            <el-input-number v-model="filters.score_min" :controls="false" size="small" placeholder="分min" style="width: 100%" />
             <span>~</span>
-            <el-input-number
-              v-model="filters.score_max"
-              :controls="false"
-              size="small"
-              placeholder="分max"
-              style="width: 100%"
-            />
+            <el-input-number v-model="filters.score_max" :controls="false" size="small" placeholder="分max" style="width: 100%" />
           </div>
           <div class="filter-actions">
             <el-button type="primary" size="small" @click="onSearch">筛选</el-button>
             <el-button size="small" @click="onReset">重置</el-button>
           </div>
         </div>
-
         <div class="tree-wrap">
           <el-tree
             v-if="treeData.length"
-            ref="treeRef"
             :data="treeData"
             node-key="id"
             default-expand-all
@@ -517,12 +602,12 @@ onBeforeUnmount(() => {
           />
           <el-empty v-else description="暂无配对，请先导入 zip" :image-size="64" />
         </div>
-
         <div v-if="selectedPair" class="selection-foot">
           <div class="sel-title">{{ selectedPair.batch_name }}</div>
           <div class="sel-meta">
             {{ selectedPair.finger_position }}
             <template v-if="selectedPair.match_score != null"> · score {{ selectedPair.match_score }}</template>
+            <template v-if="selectedPair.algo_versions?.length"> · ver {{ selectedPair.algo_versions.join(', ') }}</template>
           </div>
           <el-button size="small" type="danger" plain @click="onDeleteSelected">删除此配对</el-button>
         </div>
@@ -536,26 +621,44 @@ onBeforeUnmount(() => {
               <template v-if="payload.pair.match_score != null"> · score {{ payload.pair.match_score }}</template>
             </div>
             <div class="controls">
+              <span class="label">版本对比</span>
+              <el-radio-group v-model="versionMode" size="small">
+                <el-radio-button value="overlay">叠色</el-radio-button>
+                <el-radio-button value="split" :disabled="availableVersions.length < 2">分列</el-radio-button>
+              </el-radio-group>
               <span class="label">版本</span>
               <el-checkbox-group v-model="selectedVersions">
-                <el-checkbox
-                  v-for="v in availableVersions"
-                  :key="v"
-                  :label="v"
-                  :value="v"
-                >{{ v }}</el-checkbox>
+                <el-checkbox v-for="v in availableVersions" :key="v" :label="v" :value="v">{{ v }}</el-checkbox>
               </el-checkbox-group>
               <el-checkbox v-model="showLabels">编号</el-checkbox>
               <span class="label">缩放</span>
               <el-slider v-model="zoom" :min="0.5" :max="3" :step="0.1" style="width: 120px" />
             </div>
+            <div v-if="versionMode === 'split'" class="hint">
+              分列模式使用已勾选版本中的前两个：{{ splitVersions.join(' | ') || '请至少勾选两个版本' }}
+            </div>
           </div>
 
           <div class="compare-grid">
+            <!-- LEFT sample -->
             <div class="pane">
               <div class="pane-title">{{ payload.left.image_name }}</div>
-              <div class="canvas-wrap">
+              <div v-if="versionMode === 'overlay'" class="canvas-wrap">
                 <canvas ref="leftCanvas" />
+              </div>
+              <div v-else class="split-wrap">
+                <div class="split-col">
+                  <div class="split-label">ver {{ splitVersions[0] || '-' }}</div>
+                  <div class="canvas-wrap">
+                    <canvas ref="leftCanvasA" />
+                  </div>
+                </div>
+                <div class="split-col">
+                  <div class="split-label">ver {{ splitVersions[1] || '-' }}</div>
+                  <div class="canvas-wrap">
+                    <canvas ref="leftCanvasB" />
+                  </div>
+                </div>
               </div>
               <div class="pane-layers">
                 <span class="label">本侧特征层</span>
@@ -573,10 +676,25 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
+            <!-- RIGHT sample -->
             <div class="pane">
               <div class="pane-title">{{ payload.right.image_name }}</div>
-              <div class="canvas-wrap">
+              <div v-if="versionMode === 'overlay'" class="canvas-wrap">
                 <canvas ref="rightCanvas" />
+              </div>
+              <div v-else class="split-wrap">
+                <div class="split-col">
+                  <div class="split-label">ver {{ splitVersions[0] || '-' }}</div>
+                  <div class="canvas-wrap">
+                    <canvas ref="rightCanvasA" />
+                  </div>
+                </div>
+                <div class="split-col">
+                  <div class="split-label">ver {{ splitVersions[1] || '-' }}</div>
+                  <div class="canvas-wrap">
+                    <canvas ref="rightCanvasB" />
+                  </div>
+                </div>
               </div>
               <div class="pane-layers">
                 <span class="label">本侧特征层</span>
@@ -598,6 +716,79 @@ onBeforeUnmount(() => {
         <el-empty v-else description="请在左侧树中选择一对指纹" />
       </main>
     </div>
+
+    <!-- Import dialog -->
+    <el-dialog v-model="importDialogVisible" title="导入 batmatch zip" width="480px">
+      <p class="dialog-tip">
+        同一配对再次导入时，若填写<strong>新的算法版本</strong>，会把该版本特征层合并进已有配对，用于版本对比；
+        相同版本已存在的层会跳过。
+      </p>
+      <el-form label-width="100px">
+        <el-form-item label="算法版本" required>
+          <el-input v-model="importVersion" placeholder="例如 1.0 / 2.0 / bidiso-2024" />
+        </el-form-item>
+        <el-form-item label="zip 文件" required>
+          <el-upload :auto-upload="false" :show-file-list="true" :limit="1" accept=".zip" :on-change="onImportFileChange">
+            <el-button>选择文件</el-button>
+          </el-upload>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="importDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitImport">开始导入</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Layer type management -->
+    <el-dialog v-model="typeDialogVisible" title="特征类型配置" width="720px" @opened="loadTypeRows">
+      <p class="dialog-tip">新增类型后，导入带对应后缀的模板即可在勾选框中出现（扩到约 6 种无需改页面结构）。</p>
+      <el-table v-loading="typeLoading" :data="typeRows" size="small" border>
+        <el-table-column prop="layer_key" label="key" width="110" />
+        <el-table-column prop="label" label="显示名" width="110" />
+        <el-table-column prop="suffixes" label="后缀" min-width="120" />
+        <el-table-column label="颜色" width="80">
+          <template #default="{ row }">
+            <span class="swatch" :style="{ background: row.color }" /> {{ row.color }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="default_setlen" label="setlen" width="70" />
+        <el-table-column prop="default_setang" label="setang" width="70" />
+        <el-table-column label="启用" width="90">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="!!row.enabled"
+              :disabled="!auth.isAdmin"
+              @change="toggleTypeEnabled(row)"
+            />
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-divider v-if="auth.isAdmin">新增类型</el-divider>
+      <el-form v-if="auth.isAdmin" :inline="true" size="small">
+        <el-form-item label="key">
+          <el-input v-model="typeForm.layer_key" style="width: 100px" placeholder="customiso" />
+        </el-form-item>
+        <el-form-item label="名称">
+          <el-input v-model="typeForm.label" style="width: 100px" />
+        </el-form-item>
+        <el-form-item label="后缀">
+          <el-input v-model="typeForm.suffixes" style="width: 100px" placeholder="customiso" />
+        </el-form-item>
+        <el-form-item label="颜色">
+          <el-color-picker v-model="typeForm.color" />
+        </el-form-item>
+        <el-form-item label="setlen">
+          <el-input-number v-model="typeForm.default_setlen" :controls="false" style="width: 70px" />
+        </el-form-item>
+        <el-form-item label="setang">
+          <el-input-number v-model="typeForm.default_setang" :controls="false" style="width: 70px" />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="submitNewType">添加</el-button>
+        </el-form-item>
+      </el-form>
+    </el-dialog>
   </div>
 </template>
 
@@ -630,9 +821,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
 }
-.import-progress {
-  flex-shrink: 0;
-}
+.import-progress { flex-shrink: 0; }
 .import-progress-head {
   display: flex;
   justify-content: space-between;
@@ -645,7 +834,6 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-secondary);
   font-size: 12px;
 }
-
 .layout {
   display: grid;
   grid-template-columns: 300px 1fr;
@@ -670,10 +858,7 @@ onBeforeUnmount(() => {
   padding: 10px 12px;
   border-bottom: 1px solid var(--el-border-color-lighter);
 }
-.muted {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-}
+.muted { color: var(--el-text-color-secondary); font-size: 12px; }
 .filter-box {
   display: flex;
   flex-direction: column;
@@ -687,15 +872,8 @@ onBeforeUnmount(() => {
   gap: 6px;
   align-items: center;
 }
-.filter-actions {
-  display: flex;
-  gap: 8px;
-}
-.tree-wrap {
-  flex: 1;
-  overflow: auto;
-  padding: 8px 4px;
-}
+.filter-actions { display: flex; gap: 8px; }
+.tree-wrap { flex: 1; overflow: auto; padding: 8px 4px; }
 .selection-foot {
   padding: 10px 12px;
   border-top: 1px solid var(--el-border-color-lighter);
@@ -703,19 +881,8 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 6px;
 }
-.sel-title {
-  font-size: 13px;
-  font-weight: 600;
-  word-break: break-all;
-}
-.sel-meta {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-
-.compare-panel {
-  padding: 0;
-}
+.sel-title { font-size: 13px; font-weight: 600; word-break: break-all; }
+.sel-meta { font-size: 12px; color: var(--el-text-color-secondary); }
 .compare-toolbar {
   padding: 10px 12px;
   border-bottom: 1px solid var(--el-border-color-lighter);
@@ -724,24 +891,18 @@ onBeforeUnmount(() => {
   gap: 8px;
   flex-shrink: 0;
 }
-.meta {
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-}
+.meta { font-size: 13px; }
 .controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px 14px;
 }
-.label {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-}
+.hint { font-size: 12px; color: var(--el-text-color-secondary); }
+.label { color: var(--el-text-color-secondary); font-size: 12px; }
 .compare-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0;
   flex: 1;
   min-height: 0;
 }
@@ -752,9 +913,7 @@ onBeforeUnmount(() => {
   border-right: 1px solid var(--el-border-color-lighter);
   background: #f7f7f7;
 }
-.pane:last-child {
-  border-right: none;
-}
+.pane:last-child { border-right: none; }
 .pane-title {
   padding: 8px 12px;
   font-size: 12px;
@@ -769,6 +928,27 @@ onBeforeUnmount(() => {
   padding: 8px;
   text-align: center;
   min-height: 0;
+}
+.split-wrap {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 0;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.split-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px dashed var(--el-border-color-lighter);
+}
+.split-col:last-child { border-right: none; }
+.split-label {
+  padding: 4px 8px;
+  font-size: 11px;
+  background: #fff;
+  border-bottom: 1px solid var(--el-border-color-extra-light);
+  color: var(--el-text-color-secondary);
 }
 .pane-layers {
   flex-shrink: 0;
@@ -785,6 +965,13 @@ onBeforeUnmount(() => {
   height: 10px;
   border-radius: 2px;
   margin-right: 4px;
+  vertical-align: middle;
+}
+.dialog-tip {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.5;
 }
 canvas {
   max-width: none;
@@ -792,15 +979,7 @@ canvas {
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06);
 }
 @media (max-width: 960px) {
-  .layout {
-    grid-template-columns: 1fr;
-  }
-  .compare-grid {
-    grid-template-columns: 1fr;
-  }
-  .pane {
-    border-right: none;
-    border-bottom: 1px solid var(--el-border-color-lighter);
-  }
+  .layout { grid-template-columns: 1fr; }
+  .compare-grid { grid-template-columns: 1fr; }
 }
 </style>

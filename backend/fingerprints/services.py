@@ -59,6 +59,8 @@ class PairImportResult:
     layer_count: int
     skipped: bool = False
     message: str = ""
+    layers_added: int = 0
+    pair_created: bool = False
 
 
 def compute_hash(content: bytes) -> str:
@@ -132,10 +134,20 @@ def import_pair_directory(
     category_id: int | None = None,
     skip_existing: bool = True,
 ) -> PairImportResult:
-    """Import one batmatch_out-style pair folder."""
+    """
+    Import one batmatch_out-style pair folder.
+
+    Pair identity: batch_name + finger_position + left/right person_id.
+    Layer identity: pair + side + layer_type + algo_name + algo_version.
+
+    Re-importing the same zip with a *new* algo_version merges new feature layers
+    onto the existing pair (version compare). Same version layers are skipped when
+    skip_existing=True.
+    """
     if not pair_dir.is_dir():
         raise FingerprintImportError(f"不是目录: {pair_dir}")
 
+    algo_version = (algo_version or "1.0").strip() or "1.0"
     batch_name, match_score = parse_pair_dirname(pair_dir.name)
     groups = _group_pair_files(pair_dir)
     bmp_stems = [stem for stem, files in groups.items() if "bmp" in files]
@@ -154,77 +166,73 @@ def import_pair_directory(
         raise FingerprintImportError(f"{pair_dir.name}: 两侧指位不一致: {positions}")
     finger_position = next(iter(positions))
 
-    if skip_existing:
-        existing = FingerprintPair.objects.filter(
-            is_delete=0,
-            batch_name=batch_name,
-            finger_position=finger_position,
-            left_person_id=samples[0][0],
-            right_person_id=samples[1][0],
-        ).first()
-        if existing:
-            return PairImportResult(
-                pair_id=existing.id,
-                batch_name=batch_name,
-                finger_position=finger_position,
-                layer_count=FingerprintFeatureLayer.objects.filter(pair_id=existing.id).count(),
-                skipped=True,
-                message="already imported",
-            )
-
     now = fetch_db_now()
-
-    def _save_one_bmp(item: tuple[str, str, dict[str, Path]]) -> tuple[str, ImageInfo]:
-        person_id, _stem, files = item
-        close_old_connections()
-        bmp_path = files["bmp"]
-        content = bmp_path.read_bytes()
-        try:
-            image = save_image_bytes(
-                filename=bmp_path.name,
-                content=content,
-                upload_user=upload_user,
-                category_id=category_id,
-                tags=tags or "fingerprint",
-            )
-        except DuplicateImageError as exc:
-            image = exc.existing
-        finally:
-            close_old_connections()
-        return person_id, image
-
-    # Upload left/right bmps in parallel on MySQL/MinIO; sqlite tests stay serial.
-    from django.db import connection as db_connection
-
-    if db_connection.vendor == "sqlite":
-        bmp_results = [_save_one_bmp(item) for item in samples]
-    else:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            bmp_results = list(pool.map(_save_one_bmp, samples))
-
-    image_ids = [img.id for _pid, img in bmp_results]
-    image_names = [img.image_name for _pid, img in bmp_results]
-    person_ids = [pid for pid, _img in bmp_results]
-
-    pair = FingerprintPair.objects.create(
+    pair = FingerprintPair.objects.filter(
+        is_delete=0,
         batch_name=batch_name,
         finger_position=finger_position,
-        match_score=match_score,
-        left_image_id=image_ids[0],
-        right_image_id=image_ids[1],
-        left_person_id=person_ids[0],
-        right_person_id=person_ids[1],
-        left_image_name=image_names[0],
-        right_image_name=image_names[1],
-        source_dir=str(pair_dir.name),
-        upload_user=upload_user,
-        tags=(tags or "").strip()[:500],
-        is_delete=0,
-        create_time=now,
-        update_time=now,
-    )
+        left_person_id=samples[0][0],
+        right_person_id=samples[1][0],
+    ).first()
+    pair_created = False
+
+    if pair is None:
+        def _save_one_bmp(item: tuple[str, str, dict[str, Path]]) -> tuple[str, ImageInfo]:
+            person_id, _stem, files = item
+            close_old_connections()
+            bmp_path = files["bmp"]
+            content = bmp_path.read_bytes()
+            try:
+                image = save_image_bytes(
+                    filename=bmp_path.name,
+                    content=content,
+                    upload_user=upload_user,
+                    category_id=category_id,
+                    tags=tags or "fingerprint",
+                )
+            except DuplicateImageError as exc:
+                image = exc.existing
+            finally:
+                close_old_connections()
+            return person_id, image
+
+        from django.db import connection as db_connection
+
+        if db_connection.vendor == "sqlite":
+            bmp_results = [_save_one_bmp(item) for item in samples]
+        else:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                bmp_results = list(pool.map(_save_one_bmp, samples))
+
+        image_ids = [img.id for _pid, img in bmp_results]
+        image_names = [img.image_name for _pid, img in bmp_results]
+        person_ids = [pid for pid, _img in bmp_results]
+
+        pair = FingerprintPair.objects.create(
+            batch_name=batch_name,
+            finger_position=finger_position,
+            match_score=match_score,
+            left_image_id=image_ids[0],
+            right_image_id=image_ids[1],
+            left_person_id=person_ids[0],
+            right_person_id=person_ids[1],
+            left_image_name=image_names[0],
+            right_image_name=image_names[1],
+            source_dir=str(pair_dir.name),
+            upload_user=upload_user,
+            tags=(tags or "").strip()[:500],
+            is_delete=0,
+            create_time=now,
+            update_time=now,
+        )
+        pair_created = True
+    elif match_score is not None and pair.match_score != match_score:
+        pair.match_score = match_score
+        pair.update_time = now
+        pair.save(update_fields=["match_score", "update_time"])
 
     template_jobs: list[tuple[str, Path, LayerTypeInfo]] = []
+    unknown_suffixes: list[str] = []
     sides = ("left", "right")
     for side, (_person, _stem, files) in zip(sides, samples):
         for suffix, path in files.items():
@@ -232,7 +240,16 @@ def import_pair_directory(
                 continue
             layer_info = resolve_layer_type_by_suffix(suffix)
             if layer_info is None:
+                unknown_suffixes.append(suffix)
                 logger.warning("skip unknown template suffix=%s file=%s", suffix, path.name)
+                continue
+            if skip_existing and FingerprintFeatureLayer.objects.filter(
+                pair_id=pair.id,
+                side=side,
+                layer_type=layer_info.layer_key,
+                algo_name=layer_info.default_algo_name,
+                algo_version=algo_version,
+            ).exists():
                 continue
             template_jobs.append((side, path, layer_info))
 
@@ -296,11 +313,35 @@ def import_pair_directory(
             create_time=now,
         )
 
+    total_layers = FingerprintFeatureLayer.objects.filter(pair_id=pair.id).count()
+    layers_added = len(layer_rows)
+    if layers_added == 0 and not pair_created:
+        msg = f"already has version {algo_version}"
+        if unknown_suffixes:
+            msg += f"; unknown suffixes: {', '.join(sorted(set(unknown_suffixes)))}"
+        return PairImportResult(
+            pair_id=pair.id,
+            batch_name=batch_name,
+            finger_position=finger_position,
+            layer_count=total_layers,
+            skipped=True,
+            message=msg,
+            layers_added=0,
+            pair_created=False,
+        )
+
+    msg = "created pair" if pair_created else f"merged version {algo_version}"
+    if unknown_suffixes:
+        msg += f"; skipped unknown suffixes: {', '.join(sorted(set(unknown_suffixes)))}"
     return PairImportResult(
         pair_id=pair.id,
         batch_name=batch_name,
         finger_position=finger_position,
-        layer_count=len(layer_rows),
+        layer_count=total_layers,
+        skipped=False,
+        message=msg,
+        layers_added=layers_added,
+        pair_created=pair_created,
     )
 
 

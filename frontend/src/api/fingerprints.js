@@ -12,6 +12,10 @@ export function createFingerprintLayerTypeApi(data) {
   return request.post('/fingerprints/layer-types/', data)
 }
 
+export function updateFingerprintLayerTypeApi(id, data) {
+  return request.patch(`/fingerprints/layer-types/${id}/`, data)
+}
+
 export function fetchFingerprintPairsApi(params = {}) {
   return request.get('/fingerprints/pairs/', { params })
 }
@@ -28,7 +32,10 @@ export function fetchFingerprintCompareApi(id, params = {}) {
   return request.get(`/fingerprints/pairs/${id}/compare/`, { params })
 }
 
-export function importFingerprintZipApi(file, { tags, algo_version, skip_existing, category_id, onUploadProgress } = {}) {
+export function importFingerprintZipApi(
+  file,
+  { tags, algo_version, skip_existing, category_id, onUploadProgress } = {},
+) {
   const form = new FormData()
   form.append('file', file)
   if (tags) form.append('tags', tags)
@@ -53,7 +60,10 @@ export function cancelFingerprintImportJobApi(id) {
   return request.post(`/fingerprints/import-jobs/${id}/`, { action: 'cancel' })
 }
 
-export function importFingerprintFilesApi(files, { batch_name, match_score, tags, algo_version, category_id } = {}) {
+export function importFingerprintFilesApi(
+  files,
+  { batch_name, match_score, tags, algo_version, category_id } = {},
+) {
   const form = new FormData()
   files.forEach((f) => form.append('files', f))
   if (batch_name) form.append('batch_name', batch_name)

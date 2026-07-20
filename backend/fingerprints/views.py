@@ -80,6 +80,51 @@ class FingerprintLayerTypeListCreateView(APIView):
         return success_response(info.to_dict() if info else {"layer_key": layer_key}, message="created", status=201)
 
 
+class FingerprintLayerTypeDetailView(APIView):
+    """PATCH /api/fingerprints/layer-types/{id}/ — update type (admin)."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def patch(self, request, pk: int):
+        if getattr(request.user, "role", "") != "admin":
+            return error_response("仅管理员可修改特征类型", code=4031, status=403)
+
+        row = FingerprintLayerType.objects.filter(id=pk).first()
+        if not row:
+            return error_response("特征类型不存在", code=4041, status=404)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        if "label" in data:
+            row.label = str(data.get("label") or row.layer_key)[:100]
+        if "color" in data:
+            row.color = str(data.get("color") or "#888888")[:20]
+        if "suffixes" in data:
+            suffixes = data.get("suffixes")
+            if isinstance(suffixes, list):
+                suffixes = ",".join(str(s).strip().lower() for s in suffixes if str(s).strip())
+            else:
+                suffixes = str(suffixes or "").strip().lower()
+            if not suffixes:
+                return error_response("suffixes 不能为空", code=4001, status=400)
+            row.suffixes = suffixes[:200]
+        if "default_algo_name" in data:
+            row.default_algo_name = str(data.get("default_algo_name") or row.layer_key)[:100]
+        if "default_setlen" in data:
+            row.default_setlen = int(data.get("default_setlen"))
+        if "default_setang" in data:
+            row.default_setang = int(data.get("default_setang"))
+        if "sort_order" in data:
+            row.sort_order = int(data.get("sort_order"))
+        if "enabled" in data:
+            row.enabled = 1 if data.get("enabled") else 0
+        row.save()
+
+        from fingerprints.layer_config import get_layer_type
+
+        info = get_layer_type(row.layer_key)
+        return success_response(info.to_dict() if info else {"id": row.id})
+
+
 class FingerprintPairListView(APIView):
     """GET /api/fingerprints/pairs/"""
 
