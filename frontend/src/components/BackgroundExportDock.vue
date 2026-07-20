@@ -1,20 +1,12 @@
 <script setup>
-import { onMounted, onUnmounted } from 'vue'
+/**
+ * Inline panel for path/simulated export jobs — used on 迁移任务台 (not a floating overlay).
+ */
 import { useRouter } from 'vue-router'
 import { useBackgroundExportStore } from '@/stores/backgroundExport'
 
 const store = useBackgroundExportStore()
 const router = useRouter()
-
-onMounted(() => {
-  void store.restoreFromSession()
-})
-
-onUnmounted(() => {
-  // Keep global polling alive across layout remounts only if still active —
-  // layout rarely unmounts; stop only when no active jobs.
-  if (!store.activeJobs.length) store.stopPolling()
-})
 
 function statusLabel(status) {
   const map = {
@@ -45,9 +37,9 @@ async function openResult(job) {
 </script>
 
 <template>
-  <div v-if="store.hasVisible" class="bg-export-dock">
-    <div class="dock-head">
-      <strong>后台导出</strong>
+  <div class="export-panel">
+    <div class="export-panel-head">
+      <h3>路径导出任务</h3>
       <el-button
         v-if="store.visibleJobs.some((j) => !['pending', 'running'].includes(j.status))"
         link
@@ -58,9 +50,19 @@ async function openResult(job) {
         清除已完成
       </el-button>
     </div>
-    <div v-for="job in store.visibleJobs" :key="job.id" class="dock-item">
-      <div class="dock-item-top">
-        <span class="dock-title">
+    <p class="field-hint">
+      从「数据库模拟」发起的路径导出在此查看进度；离开本页不挡视野，任务仍在后台跑。
+    </p>
+
+    <el-empty
+      v-if="!store.hasVisible"
+      description="暂无路径导出任务"
+      :image-size="64"
+    />
+
+    <div v-for="job in store.visibleJobs" :key="job.id" class="export-item">
+      <div class="export-item-top">
+        <span class="export-title">
           #{{ job.id }}
           {{ job.target_database || '' }}.{{ job.target_table || '表' }}
         </span>
@@ -70,10 +72,10 @@ async function openResult(job) {
         v-if="['pending', 'running'].includes(job.status)"
         :percentage="Number(job.percent || 0)"
         :indeterminate="!(job.percent > 0)"
-        :stroke-width="8"
+        :stroke-width="10"
         :duration="3"
       />
-      <div class="dock-meta">
+      <div class="export-meta">
         <template v-if="['pending', 'running'].includes(job.status)">
           {{ job.message || '导出中…' }}
           · {{ job.rows_written || 0 }}
@@ -84,7 +86,7 @@ async function openResult(job) {
           {{ job.message || statusLabel(job.status) }}
         </template>
       </div>
-      <div class="dock-actions">
+      <div class="export-actions">
         <el-button
           v-if="['pending', 'running'].includes(job.status)"
           size="small"
@@ -114,54 +116,50 @@ async function openResult(job) {
 </template>
 
 <style scoped>
-.bg-export-dock {
-  position: fixed;
-  right: 20px;
-  bottom: 48px;
-  z-index: 3000;
-  width: min(360px, calc(100vw - 32px));
-  max-height: min(50vh, 420px);
-  overflow: auto;
-  background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color);
-  border-radius: 10px;
-  box-shadow: 0 8px 28px rgb(0 0 0 / 14%);
-  padding: 10px 12px;
-}
-.dock-head {
+.export-panel-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 8px;
-  font-size: 13px;
 }
-.dock-item {
-  padding: 8px 0;
-  border-top: 1px solid var(--el-border-color-extra-light);
+.export-panel-head h3 {
+  margin: 0;
+  font-size: 16px;
 }
-.dock-item:first-of-type {
-  border-top: none;
+.field-hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.5;
 }
-.dock-item-top {
+.export-item {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-blank);
+}
+.export-item-top {
   display: flex;
   justify-content: space-between;
   gap: 8px;
   align-items: center;
   margin-bottom: 6px;
 }
-.dock-title {
-  font-size: 12px;
+.export-title {
+  font-size: 13px;
   font-weight: 600;
   word-break: break-all;
 }
-.dock-meta {
+.export-meta {
   margin-top: 4px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
   line-height: 1.4;
 }
-.dock-actions {
-  margin-top: 6px;
+.export-actions {
+  margin-top: 8px;
   display: flex;
   gap: 6px;
   flex-wrap: wrap;

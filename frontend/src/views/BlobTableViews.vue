@@ -984,9 +984,24 @@ async function submitExportToConnection() {
     if (!job?.id) {
       throw new Error('未拿到导出任务')
     }
-    // Hand off to global dock — close dialog so user can leave and do other work.
-    bgExport.trackJob(job)
+    // Track in store (progress on 迁移任务台); close dialog so user can keep working.
+    bgExport.trackJob(job, { notify: false })
     exportDialogVisible.value = false
+    ElMessage.success(`导出已在后台运行（任务 #${job.id}）`)
+    try {
+      await ElMessageBox.confirm(
+        '是否打开「迁移任务台」查看路径导出进度？',
+        '导出已启动',
+        {
+          type: 'success',
+          confirmButtonText: '打开任务台',
+          cancelButtonText: '继续浏览',
+        },
+      )
+      await router.push({ path: '/blob-migrate' })
+    } catch {
+      // stay on browse
+    }
     // If already finished (sync test mode), refresh catalog once.
     if (job.status === 'completed') {
       await loadViews()

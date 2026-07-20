@@ -37,7 +37,6 @@ import {
 } from '@element-plus/icons-vue'
 
 import AppBreadcrumb from '@/components/AppBreadcrumb.vue'
-import BackgroundExportDock from '@/components/BackgroundExportDock.vue'
 
 import {
 
@@ -52,6 +51,7 @@ import {
 import { filterMenuByRole, resolveActiveMenuPath } from '@/config/menu'
 
 import { useAuthStore } from '@/stores/auth'
+import { useBackgroundExportStore } from '@/stores/backgroundExport'
 
 
 
@@ -64,6 +64,7 @@ const route = useRoute()
 const router = useRouter()
 
 const auth = useAuthStore()
+const bgExport = useBackgroundExportStore()
 
 
 
@@ -202,6 +203,9 @@ onMounted(() => {
   checkMobile()
 
   window.addEventListener('resize', checkMobile)
+
+  // Resume export job polling without a floating overlay; progress lives on 迁移任务台.
+  void bgExport.restoreFromSession()
 
 })
 
@@ -482,8 +486,6 @@ onUnmounted(() => {
       </el-footer>
 
     </el-container>
-
-    <BackgroundExportDock />
 
   </el-container>
 

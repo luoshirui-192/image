@@ -28,6 +28,7 @@ import {
   runGlobalDataSyncApi,
 } from '@/api/images'
 import ExternalDbConnectionsDialog from '@/components/ExternalDbConnectionsDialog.vue'
+import BackgroundExportDock from '@/components/BackgroundExportDock.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -563,7 +564,7 @@ onUnmounted(() => {
         <div>
           <h2 class="page-title">迁移任务台</h2>
           <p class="page-desc">
-            管理已创建的迁移源与后台任务（预检、全量、暂停/继续、错误导出）。
+            管理迁移源与后台任务（预检、全量、暂停/继续），以及「数据库模拟」发起的路径导出进度。
             日常扫表建配置、一键迁移请用「数据库模拟」。
           </p>
         </div>
@@ -580,6 +581,10 @@ onUnmounted(() => {
         :closable="false"
         class="info-alert"
       />
+
+      <section class="section">
+        <BackgroundExportDock />
+      </section>
 
       <section class="section">
         <div class="section-head-row">

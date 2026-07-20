@@ -116,7 +116,7 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     if (!job?.id) return
     upsertJob(job)
     if (notify) {
-      ElMessage.success(`导出已在后台运行（任务 #${job.id}），可继续其他操作`)
+      ElMessage.success(`导出已在后台运行（任务 #${job.id}），可到「迁移任务台」查看进度`)
     }
     void pollAll()
     startPolling()
