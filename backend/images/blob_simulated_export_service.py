@@ -36,6 +36,10 @@ class SimulatedExportError(Exception):
     pass
 
 
+class SimulatedExportCancelled(SimulatedExportError):
+    """Raised when an async export job is cancelled mid-run."""
+
+
 def _path_cell_to_string(value: Any) -> str:
     """Write real path only; pending / no_data / deleted become empty string."""
     if isinstance(value, dict):
@@ -355,8 +359,14 @@ def export_simulated_table_to_connection(
     target_table: str = "",
     if_exists: str = IF_EXISTS_FAIL,
     page_size: int | None = None,
+    progress_callback=None,
+    should_cancel=None,
 ) -> dict[str, Any]:
-    """Materialize path-substituted browse rows into a physical table on another connection."""
+    """Materialize path-substituted browse rows into a physical table on another connection.
+
+    progress_callback(rows_written=..., total_estimate=...) is optional for async jobs.
+    should_cancel() -> bool stops the loop early (caller should treat as cancel).
+    """
     mode = (if_exists or IF_EXISTS_FAIL).strip().lower()
     if mode not in IF_EXISTS_CHOICES:
         raise SimulatedExportError(f"if_exists 必须是 {', '.join(sorted(IF_EXISTS_CHOICES))}")
@@ -422,7 +432,10 @@ def export_simulated_table_to_connection(
 
         rows_written = 0
         offset = 0
+        total_estimate: int | None = None
         while True:
+            if should_cancel and should_cancel():
+                raise SimulatedExportCancelled("用户取消导出")
             page = fetch_simulated_table_rows(
                 view,
                 offset=offset,
@@ -430,6 +443,13 @@ def export_simulated_table_to_connection(
                 include_total=(offset == 0),
                 touch_last_viewed=False,
             )
+            if offset == 0 and page.get("total") is not None:
+                try:
+                    total_estimate = int(page.get("total") or 0)
+                except (TypeError, ValueError):
+                    total_estimate = None
+                if progress_callback:
+                    progress_callback(rows_written=0, total_estimate=total_estimate)
             rows = page.get("rows") or []
             if not rows:
                 break
@@ -437,6 +457,8 @@ def export_simulated_table_to_connection(
             with conn.cursor() as cursor:
                 cursor.executemany(insert_sql, values)
             rows_written += len(values)
+            if progress_callback:
+                progress_callback(rows_written=rows_written, total_estimate=total_estimate)
             if not page.get("has_more"):
                 break
             offset += len(rows)

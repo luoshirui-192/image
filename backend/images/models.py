@@ -258,3 +258,40 @@ class BlobMigrationJobError(models.Model):
         verbose_name = "BLOB 迁移失败记录"
         verbose_name_plural = "BLOB 迁移失败记录"
         ordering = ["-id"]
+
+
+class BlobSimulatedExportJob(models.Model):
+    """Background job: export simulated browse rows to another DB table."""
+
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_CANCELLED = "cancelled"
+
+    view_id = models.PositiveIntegerField()
+    target_connection_id = models.PositiveIntegerField(null=True, blank=True)
+    target_db_alias = models.CharField(max_length=64, default="")
+    target_database = models.CharField(max_length=64, default="")
+    target_table = models.CharField(max_length=64, default="")
+    if_exists = models.CharField(max_length=20, default="fail")
+    status = models.CharField(max_length=20, default=STATUS_PENDING)
+    total_estimate = models.PositiveIntegerField(default=0)
+    rows_written = models.PositiveIntegerField(default=0)
+    cancel_requested = models.SmallIntegerField(default=0)
+    message = models.CharField(max_length=500, default="")
+    last_error = models.CharField(max_length=500, default="")
+    result_json = models.TextField(null=True, blank=True)
+    created_by = models.CharField(max_length=100, default="")
+    create_time = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = "blob_simulated_export_job"
+        ordering = ["-id"]
+
+    def __str__(self) -> str:
+        return f"export-job#{self.id} view={self.view_id} {self.status}"

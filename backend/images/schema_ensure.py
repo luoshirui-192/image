@@ -181,6 +181,32 @@ def ensure_migration_tables() -> None:
           KEY `idx_job_retried`(`job_id`, `retried`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='BLOB 迁移失败明细'
         """,
+        """
+        CREATE TABLE IF NOT EXISTS `blob_simulated_export_job` (
+          `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+          `view_id` int(10) UNSIGNED NOT NULL,
+          `target_connection_id` int(10) UNSIGNED NULL DEFAULT NULL,
+          `target_db_alias` varchar(64) NOT NULL DEFAULT '',
+          `target_database` varchar(64) NOT NULL DEFAULT '',
+          `target_table` varchar(64) NOT NULL DEFAULT '',
+          `if_exists` varchar(20) NOT NULL DEFAULT 'fail',
+          `status` varchar(20) NOT NULL DEFAULT 'pending',
+          `total_estimate` int(10) UNSIGNED NOT NULL DEFAULT 0,
+          `rows_written` int(10) UNSIGNED NOT NULL DEFAULT 0,
+          `cancel_requested` tinyint(4) NOT NULL DEFAULT 0,
+          `message` varchar(500) NOT NULL DEFAULT '',
+          `last_error` varchar(500) NOT NULL DEFAULT '',
+          `result_json` mediumtext NULL,
+          `created_by` varchar(100) NOT NULL DEFAULT '',
+          `create_time` datetime NULL DEFAULT NULL,
+          `started_at` datetime NULL DEFAULT NULL,
+          `finished_at` datetime NULL DEFAULT NULL,
+          `updated_at` datetime NULL DEFAULT NULL,
+          PRIMARY KEY (`id`),
+          KEY `idx_export_status` (`status`, `id`),
+          KEY `idx_export_view` (`view_id`, `id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='模拟表导出到目标库任务'
+        """,
     ]
 
     try:

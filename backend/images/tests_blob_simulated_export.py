@@ -101,6 +101,27 @@ CREATE TABLE IF NOT EXISTS legacy_photos (
     title VARCHAR(100) NOT NULL DEFAULT '',
     photo BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS blob_simulated_export_job (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    view_id INTEGER NOT NULL,
+    target_connection_id INTEGER NULL,
+    target_db_alias VARCHAR(64) NOT NULL DEFAULT '',
+    target_database VARCHAR(64) NOT NULL DEFAULT '',
+    target_table VARCHAR(64) NOT NULL DEFAULT '',
+    if_exists VARCHAR(20) NOT NULL DEFAULT 'fail',
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    total_estimate INTEGER NOT NULL DEFAULT 0,
+    rows_written INTEGER NOT NULL DEFAULT 0,
+    cancel_requested SMALLINT NOT NULL DEFAULT 0,
+    message VARCHAR(500) NOT NULL DEFAULT '',
+    last_error VARCHAR(500) NOT NULL DEFAULT '',
+    result_json TEXT NULL,
+    created_by VARCHAR(100) NOT NULL DEFAULT '',
+    create_time DATETIME NULL,
+    started_at DATETIME NULL,
+    finished_at DATETIME NULL,
+    updated_at DATETIME NULL
+);
 CREATE TABLE IF NOT EXISTS blob_migration_source (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name VARCHAR(100) NOT NULL DEFAULT '',
@@ -280,11 +301,19 @@ class SimulatedExportTestCase(TestCase):
             },
             format="json",
         )
-        self.assertEqual(res.status_code, 200)
-        body = res.json()["data"]
-        self.assertEqual(body["rows_written"], 2)
-        self.assertTrue(body.get("target_view_id"))
-        self.assertTrue(body.get("target_view_created"))
+        self.assertIn(res.status_code, {200, 202}, res.data)
+        self.assertEqual(res.data["code"], 0)
+        job = res.data["data"]["job"]
+        self.assertTrue(job.get("id"))
+        # sqlite runs export synchronously in kick_export_job_async
+        detail = self.client.get(f"/api/images/blob-browse/export-jobs/{job['id']}/")
+        self.assertEqual(detail.status_code, 200)
+        job_body = detail.data["data"]
+        self.assertEqual(job_body["status"], "completed", job_body.get("message"))
+        self.assertEqual(job_body["rows_written"], 2)
+        result = job_body.get("result") or {}
+        self.assertTrue(result.get("target_view_id"))
+        self.assertTrue(result.get("target_view_created"))
         rows = self._read_export_rows()
         self.assertEqual(rows[0][2], "2026/01/a.png")
         self.assertEqual(rows[1][2], "")

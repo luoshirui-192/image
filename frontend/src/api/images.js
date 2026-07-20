@@ -304,7 +304,16 @@ export function fetchBlobTableViewRowsApi(id, { offset = 0, limit = 100, include
 }
 
 export function exportBlobTableViewToConnectionApi(id, data) {
-  return request.post(`/images/blob-browse/${id}/export-to-connection/`, data, { timeout: 600000 })
+  // Starts a background job (avoids gateway 504 on long sync exports).
+  return request.post(`/images/blob-browse/${id}/export-to-connection/`, data, { timeout: 60000 })
+}
+
+export function getBlobSimulatedExportJobApi(jobId) {
+  return request.get(`/images/blob-browse/export-jobs/${jobId}/`)
+}
+
+export function cancelBlobSimulatedExportJobApi(jobId) {
+  return request.post(`/images/blob-browse/export-jobs/${jobId}/`, { action: 'cancel' })
 }
 
 export function getBlobTableViewSchemaApi(id) {

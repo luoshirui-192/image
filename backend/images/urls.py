@@ -34,6 +34,7 @@ from images.blob_migration_views import (
     BlobTableViewLinkSourceView,
 )
 from images.blob_table_view_views import (
+    BlobSimulatedExportJobDetailView,
     BlobTableViewDetailView,
     BlobTableViewExportToConnectionView,
     BlobTableViewListCreateView,
@@ -144,6 +145,11 @@ urlpatterns = [
         "blob-browse/<int:pk>/export-to-connection/",
         BlobTableViewExportToConnectionView.as_view(),
         name="blob-browse-export-to-connection",
+    ),
+    path(
+        "blob-browse/export-jobs/<int:pk>/",
+        BlobSimulatedExportJobDetailView.as_view(),
+        name="blob-browse-export-job-detail",
     ),
     path("blob-browse/<int:pk>/", BlobTableViewDetailView.as_view(), name="blob-browse-detail"),
     path("blob-catalog/connections/", BlobCatalogConnectionsView.as_view(), name="blob-catalog-connections"),
