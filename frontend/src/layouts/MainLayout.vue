@@ -37,6 +37,7 @@ import {
 } from '@element-plus/icons-vue'
 
 import AppBreadcrumb from '@/components/AppBreadcrumb.vue'
+import BackgroundExportDock from '@/components/BackgroundExportDock.vue'
 
 import {
 
@@ -481,6 +482,8 @@ onUnmounted(() => {
       </el-footer>
 
     </el-container>
+
+    <BackgroundExportDock />
 
   </el-container>
 

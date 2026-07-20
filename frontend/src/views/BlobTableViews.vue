@@ -11,9 +11,7 @@ import {
   createBlobMigrationSourceApi,
   createBlobTableViewApi,
   deleteBlobTableViewApi,
-  cancelBlobSimulatedExportJobApi,
   exportBlobTableViewToConnectionApi,
-  getBlobSimulatedExportJobApi,
   fetchBlobTableViewRowsApi,
   getBlobCatalogObjectApi,
   listBlobCatalogConnectionsApi,
@@ -41,9 +39,11 @@ import { highlightAndScrollTableRow } from '@/utils/tableScroll'
 import { callWithRetry } from '@/utils/callWithRetry'
 import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 import { readBrowseUiState, writeBrowseUiState } from '@/utils/browseUiState'
+import { useBackgroundExportStore } from '@/stores/backgroundExport'
 
 const route = useRoute()
 const router = useRouter()
+const bgExport = useBackgroundExportStore()
 
 const views = ref([])
 const loadingViews = ref(false)
@@ -189,20 +189,7 @@ const migrateForm = reactive({
 
 const exportDialogVisible = ref(false)
 const exportSaving = ref(false)
-const exportPhase = ref('form') // form | running | success | failed
 const exportError = ref('')
-const exportResult = ref(null)
-const exportJob = ref(null)
-const exportStartedAt = ref(0)
-const exportElapsedSec = ref(0)
-let exportElapsedTimer = null
-let exportPollTimer = null
-
-const exportPercent = computed(() => {
-  const p = Number(exportJob.value?.percent)
-  if (!Number.isNaN(p) && p >= 0) return Math.min(100, p)
-  return exportPhase.value === 'success' ? 100 : 0
-})
 const exportTargets = ref([]) // { key, label, type: 'alias'|'conn', alias?, connectionId?, dbName? }
 const exportDatabases = ref([])
 const loadingExportTargets = ref(false)
@@ -841,72 +828,6 @@ async function submitSavedViewMigration() {
   }
 }
 
-function stopExportElapsed() {
-  if (exportElapsedTimer) {
-    clearInterval(exportElapsedTimer)
-    exportElapsedTimer = null
-  }
-}
-
-function stopExportPoll() {
-  if (exportPollTimer) {
-    clearInterval(exportPollTimer)
-    exportPollTimer = null
-  }
-}
-
-async function pollExportJob(jobId) {
-  if (jobId == null) return
-  try {
-    const res = await getBlobSimulatedExportJobApi(jobId)
-    const job = res?.data
-    if (!job || typeof job !== 'object') return
-    exportJob.value = job
-    const status = job.status
-    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-      stopExportPoll()
-      stopExportElapsed()
-      exportSaving.value = false
-      if (status === 'completed') {
-        exportResult.value = job.result || {
-          rows_written: job.rows_written,
-          target_table: job.target_table,
-          target_database: job.target_database,
-          target_view_id: job.result?.target_view_id,
-        }
-        exportPhase.value = 'success'
-        await loadViews()
-        catalogTreeKey.value += 1
-        if (exportResult.value?.target_view_error) {
-          ElMessage.warning(`表已导出，但浏览配置未就绪：${exportResult.value.target_view_error}`)
-        } else {
-          ElMessage.success(job.message || '导出成功')
-        }
-      } else if (status === 'failed') {
-        exportPhase.value = 'failed'
-        exportError.value = job.message || job.last_error || '导出失败'
-        ElMessage.error(exportError.value)
-      } else {
-        exportPhase.value = 'failed'
-        exportError.value = job.message || '已取消'
-        ElMessage.warning(exportError.value)
-      }
-    }
-  } catch (err) {
-    // Keep polling on transient errors; surface only if stuck.
-    console.warn('poll export job failed', err)
-  }
-}
-
-function startExportElapsed() {
-  stopExportElapsed()
-  exportStartedAt.value = Date.now()
-  exportElapsedSec.value = 0
-  exportElapsedTimer = setInterval(() => {
-    exportElapsedSec.value = Math.floor((Date.now() - exportStartedAt.value) / 1000)
-  }, 500)
-}
-
 async function loadExportTargets() {
   loadingExportTargets.value = true
   try {
@@ -988,17 +909,12 @@ async function loadExportDatabasesForTarget(target) {
 async function openExportDialog() {
   const view = savedViewForSelection.value
   if (!view) return
-  exportPhase.value = 'form'
   exportError.value = ''
-  exportResult.value = null
-  exportJob.value = null
   exportForm.targetKey = ''
   exportForm.database = ''
   exportForm.tableName = view.source_table || ''
   exportForm.ifExists = 'fail'
   exportDatabases.value = []
-  stopExportElapsed()
-  stopExportPoll()
   await loadExportTargets()
   exportDialogVisible.value = true
 }
@@ -1037,12 +953,7 @@ async function submitExportToConnection() {
     return
   }
   exportSaving.value = true
-  exportPhase.value = 'running'
   exportError.value = ''
-  exportResult.value = null
-  exportJob.value = null
-  stopExportPoll()
-  startExportElapsed()
   try {
     const payload = {
       target_database: exportForm.database,
@@ -1059,54 +970,26 @@ async function submitExportToConnection() {
     if (!job?.id) {
       throw new Error('未拿到导出任务')
     }
-    exportJob.value = job
-    // Sync backends (sqlite / BLOB_EXPORT_SYNC) may already be finished.
-    if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
-      await pollExportJob(job.id)
-      return
+    // Hand off to global dock — close dialog so user can leave and do other work.
+    bgExport.trackJob(job)
+    exportDialogVisible.value = false
+    // If already finished (sync test mode), refresh catalog once.
+    if (job.status === 'completed') {
+      await loadViews()
+      catalogTreeKey.value += 1
     }
-    await pollExportJob(job.id)
-    exportPollTimer = setInterval(() => pollExportJob(job.id), 1500)
   } catch (err) {
-    exportPhase.value = 'failed'
     exportError.value = err.message || '启动导出失败'
-    exportSaving.value = false
-    stopExportElapsed()
     ElMessage.error(exportError.value)
-  }
-}
-
-async function onCancelExportJob() {
-  const id = exportJob.value?.id
-  if (!id) return
-  try {
-    await cancelBlobSimulatedExportJobApi(id)
-    ElMessage.info('已请求取消导出')
-    await pollExportJob(id)
-  } catch (err) {
-    ElMessage.error(err.message || '取消失败')
+  } finally {
+    exportSaving.value = false
   }
 }
 
 function closeExportDialog() {
-  // Allow closing while running: job continues in background; stop local polling only.
-  if (exportPhase.value === 'running' && exportJob.value?.id) {
-    ElMessage.info(`导出任务 #${exportJob.value.id} 仍在后台运行`)
-  }
   exportDialogVisible.value = false
-  exportPhase.value = 'form'
   exportError.value = ''
-  exportResult.value = null
-  exportJob.value = null
   exportSaving.value = false
-  stopExportElapsed()
-  stopExportPoll()
-}
-
-async function openExportResultView() {
-  if (!exportResult.value?.target_view_id) return
-  await openTargetBrowseView(exportResult.value)
-  closeExportDialog()
 }
 
 async function openCreateViewDialog() {
@@ -1915,8 +1798,6 @@ onUnmounted(() => {
   unbindTableScroll()
   resizeObserver?.disconnect()
   window.removeEventListener('resize', syncTableHeight)
-  stopExportElapsed()
-  stopExportPoll()
 })
 </script>
 
@@ -2411,130 +2292,68 @@ onUnmounted(() => {
     <el-dialog
       v-model="exportDialogVisible"
       title="导出到连接"
-      width="600px"
-      :close-on-click-modal="exportPhase !== 'running'"
+      width="560px"
       @close="closeExportDialog"
     >
       <p class="field-hint migrate-dialog-desc">
         将「{{ savedViewForSelection?.source_table }}」写成目标库物理表（BLOB 列填路径）。
-        原表不动；目标会挂上<strong>共享同一套路径映射</strong>的浏览配置，两边都能预览图片。
+        点击开始后任务在<strong>后台运行</strong>，可关闭本窗并去做其他事；右下角可看进度。
       </p>
-
-      <template v-if="exportPhase === 'form' || exportPhase === 'failed'">
-        <el-alert
-          v-if="exportPhase === 'failed'"
-          type="error"
-          :closable="false"
-          show-icon
-          class="export-status-alert"
-          :title="exportError || '导出失败'"
-        />
-        <el-form label-width="110px">
-          <el-form-item label="目标连接" required>
-            <el-select
-              v-model="exportForm.targetKey"
-              placeholder="选择目标库 / 连接"
-              filterable
-              :loading="loadingExportTargets"
-              :empty-text="loadingExportTargets ? '加载中…' : '暂无目标，请先在迁移页添加连接'"
-              style="width: 100%"
-              @change="onExportTargetChange"
-            >
-              <el-option
-                v-for="t in exportTargets"
-                :key="t.key"
-                :label="t.label"
-                :value="t.key"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="目标数据库" required>
-            <el-select
-              v-model="exportForm.database"
-              placeholder="选择数据库"
-              filterable
-              :loading="loadingExportDatabases"
-              :empty-text="loadingExportDatabases ? '加载中…' : '请先选择目标连接'"
-              style="width: 100%"
-            >
-              <el-option v-for="db in exportDatabases" :key="db" :label="db" :value="db" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="目标表名" required>
-            <el-input v-model="exportForm.tableName" maxlength="64" placeholder="默认与源表同名" />
-          </el-form-item>
-          <el-form-item label="已存在时">
-            <el-radio-group v-model="exportForm.ifExists">
-              <el-radio value="fail">失败（不覆盖）</el-radio>
-              <el-radio value="replace">替换（删表重建）</el-radio>
-              <el-radio value="truncate">清空后写入</el-radio>
-            </el-radio-group>
-          </el-form-item>
-        </el-form>
-      </template>
-
-      <div v-else-if="exportPhase === 'running'" class="export-progress-panel">
-        <el-progress
-          :percentage="exportPercent"
-          :indeterminate="exportPercent < 1"
-          :duration="3"
-          status="warning"
-        />
-        <p class="export-progress-title">{{ exportJob?.message || '正在导出到目标库…' }}</p>
-        <p class="export-progress-meta">
-          已用时 {{ exportElapsedSec }} 秒
-          <template v-if="exportJob">
-            · 已写入 {{ exportJob.rows_written || 0 }}
-            <template v-if="exportJob.total_estimate"> / {{ exportJob.total_estimate }}</template>
-            行
-          </template>
-          · 后台任务不会因网关超时中断
-        </p>
-      </div>
-
-      <div v-else-if="exportPhase === 'success'" class="export-progress-panel export-success-panel">
-        <el-result icon="success" title="导出成功">
-          <template #sub-title>
-            <div class="export-result-lines">
-              <div>
-                目标表：
-                <code>{{ exportForm.database }}.{{ exportResult?.target_table || exportForm.tableName }}</code>
-              </div>
-              <div>写入行数：{{ exportResult?.rows_written ?? 0 }}</div>
-              <div v-if="exportResult?.target_view_name">
-                浏览配置：{{ exportResult.target_view_name }}
-                <span v-if="exportResult.target_view_created">（新建）</span>
-                <span v-else>（已更新，共享原表路径映射）</span>
-              </div>
-              <div v-if="exportResult?.target_view_error" class="export-warn">
-                {{ exportResult.target_view_error }}
-              </div>
-            </div>
-          </template>
-        </el-result>
-      </div>
-
-      <template #footer>
-        <template v-if="exportPhase === 'form' || exportPhase === 'failed'">
-          <el-button @click="closeExportDialog">取消</el-button>
-          <el-button type="primary" :loading="exportSaving" @click="submitExportToConnection">
-            {{ exportPhase === 'failed' ? '重试导出' : '开始导出' }}
-          </el-button>
-        </template>
-        <template v-else-if="exportPhase === 'running'">
-          <el-button @click="onCancelExportJob">取消导出</el-button>
-          <el-button type="primary" disabled loading>导出进行中…</el-button>
-        </template>
-        <template v-else>
-          <el-button @click="closeExportDialog">关闭</el-button>
-          <el-button
-            v-if="exportResult?.target_view_id"
-            type="primary"
-            @click="openExportResultView"
+      <el-alert
+        v-if="exportError"
+        type="error"
+        :closable="false"
+        show-icon
+        class="export-status-alert"
+        :title="exportError"
+      />
+      <el-form label-width="110px">
+        <el-form-item label="目标连接" required>
+          <el-select
+            v-model="exportForm.targetKey"
+            placeholder="选择目标库 / 连接"
+            filterable
+            :loading="loadingExportTargets"
+            :empty-text="loadingExportTargets ? '加载中…' : '暂无目标，请先在迁移页添加连接'"
+            style="width: 100%"
+            @change="onExportTargetChange"
           >
-            打开目标浏览
-          </el-button>
-        </template>
+            <el-option
+              v-for="t in exportTargets"
+              :key="t.key"
+              :label="t.label"
+              :value="t.key"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="目标数据库" required>
+          <el-select
+            v-model="exportForm.database"
+            placeholder="选择数据库"
+            filterable
+            :loading="loadingExportDatabases"
+            :empty-text="loadingExportDatabases ? '加载中…' : '请先选择目标连接'"
+            style="width: 100%"
+          >
+            <el-option v-for="db in exportDatabases" :key="db" :label="db" :value="db" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="目标表名" required>
+          <el-input v-model="exportForm.tableName" maxlength="64" placeholder="默认与源表同名" />
+        </el-form-item>
+        <el-form-item label="已存在时">
+          <el-radio-group v-model="exportForm.ifExists">
+            <el-radio value="fail">失败（不覆盖）</el-radio>
+            <el-radio value="replace">替换（删表重建）</el-radio>
+            <el-radio value="truncate">清空后写入</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="closeExportDialog">取消</el-button>
+        <el-button type="primary" :loading="exportSaving" @click="submitExportToConnection">
+          后台开始导出
+        </el-button>
       </template>
     </el-dialog>
   </div>
