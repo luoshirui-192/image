@@ -7,7 +7,7 @@ from images.blob_simulated_export_job_service import (
 
 
 class Command(BaseCommand):
-    help = "Reclaim orphaned running export jobs after backend restart, then kick queue"
+    help = "Reclaim orphaned running/paused export jobs after restart"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -18,11 +18,19 @@ class Command(BaseCommand):
         parser.add_argument(
             "--no-kick",
             action="store_true",
-            help="Only reclaim; do not start the next pending export",
+            help="Only reclaim; do not start the next pending export in this process",
+        )
+        parser.add_argument(
+            "--include-paused",
+            action="store_true",
+            help="Also re-queue paused jobs (recommended on container restart)",
         )
 
     def handle(self, *args, **options):
-        count = reclaim_orphaned_export_jobs(reason=(options.get("reason") or "").strip())
+        count = reclaim_orphaned_export_jobs(
+            reason=(options.get("reason") or "").strip(),
+            include_paused=bool(options.get("include_paused")),
+        )
         self.stdout.write(self.style.SUCCESS(f"reclaimed_exports={count}"))
         if not options.get("no_kick"):
             kicked = kick_export_queue()

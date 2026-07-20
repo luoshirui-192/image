@@ -39,8 +39,20 @@ echo "==> ensure file_hash column"
 python /app/docker/ensure_file_hash_column.py
 
 echo "==> reclaim orphaned export/migration jobs"
-python manage.py reclaim_blob_export_jobs --no-kick || true
+# include-paused: after restart, paused jobs should re-enter the queue (deploy pause is over)
+python manage.py reclaim_blob_export_jobs --no-kick --include-paused || true
 python manage.py reclaim_blob_migration_jobs --no-kick || true
+
+echo "==> start export worker (sidecar; long-lived sync runner)"
+# Gunicorn request threads die with worker recycle; this loop owns export execution.
+(
+  while true; do
+    python manage.py process_blob_export_jobs --once --max-jobs 1 --stale-seconds 300 \
+      || echo "[export-worker] process failed (will retry)" >&2
+    sleep 8
+  done
+) &
+echo "[ok] export worker pid=$!"
 
 echo "==> start gunicorn"
 exec gunicorn -c /app/deploy/gunicorn/gunicorn.conf.py config.wsgi:application

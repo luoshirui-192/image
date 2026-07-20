@@ -27,7 +27,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--stale-seconds",
             type=int,
-            default=180,
+            default=300,
             help="Reclaim RUNNING jobs with no progress for this many seconds",
         )
 
@@ -38,5 +38,5 @@ class Command(BaseCommand):
         )
         if count:
             self.stdout.write(self.style.SUCCESS(f"Processed {count} export job(s)"))
-        elif options["once"]:
+        else:
             self.stdout.write("No pending export jobs")

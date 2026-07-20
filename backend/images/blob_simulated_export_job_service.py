@@ -185,16 +185,21 @@ def resume_export_job(job_id: int) -> BlobSimulatedExportJob:
     return BlobSimulatedExportJob.objects.get(pk=job.pk)
 
 
-def reclaim_orphaned_export_jobs(*, reason: str = "服务重启，已自动重新排队") -> int:
-    """Mark orphaned running exports as pending so they resume from last_offset."""
-    running_ids = list(
-        BlobSimulatedExportJob.objects.filter(
-            status=BlobSimulatedExportJob.STATUS_RUNNING
-        ).values_list("id", flat=True)
+def reclaim_orphaned_export_jobs(
+    *,
+    reason: str = "服务重启，已自动重新排队",
+    include_paused: bool = False,
+) -> int:
+    """Mark orphaned running (and optionally paused) exports as pending for resume."""
+    statuses = [BlobSimulatedExportJob.STATUS_RUNNING]
+    if include_paused:
+        statuses.append(BlobSimulatedExportJob.STATUS_PAUSED)
+    reclaim_ids = list(
+        BlobSimulatedExportJob.objects.filter(status__in=statuses).values_list("id", flat=True)
     )
-    if not running_ids:
+    if not reclaim_ids:
         return 0
-    return _reclaim_export_ids(running_ids, reason=reason)
+    return _reclaim_export_ids(reclaim_ids, reason=reason)
 
 
 def reclaim_stale_running_export_jobs(*, stale_seconds: int = 180) -> int:
@@ -436,18 +441,30 @@ def kick_export_job_async(job_id: int) -> None:
     logger.info("kicked simulated export thread job_id=%s", job_id)
 
 
-def kick_export_queue(*, reclaim_stale: bool = True) -> int | None:
-    """Start the oldest pending export if the queue slot is free.
+def kick_export_queue(*, reclaim_stale: bool = True, force_async: bool = False) -> int | None:
+    """Ensure the oldest pending export can run.
 
-    Paused jobs hold the slot so pause does not auto-start the next task.
-    Optionally reclaim stale RUNNING zombies first (dead gunicorn/CLI threads).
+    By default we do NOT spawn a gunicorn daemon thread (those die with worker recycle
+    and leave RUNNING zombies). The long-lived export worker in backend-entrypoint /
+    scheduler claims pending jobs synchronously.
+
+    force_async / sqlite / BLOB_EXPORT_SYNC still run in-process for tests and overrides.
     """
     if reclaim_stale:
         try:
-            reclaim_stale_running_export_jobs(stale_seconds=180)
+            reclaim_stale_running_export_jobs(stale_seconds=300)
         except Exception:
             logger.warning("reclaim stale exports before kick failed", exc_info=True)
     if _export_queue_held():
+        holders = list(
+            BlobSimulatedExportJob.objects.filter(
+                status__in={
+                    BlobSimulatedExportJob.STATUS_RUNNING,
+                    BlobSimulatedExportJob.STATUS_PAUSED,
+                }
+            ).values_list("id", "status")[:5]
+        )
+        logger.info("kick_export_queue skipped; held by %s", holders)
         return None
     next_id = (
         BlobSimulatedExportJob.objects.filter(status=BlobSimulatedExportJob.STATUS_PENDING)
@@ -457,28 +474,45 @@ def kick_export_queue(*, reclaim_stale: bool = True) -> int | None:
     )
     if not next_id:
         return None
-    kick_export_job_async(int(next_id))
+    if (
+        force_async
+        or connection.vendor == "sqlite"
+        or getattr(settings, "BLOB_EXPORT_SYNC", False)
+    ):
+        kick_export_job_async(int(next_id))
+        return int(next_id)
+    logger.info("export job_id=%s left pending for export worker", next_id)
     return int(next_id)
 
 
 def process_pending_export_jobs(
     *,
     max_jobs: int = 1,
-    stale_seconds: int = 180,
+    stale_seconds: int = 300,
 ) -> int:
-    """Run pending exports synchronously (scheduler). Returns count of jobs executed.
+    """Run pending exports synchronously (scheduler / sidecar). Returns count executed.
 
     Unlike kick_export_queue (daemon thread in API workers), this runs inline so the
     worker process survives for the whole job — same pattern as migration jobs.
     """
     try:
+        # Only reclaim RUNNING with stale heartbeat — never reclaim a live in-process job.
         reclaim_stale_running_export_jobs(stale_seconds=stale_seconds)
     except Exception:
-        logger.warning("reclaim stale exports before process failed", exc_info=True)
+        logger.warning("reclaim exports before process failed", exc_info=True)
 
     started = 0
     for _ in range(max(1, max_jobs)):
         if _export_queue_held():
+            holders = list(
+                BlobSimulatedExportJob.objects.filter(
+                    status__in={
+                        BlobSimulatedExportJob.STATUS_RUNNING,
+                        BlobSimulatedExportJob.STATUS_PAUSED,
+                    }
+                ).values_list("id", "status")[:5]
+            )
+            logger.info("export queue held by %s — skip pending", holders)
             break
         next_id = (
             BlobSimulatedExportJob.objects.filter(status=BlobSimulatedExportJob.STATUS_PENDING)
@@ -488,6 +522,7 @@ def process_pending_export_jobs(
         )
         if not next_id:
             break
+        logger.info("process_pending_export starting job_id=%s", next_id)
         # kick_next=False: this loop advances the queue; avoid spawning a short-lived daemon.
         execute_export_job(int(next_id), kick_next=False)
         started += 1

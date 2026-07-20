@@ -44,7 +44,7 @@ PY
 
 echo "==> reclaim orphaned migration/export jobs"
 python manage.py reclaim_blob_migration_jobs --no-kick || true
-python manage.py reclaim_blob_export_jobs --no-kick || true
+python manage.py reclaim_blob_export_jobs --no-kick --include-paused || true
 
 run_maintenance() {
   echo "==> $(date -Iseconds) run_scheduled_maintenance"
