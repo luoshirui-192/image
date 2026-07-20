@@ -8,7 +8,7 @@ import os
 import re
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 
@@ -61,6 +61,8 @@ class PairImportResult:
     message: str = ""
     layers_added: int = 0
     pair_created: bool = False
+    warnings: list[dict] = field(default_factory=list)
+    library_bmp_reused: int = 0
 
 
 def compute_hash(content: bytes) -> str:
@@ -133,6 +135,7 @@ def import_pair_directory(
     algo_version: str = "1.0",
     category_id: int | None = None,
     skip_existing: bool = True,
+    fail_on_pair_same_bmp: bool = False,
 ) -> PairImportResult:
     """
     Import one batmatch_out-style pair folder.
@@ -144,6 +147,8 @@ def import_pair_directory(
     onto the existing pair (version compare). Same version layers are skipped when
     skip_existing=True.
     """
+    from fingerprints.duplicate_scan import detect_pair_same_bmp
+
     if not pair_dir.is_dir():
         raise FingerprintImportError(f"不是目录: {pair_dir}")
 
@@ -155,6 +160,13 @@ def import_pair_directory(
         raise FingerprintImportError(
             f"{pair_dir.name}: 需要恰好 2 张 bmp，实际 {len(bmp_stems)}"
         )
+
+    pair_warnings: list[dict] = []
+    same_bmp = detect_pair_same_bmp(pair_dir)
+    if same_bmp:
+        if fail_on_pair_same_bmp:
+            raise FingerprintImportError(same_bmp["message"])
+        pair_warnings.append(same_bmp)
 
     samples: list[tuple[str, str, dict[str, Path]]] = []
     positions: set[str] = set()
@@ -175,13 +187,15 @@ def import_pair_directory(
         right_person_id=samples[1][0],
     ).first()
     pair_created = False
+    library_bmp_reused = 0
 
     if pair is None:
-        def _save_one_bmp(item: tuple[str, str, dict[str, Path]]) -> tuple[str, ImageInfo]:
+        def _save_one_bmp(item: tuple[str, str, dict[str, Path]]) -> tuple[str, ImageInfo, bool]:
             person_id, _stem, files = item
             close_old_connections()
             bmp_path = files["bmp"]
             content = bmp_path.read_bytes()
+            reused = False
             try:
                 image = save_image_bytes(
                     filename=bmp_path.name,
@@ -192,9 +206,10 @@ def import_pair_directory(
                 )
             except DuplicateImageError as exc:
                 image = exc.existing
+                reused = True
             finally:
                 close_old_connections()
-            return person_id, image
+            return person_id, image, reused
 
         from django.db import connection as db_connection
 
@@ -204,9 +219,10 @@ def import_pair_directory(
             with ThreadPoolExecutor(max_workers=2) as pool:
                 bmp_results = list(pool.map(_save_one_bmp, samples))
 
-        image_ids = [img.id for _pid, img in bmp_results]
-        image_names = [img.image_name for _pid, img in bmp_results]
-        person_ids = [pid for pid, _img in bmp_results]
+        image_ids = [img.id for _pid, img, _r in bmp_results]
+        image_names = [img.image_name for _pid, img, _r in bmp_results]
+        person_ids = [pid for pid, _img, _r in bmp_results]
+        library_bmp_reused = sum(1 for _pid, _img, reused in bmp_results if reused)
 
         pair = FingerprintPair.objects.create(
             batch_name=batch_name,
@@ -328,11 +344,17 @@ def import_pair_directory(
             message=msg,
             layers_added=0,
             pair_created=False,
+            warnings=pair_warnings,
+            library_bmp_reused=library_bmp_reused,
         )
 
     msg = "created pair" if pair_created else f"merged version {algo_version}"
     if unknown_suffixes:
         msg += f"; skipped unknown suffixes: {', '.join(sorted(set(unknown_suffixes)))}"
+    if library_bmp_reused:
+        msg += f"; library bmp reused={library_bmp_reused}"
+    if pair_warnings:
+        msg += f"; warnings={len(pair_warnings)}"
     return PairImportResult(
         pair_id=pair.id,
         batch_name=batch_name,
@@ -342,6 +364,8 @@ def import_pair_directory(
         message=msg,
         layers_added=layers_added,
         pair_created=pair_created,
+        warnings=pair_warnings,
+        library_bmp_reused=library_bmp_reused,
     )
 
 

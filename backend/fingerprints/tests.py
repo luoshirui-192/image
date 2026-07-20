@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS fingerprint_import_job (
     cancel_requested SMALLINT NOT NULL DEFAULT 0,
     message VARCHAR(500) NOT NULL DEFAULT '',
     last_error VARCHAR(500) NOT NULL DEFAULT '',
+    result_json TEXT NULL,
     created_by VARCHAR(100) NOT NULL DEFAULT '',
     create_time DATETIME NULL,
     started_at DATETIME NULL,
@@ -128,9 +129,12 @@ def make_bmp_bytes(name: str, size=(64, 64), color=(200, 200, 200)) -> tuple[str
     return name, buf.getvalue()
 
 
-def make_pair_zip() -> bytes:
+def make_pair_zip(*, same_bmp: bool = False) -> bytes:
     left_bmp_name, left_bmp = make_bmp_bytes("100001_right_index.bmp", color=180)
-    right_bmp_name, right_bmp = make_bmp_bytes("100002_right_index.bmp", color=90)
+    if same_bmp:
+        right_bmp_name, right_bmp = "100002_right_index.bmp", left_bmp
+    else:
+        right_bmp_name, right_bmp = make_bmp_bytes("100002_right_index.bmp", color=90)
     left_bi = build_minimal_fmr([(20, 30, 40, 1), (50, 60, 80, 2)], width=64, height=64)
     left_ne = build_minimal_fmr([(22, 31, 41, 1)], width=64, height=64)
     right_bi = build_minimal_fmr([(25, 35, 45, 1)], width=64, height=64)
@@ -339,3 +343,33 @@ class FingerprintAPITestCase(TestCase):
         )
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["data"]["label"], "BidisoV2")
+
+    def test_duplicate_report_warn_mode(self):
+        """Same left/right bmp content → report pair_same_bmp but still import (default)."""
+        zip_bytes = make_pair_zip(same_bmp=True)
+        job = self._import_zip_async(zip_bytes, name="dup.bmp.zip")
+        self.assertGreaterEqual(job.succeeded, 1)
+        detail = self.client.get(f"/api/fingerprints/import-jobs/{job.id}/")
+        self.assertEqual(detail.status_code, 200)
+        report = detail.data["data"]["duplicate_report"]
+        self.assertIsNotNone(report)
+        self.assertGreaterEqual(report["total"], 1)
+        types = {w["type"] for w in report["warnings"]}
+        self.assertIn("pair_same_bmp", types)
+        self.assertIn("zip_duplicate_content", types)
+
+    def test_duplicate_fail_mode_blocks(self):
+        zip_bytes = make_pair_zip(same_bmp=True)
+        upload = SimpleUploadedFile("strict.zip", zip_bytes, content_type="application/zip")
+        res = self.client.post(
+            "/api/fingerprints/pairs/import-zip/",
+            {"file": upload, "algo_version": "1.0", "fail_on_duplicates": "1"},
+            format="multipart",
+        )
+        self.assertIn(res.status_code, {200, 202}, res.data)
+        job_id = res.data["data"]["job"]["id"]
+        job = self._wait_job(job_id)
+        self.assertEqual(job.status, "failed", job.message)
+        detail = self.client.get(f"/api/fingerprints/import-jobs/{job_id}/")
+        report = detail.data["data"]["duplicate_report"]
+        self.assertGreaterEqual(report["blocking_count"], 1)

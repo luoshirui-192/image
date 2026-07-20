@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS `fingerprint_import_job` (
   `cancel_requested` smallint NOT NULL DEFAULT 0,
   `message` varchar(500) NOT NULL DEFAULT '',
   `last_error` varchar(500) NOT NULL DEFAULT '',
+  `result_json` mediumtext COMMENT '导入选项与重复文件报告 JSON',
   `created_by` varchar(100) NOT NULL DEFAULT '',
   `create_time` datetime DEFAULT NULL,
   `started_at` datetime DEFAULT NULL,

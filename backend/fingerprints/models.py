@@ -106,6 +106,7 @@ class FingerprintImportJob(models.Model):
     cancel_requested = models.SmallIntegerField(default=0)
     message = models.CharField(max_length=500, default="")
     last_error = models.CharField(max_length=500, default="")
+    result_json = models.TextField(null=True, blank=True)
     created_by = models.CharField(max_length=100, default="")
     create_time = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)

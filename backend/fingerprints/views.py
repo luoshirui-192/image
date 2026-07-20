@@ -180,6 +180,11 @@ class FingerprintPairImportZipView(APIView):
             "false",
             "no",
         }
+        fail_on_duplicates = str(request.data.get("fail_on_duplicates", "0")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         category_id = request.data.get("category_id")
         try:
             category_id = int(category_id) if category_id not in (None, "") else None
@@ -196,6 +201,7 @@ class FingerprintPairImportZipView(APIView):
                 tags=tags,
                 skip_existing=skip_existing,
                 category_id=category_id,
+                fail_on_duplicates=fail_on_duplicates,
             )
             kick_import_job_async(job.id)
         except Exception as exc:

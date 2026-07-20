@@ -1,6 +1,7 @@
 """Background fingerprint zip import jobs (daemon thread, like blob migration)."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -15,6 +16,12 @@ from django.conf import settings
 from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
+from fingerprints.duplicate_scan import (
+    BLOCKING_TYPES,
+    merge_reports,
+    scan_extracted_duplicates,
+    scan_zip_name_collisions,
+)
 from fingerprints.models import FingerprintImportJob
 from fingerprints.services import FingerprintImportError, discover_pair_dirs, import_pair_directory
 from utils.db_time import fetch_db_now
@@ -32,6 +39,20 @@ def _import_workers() -> int:
     return max(1, min(8, int(getattr(settings, "FP_IMPORT_WORKERS", 4) or 4)))
 
 
+def _parse_result_json(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _dump_result_json(data: dict) -> str:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
 def serialize_import_job(job: FingerprintImportJob) -> dict:
     total = int(job.total_estimate or 0)
     done = int(job.processed or 0)
@@ -41,12 +62,16 @@ def serialize_import_job(job: FingerprintImportJob) -> dict:
         percent = min(99.0, round(100.0 * done / total, 2))
     else:
         percent = 0.0
+    result = _parse_result_json(getattr(job, "result_json", None))
+    options = result.get("options") if isinstance(result.get("options"), dict) else {}
+    duplicate_report = result.get("duplicate_report")
     return {
         "id": job.id,
         "zip_name": job.zip_name,
         "status": job.status,
         "algo_version": job.algo_version,
         "skip_existing": bool(job.skip_existing),
+        "fail_on_duplicates": bool(options.get("fail_on_duplicates")),
         "total_estimate": total,
         "processed": done,
         "succeeded": int(job.succeeded or 0),
@@ -56,6 +81,8 @@ def serialize_import_job(job: FingerprintImportJob) -> dict:
         "cancel_requested": bool(job.cancel_requested),
         "message": job.message,
         "last_error": job.last_error,
+        "duplicate_report": duplicate_report,
+        "library_bmp_reused": int(result.get("library_bmp_reused") or 0),
         "created_by": job.created_by,
         "create_time": job.create_time.isoformat(sep=" ") if job.create_time else None,
         "started_at": job.started_at.isoformat(sep=" ") if job.started_at else None,
@@ -92,6 +119,7 @@ def create_import_job(
     tags: str = "fingerprint",
     skip_existing: bool = True,
     category_id: int | None = None,
+    fail_on_duplicates: bool = False,
 ) -> FingerprintImportJob:
     now = fetch_db_now()
     job = FingerprintImportJob(
@@ -104,6 +132,9 @@ def create_import_job(
         category_id=category_id,
         created_by=(created_by or "")[:100],
         message="排队中…",
+        result_json=_dump_result_json(
+            {"options": {"fail_on_duplicates": bool(fail_on_duplicates)}}
+        ),
         create_time=now,
         updated_at=now,
     )
@@ -141,9 +172,14 @@ def _update_progress(job_id: int, **fields) -> None:
     FingerprintImportJob.objects.filter(pk=job_id).update(**fields)
 
 
-def _import_one_pair(pair_dir: Path, job: FingerprintImportJob) -> tuple[str, str]:
-    """Return (outcome, detail) where outcome in succeeded|skipped|failed."""
+def _job_options(job: FingerprintImportJob) -> dict:
+    return _parse_result_json(job.result_json).get("options") or {}
+
+
+def _import_one_pair(pair_dir: Path, job: FingerprintImportJob) -> tuple[str, str, list[dict], int]:
+    """Return (outcome, detail, warnings, library_bmp_reused)."""
     close_old_connections()
+    fail_on_pair = bool(_job_options(job).get("fail_on_duplicates"))
     try:
         result = import_pair_directory(
             pair_dir,
@@ -152,13 +188,14 @@ def _import_one_pair(pair_dir: Path, job: FingerprintImportJob) -> tuple[str, st
             algo_version=job.algo_version,
             category_id=job.category_id,
             skip_existing=bool(job.skip_existing),
+            fail_on_pair_same_bmp=fail_on_pair,
         )
         if result.skipped:
-            return "skipped", result.batch_name
-        return "succeeded", result.batch_name
+            return "skipped", result.batch_name, list(result.warnings or []), int(result.library_bmp_reused or 0)
+        return "succeeded", result.batch_name, list(result.warnings or []), int(result.library_bmp_reused or 0)
     except Exception as exc:
         logger.warning("fingerprint pair import failed dir=%s: %s", pair_dir, exc)
-        return "failed", f"{pair_dir.name}: {exc}"[:480]
+        return "failed", f"{pair_dir.name}: {exc}"[:480], [], 0
     finally:
         close_old_connections()
 
@@ -207,31 +244,69 @@ def execute_import_job(job_id: int) -> None:
         if not zip_path.is_file():
             raise FingerprintImportError(f"zip 文件不存在: {job.zip_path}")
 
+        options = _job_options(job)
+        fail_on_duplicates = bool(options.get("fail_on_duplicates"))
+        base_result = _parse_result_json(job.result_json)
+
         work_dir = Path(tempfile.mkdtemp(prefix=f"fp_job_{job_id}_", dir=str(_staging_dir())))
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
+                name_report = scan_zip_name_collisions(zf)
                 zf.extractall(work_dir)
             pair_dirs = discover_pair_dirs(work_dir)
             if not pair_dirs:
                 raise FingerprintImportError("压缩包中未找到 batmatch 风格的成对目录")
 
+            content_report = scan_extracted_duplicates(work_dir, pair_dirs)
+            dup_report = merge_reports(name_report, content_report)
+            base_result["duplicate_report"] = dup_report.to_dict()
+            base_result["options"] = options
             _update_progress(
                 job_id,
                 total_estimate=len(pair_dirs),
-                message=f"发现 {len(pair_dirs)} 对，开始导入…",
+                result_json=_dump_result_json(base_result),
+                message=(
+                    f"发现 {len(pair_dirs)} 对；{dup_report.summary_text()}；开始导入…"
+                    if dup_report.total
+                    else f"发现 {len(pair_dirs)} 对，开始导入…"
+                ),
             )
 
+            if fail_on_duplicates and dup_report.blocking_count > 0:
+                blocking = [
+                    w for w in dup_report.warnings if w.get("type") in BLOCKING_TYPES
+                ]
+                detail = blocking[0].get("message") if blocking else "存在阻断级重复"
+                _update_progress(
+                    job_id,
+                    status=FingerprintImportJob.STATUS_FAILED,
+                    finished_at=timezone.now(),
+                    last_error=str(detail)[:500],
+                    result_json=_dump_result_json(base_result),
+                    message=f"导入中止：{dup_report.summary_text()}（严格模式）"[:500],
+                )
+                return
+
             succeeded = skipped = failed = processed = 0
+            library_bmp_reused = 0
             workers = _import_workers()
             last_error = ""
+            runtime_warnings: list[dict] = []
 
-            def _handle_outcome(outcome: str, detail: str) -> bool:
+            def _handle_outcome(
+                outcome: str, detail: str, warnings: list[dict], reused: int
+            ) -> bool:
                 """Apply one pair result; return False if cancelled."""
-                nonlocal succeeded, skipped, failed, processed, last_error
+                nonlocal succeeded, skipped, failed, processed, last_error, library_bmp_reused
                 refreshed = FingerprintImportJob.objects.filter(pk=job_id).only(
                     "cancel_requested"
                 ).first()
                 if refreshed and refreshed.cancel_requested:
+                    base_result["duplicate_report"] = dup_report.to_dict()
+                    base_result["library_bmp_reused"] = library_bmp_reused
+                    if runtime_warnings:
+                        # append pair-level extras not already in pre-scan
+                        pass
                     _update_progress(
                         job_id,
                         status=FingerprintImportJob.STATUS_CANCELLED,
@@ -240,11 +315,15 @@ def execute_import_job(job_id: int) -> None:
                         failed=failed,
                         skipped=skipped,
                         finished_at=timezone.now(),
+                        result_json=_dump_result_json(base_result),
                         message=f"已取消（成功 {succeeded} · 跳过 {skipped} · 失败 {failed}）",
                     )
                     return False
 
                 processed += 1
+                library_bmp_reused += reused
+                if warnings:
+                    runtime_warnings.extend(warnings)
                 if outcome == "succeeded":
                     succeeded += 1
                 elif outcome == "skipped":
@@ -254,6 +333,7 @@ def execute_import_job(job_id: int) -> None:
                     last_error = detail
 
                 if processed % 2 == 0 or processed == len(pair_dirs):
+                    base_result["library_bmp_reused"] = library_bmp_reused
                     _update_progress(
                         job_id,
                         processed=processed,
@@ -261,6 +341,7 @@ def execute_import_job(job_id: int) -> None:
                         failed=failed,
                         skipped=skipped,
                         last_error=last_error[:500],
+                        result_json=_dump_result_json(base_result),
                         message=(
                             f"导入中 {processed}/{len(pair_dirs)}："
                             f"成功 {succeeded} · 跳过 {skipped} · 失败 {failed}"
@@ -270,15 +351,15 @@ def execute_import_job(job_id: int) -> None:
 
             if workers <= 1:
                 for pair_dir in pair_dirs:
-                    outcome, detail = _import_one_pair(pair_dir, job)
-                    if not _handle_outcome(outcome, detail):
+                    outcome, detail, warnings, reused = _import_one_pair(pair_dir, job)
+                    if not _handle_outcome(outcome, detail, warnings, reused):
                         return
             else:
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = {pool.submit(_import_one_pair, d, job): d for d in pair_dirs}
                     for fut in as_completed(futures):
-                        outcome, detail = fut.result()
-                        if not _handle_outcome(outcome, detail):
+                        outcome, detail, warnings, reused = fut.result()
+                        if not _handle_outcome(outcome, detail, warnings, reused):
                             for pending in futures:
                                 pending.cancel()
                             return
@@ -286,6 +367,16 @@ def execute_import_job(job_id: int) -> None:
             status = FingerprintImportJob.STATUS_COMPLETED
             if succeeded == 0 and failed > 0:
                 status = FingerprintImportJob.STATUS_FAILED
+
+            # Keep pre-scan report as source of truth; note library reuse count
+            base_result["duplicate_report"] = dup_report.to_dict()
+            base_result["library_bmp_reused"] = library_bmp_reused
+            msg = f"导入完成（成功 {succeeded} · 跳过 {skipped} · 失败 {failed}）"
+            if dup_report.total:
+                msg += f"；{dup_report.summary_text()}"
+            if library_bmp_reused:
+                msg += f"；图库复用 bmp {library_bmp_reused}"
+
             _update_progress(
                 job_id,
                 status=status,
@@ -295,9 +386,8 @@ def execute_import_job(job_id: int) -> None:
                 skipped=skipped,
                 last_error=last_error[:500],
                 finished_at=timezone.now(),
-                message=(
-                    f"导入完成（成功 {succeeded} · 跳过 {skipped} · 失败 {failed}）"
-                ),
+                result_json=_dump_result_json(base_result),
+                message=msg[:500],
             )
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)

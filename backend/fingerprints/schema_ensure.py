@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS `fingerprint_import_job` (
   `cancel_requested` smallint NOT NULL DEFAULT 0,
   `message` varchar(500) NOT NULL DEFAULT '',
   `last_error` varchar(500) NOT NULL DEFAULT '',
+  `result_json` mediumtext,
   `created_by` varchar(100) NOT NULL DEFAULT '',
   `create_time` datetime DEFAULT NULL,
   `started_at` datetime DEFAULT NULL,
@@ -95,6 +96,22 @@ CREATE TABLE IF NOT EXISTS `fingerprint_import_job` (
   KEY `idx_fp_import_status` (`status`, `id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
+
+
+def _ensure_import_job_columns(cursor) -> None:
+    cursor.execute(
+        """
+        SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'fingerprint_import_job'
+          AND COLUMN_NAME = 'result_json'
+        """
+    )
+    if cursor.fetchone()[0]:
+        return
+    cursor.execute(
+        "ALTER TABLE `fingerprint_import_job` ADD COLUMN `result_json` mediumtext NULL"
+    )
 
 
 def ensure_fingerprint_tables() -> None:
@@ -109,6 +126,7 @@ def ensure_fingerprint_tables() -> None:
                 sql = stmt.strip()
                 if sql:
                     cursor.execute(sql)
+            _ensure_import_job_columns(cursor)
         from fingerprints.layer_config import seed_default_layer_types
 
         seed_default_layer_types()

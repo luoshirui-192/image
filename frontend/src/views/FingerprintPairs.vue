@@ -33,6 +33,14 @@ const selectedPairId = ref(null)
 const importDialogVisible = ref(false)
 const importFile = ref(null)
 const importVersion = ref('1.0')
+const importFailOnDuplicates = ref(false)
+const dupReportExpanded = ref(false)
+
+const dupReport = computed(() => importJob.value?.duplicate_report || null)
+const dupWarningRows = computed(() => {
+  const list = dupReport.value?.warnings || []
+  return list.slice(0, 50)
+})
 
 const typeDialogVisible = ref(false)
 const typeLoading = ref(false)
@@ -251,8 +259,12 @@ async function pollImportJob(jobId) {
     if (status === 'completed' || status === 'failed' || status === 'cancelled') {
       stopPoll()
       importing.value = false
-      if (status === 'completed') ElMessage.success(job.message || '导入完成')
-      else if (status === 'failed') ElMessage.error(job.message || job.last_error || '导入失败')
+      const dupTotal = Number(job.duplicate_report?.total || 0)
+      if (dupTotal > 0) dupReportExpanded.value = true
+      if (status === 'completed') {
+        if (dupTotal > 0) ElMessage.warning(job.message || `导入完成，发现 ${dupTotal} 项重复`)
+        else ElMessage.success(job.message || '导入完成')
+      } else if (status === 'failed') ElMessage.error(job.message || job.last_error || '导入失败')
       else ElMessage.warning(job.message || '已取消')
       await loadMeta()
       await loadPairs()
@@ -268,7 +280,18 @@ async function pollImportJob(jobId) {
 function openImportDialog() {
   importFile.value = null
   importVersion.value = '1.0'
+  importFailOnDuplicates.value = false
   importDialogVisible.value = true
+}
+
+function dupTypeLabel(type) {
+  const map = {
+    zip_duplicate_content: '包内同内容',
+    zip_name_collision: '同名覆盖',
+    pair_same_bmp: '左右同图',
+    cross_pair_shared_bmp: '跨配对共用',
+  }
+  return map[type] || type
 }
 
 function onImportFileChange(uploadFile) {
@@ -293,6 +316,7 @@ async function submitImport() {
     const res = await importFingerprintZipApi(importFile.value, {
       algo_version: ver,
       skip_existing: true,
+      fail_on_duplicates: importFailOnDuplicates.value,
     })
     const job = res?.data?.job
     if (!job?.id) {
@@ -301,6 +325,7 @@ async function submitImport() {
       return
     }
     importJob.value = job
+    dupReportExpanded.value = false
     ElMessage.success(`已启动导入（版本 ${ver}）：已有配对会合并新版本特征层`)
     await pollImportJob(job.id)
     if (importing.value) {
@@ -560,6 +585,28 @@ onBeforeUnmount(() => {
         · 成功 {{ importJob.succeeded || 0 }}
         · 跳过 {{ importJob.skipped || 0 }}
         · 失败 {{ importJob.failed || 0 }}
+        <template v-if="importJob.library_bmp_reused">
+          · 图库复用 bmp {{ importJob.library_bmp_reused }}
+        </template>
+      </div>
+      <div v-if="dupReport && dupReport.total > 0" class="dup-report">
+        <div class="dup-report-head">
+          <el-tag type="warning" size="small">重复检测</el-tag>
+          <span>{{ dupReport.summary }}</span>
+          <el-button link type="primary" size="small" @click="dupReportExpanded = !dupReportExpanded">
+            {{ dupReportExpanded ? '收起' : '展开明细' }}
+          </el-button>
+        </div>
+        <div v-if="dupReportExpanded" class="dup-report-body">
+          <div v-for="(w, idx) in dupWarningRows" :key="idx" class="dup-row">
+            <el-tag size="small" effect="plain">{{ dupTypeLabel(w.type) }}</el-tag>
+            <span>{{ w.message }}</span>
+            <span v-if="w.paths?.length" class="dup-paths">{{ w.paths.slice(0, 4).join(' · ') }}</span>
+          </div>
+          <div v-if="(dupReport.warnings || []).length > dupWarningRows.length" class="muted">
+            仅显示前 {{ dupWarningRows.length }} 条
+          </div>
+        </div>
       </div>
     </el-card>
 
@@ -732,6 +779,11 @@ onBeforeUnmount(() => {
             <el-button>选择文件</el-button>
           </el-upload>
         </el-form-item>
+        <el-form-item label="严格模式">
+          <el-checkbox v-model="importFailOnDuplicates">
+            发现左右同图 / 同名覆盖时中止导入
+          </el-checkbox>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="importDialogVisible = false">取消</el-button>
@@ -833,6 +885,37 @@ onBeforeUnmount(() => {
   margin-top: 6px;
   color: var(--el-text-color-secondary);
   font-size: 12px;
+}
+.dup-report {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+.dup-report-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.dup-report-body {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow: auto;
+}
+.dup-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+.dup-paths {
+  color: var(--el-text-color-secondary);
+  word-break: break-all;
 }
 .layout {
   display: grid;

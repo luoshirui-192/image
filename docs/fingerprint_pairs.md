@@ -50,6 +50,18 @@ MinIO 下同样是相对路径对象键，前缀不变。
 - 版本对比：**叠色**（同图多 version 不同色）或 **分列**（同图左右两列各一 version）
 - 导入 zip 时填写 `algo_version`；同一配对再导新版本会**合并特征层**（相同版本跳过）
 - 管理员「特征类型」可增删启用类型（扩到约 6 种只加配置）
+- **重复文件检测**（导入预检）：包内同内容、同名覆盖、左右同图、跨配对共用 bmp；默认告警仍导入，可选「严格模式」中止；进度区可展开明细
+
+## 重复文件检测
+
+| 类型 | 含义 | 默认 | 严格模式 |
+|------|------|------|----------|
+| `zip_duplicate_content` | 包内多路径相同 SHA256 | 告警 | 告警 |
+| `zip_name_collision` | zip 同名 / 大小写冲突（解压会覆盖） | 告警 | **中止** |
+| `pair_same_bmp` | 同一对左右 bmp 内容相同 | 告警 | **中止** |
+| `cross_pair_shared_bmp` | 不同配对目录共用同一 bmp 内容 | 告警 | 告警 |
+
+另：bmp 已在图库（SHA256 命中）时仍**复用** `ImageInfo`，并在任务里统计 `library_bmp_reused`。
 
 ## 机器 A 上线
 
@@ -64,7 +76,8 @@ MinIO 下同样是相对路径对象键，前缀不变。
 - `GET /api/fingerprints/layer-types/` — 动态勾选配置
 - `POST /api/fingerprints/layer-types/` — 管理员新增特征类型
 - `PATCH /api/fingerprints/layer-types/{id}/` — 管理员更新（启用/颜色/解码参数等）
-- `POST /api/fingerprints/pairs/import-zip/` — 导入 zip（表单字段 `algo_version`；同配对新版本合并层）
+- `POST /api/fingerprints/pairs/import-zip/` — 导入 zip（`algo_version`；`fail_on_duplicates=1` 严格模式；同配对新版本合并层）
+- `GET /api/fingerprints/import-jobs/{id}/` — 任务进度，含 `duplicate_report`
 - `GET /api/fingerprints/pairs/` — 列表筛选
 - `GET /api/fingerprints/pairs/{id}/compare/` — 对比数据（含 `available_algo_versions` / 各层 `color`）
 

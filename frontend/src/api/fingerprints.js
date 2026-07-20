@@ -34,13 +34,14 @@ export function fetchFingerprintCompareApi(id, params = {}) {
 
 export function importFingerprintZipApi(
   file,
-  { tags, algo_version, skip_existing, category_id, onUploadProgress } = {},
+  { tags, algo_version, skip_existing, fail_on_duplicates, category_id, onUploadProgress } = {},
 ) {
   const form = new FormData()
   form.append('file', file)
   if (tags) form.append('tags', tags)
   if (algo_version) form.append('algo_version', algo_version)
   if (skip_existing != null) form.append('skip_existing', skip_existing ? '1' : '0')
+  if (fail_on_duplicates != null) form.append('fail_on_duplicates', fail_on_duplicates ? '1' : '0')
   if (category_id != null) form.append('category_id', String(category_id))
   return request.post('/fingerprints/pairs/import-zip/', form, {
     onUploadProgress,
