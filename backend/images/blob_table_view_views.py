@@ -247,7 +247,7 @@ class BlobTableViewExportToConnectionView(APIView):
         job = BlobSimulatedExportJob.objects.get(pk=job.id)
         write_operate_log(
             request,
-            "blob_table_export_job_start",
+            "export_job_start",
             detail=(
                 f"job_id={job.id} view_id={pk} "
                 f"target={job.target_db_alias or job.target_connection_id}."
@@ -281,5 +281,5 @@ class BlobSimulatedExportJobDetailView(APIView):
             job = cancel_export_job(pk)
         except SimulatedExportError as exc:
             return error_response(str(exc), code=4041, status=404)
-        write_operate_log(request, "blob_table_export_job_cancel", detail=f"job_id={pk}")
+        write_operate_log(request, "export_job_cancel", detail=f"job_id={pk}")
         return success_response(serialize_export_job(job), message="已请求取消")
