@@ -335,17 +335,10 @@ def _ensure_target_browse_view(
         path_lookup_table=path_lookup or None,
         display_columns=display_cols,
         remark=remark,
+        # Share path identity with the source browse view so both preview via image_source_map.
+        source_uid=source_uid or None,
+        blob_column_path_mappings=mappings_raw or None,
     )
-    patch: dict[str, Any] = {"update_time": timezone.now()}
-    if source_uid:
-        patch["source_uid"] = source_uid
-    if mappings_raw:
-        patch["blob_column_path_mappings"] = mappings_raw
-    if path_lookup and (created.path_lookup_table or "").strip() != path_lookup:
-        patch["path_lookup_table"] = path_lookup
-    if len(patch) > 1:
-        BlobTableView.objects.filter(pk=created.pk).update(**patch)
-        created.refresh_from_db()
     return {
         "target_view_id": created.id,
         "target_view_created": True,

@@ -1108,6 +1108,8 @@ def create_table_view(
     display_columns: list[str] | None = None,
     where_clause: str = "",
     remark: str = "",
+    source_uid: str | None = None,
+    blob_column_path_mappings: str | list | None = None,
 ) -> BlobTableView:
     from images.blob_view_path_service import BlobViewPathError, resolve_source_metadata
 
@@ -1149,17 +1151,28 @@ def create_table_view(
     from images.blob_migration_service import find_migration_source_match
     from images.source_identity import generate_source_uid, is_valid_source_uid, normalize_source_uid
 
-    view_uid = ""
-    matched_source, _ambiguous = find_migration_source_match(
-        db_alias=db_alias,
-        database=db_name,
-        source_table=table,
-        source_object_type=meta["source_object_type"],
-    )
-    if matched_source is not None:
-        view_uid = normalize_source_uid(getattr(matched_source, "source_uid", ""))
+    # Prefer explicit shared uid (e.g. path-export reuses source browse mapping).
+    view_uid = normalize_source_uid(source_uid or "")
+    if not is_valid_source_uid(view_uid):
+        matched_source, _ambiguous = find_migration_source_match(
+            db_alias=db_alias,
+            database=db_name,
+            source_table=table,
+            source_object_type=meta["source_object_type"],
+        )
+        if matched_source is not None:
+            view_uid = normalize_source_uid(getattr(matched_source, "source_uid", ""))
     if not is_valid_source_uid(view_uid):
         view_uid = generate_source_uid()
+
+    if isinstance(blob_column_path_mappings, str) and blob_column_path_mappings.strip():
+        mappings_value = blob_column_path_mappings
+    elif blob_column_path_mappings:
+        mappings_value = serialize_blob_column_path_mappings(blob_column_path_mappings)
+    else:
+        mappings_value = serialize_blob_column_path_mappings(
+            meta.get("blob_column_path_mappings") or []
+        )
 
     return BlobTableView.objects.create(
         name=(name or "").strip() or f"{table} 浏览",
@@ -1168,10 +1181,9 @@ def create_table_view(
         source_uid=view_uid,
         source_table=table,
         source_object_type=meta["source_object_type"],
-        path_lookup_table=meta["path_lookup_table"],
-        blob_column_path_mappings=serialize_blob_column_path_mappings(
-            meta.get("blob_column_path_mappings") or []
-        ),
+        path_lookup_table=(path_lookup_table or meta["path_lookup_table"] or "").strip()
+        or meta["path_lookup_table"],
+        blob_column_path_mappings=mappings_value,
         source_pk_column=pk,
         blob_column=meta["blob_column"],
         blob_columns=serialize_blob_columns(meta["blob_columns"]),

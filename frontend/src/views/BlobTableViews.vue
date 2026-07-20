@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, VideoPlay, View } from '@element-plus/icons-vue'
 import ImagePreview from '@/components/ImagePreview.vue'
@@ -17,6 +17,7 @@ import {
   listBlobCatalogConnectionsApi,
   listBlobCatalogDatabasesApi,
   listBlobCatalogObjectsApi,
+  listBlobMigrationDatabasesApi,
   listBlobMigrationSourcesApi,
   listBlobMigrationMapStatsApi,
   listBlobTableViewsApi,
@@ -36,13 +37,17 @@ import {
 } from '@/api/sql'
 import { highlightAndScrollTableRow } from '@/utils/tableScroll'
 import { callWithRetry } from '@/utils/callWithRetry'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 import { readBrowseUiState, writeBrowseUiState } from '@/utils/browseUiState'
 
 const route = useRoute()
+const router = useRouter()
 
 const views = ref([])
 const loadingViews = ref(false)
 const activeViewId = ref(null)
+const catalogTreeKey = ref(0)
+const catalogTreeRef = ref(null)
 
 const columns = ref([])
 const tableRows = ref([])
@@ -182,15 +187,26 @@ const migrateForm = reactive({
 
 const exportDialogVisible = ref(false)
 const exportSaving = ref(false)
-const exportConnections = ref([])
+const exportPhase = ref('form') // form | running | success | failed
+const exportError = ref('')
+const exportResult = ref(null)
+const exportStartedAt = ref(0)
+const exportElapsedSec = ref(0)
+let exportElapsedTimer = null
+const exportTargets = ref([]) // { key, label, type: 'alias'|'conn', alias?, connectionId?, dbName? }
 const exportDatabases = ref([])
+const loadingExportTargets = ref(false)
 const loadingExportDatabases = ref(false)
 const exportForm = reactive({
-  connectionId: null,
+  targetKey: '',
   database: '',
   tableName: '',
   ifExists: 'fail',
 })
+
+const selectedExportTarget = computed(() =>
+  exportTargets.value.find((t) => t.key === exportForm.targetKey) || null,
+)
 
 const createViewDialogVisible = ref(false)
 const createViewSaving = ref(false)
@@ -815,36 +831,95 @@ async function submitSavedViewMigration() {
   }
 }
 
-async function loadExportConnections() {
-  try {
-    const res = await callWithRetry(() => listExternalDbConnectionsApi())
-    exportConnections.value = (res.data || []).filter((item) => item.enabled !== 0)
-  } catch {
-    exportConnections.value = []
+function stopExportElapsed() {
+  if (exportElapsedTimer) {
+    clearInterval(exportElapsedTimer)
+    exportElapsedTimer = null
   }
 }
 
-async function loadExportDatabases(connectionId) {
-  exportDatabases.value = []
-  exportForm.database = ''
-  if (!connectionId) return
+function startExportElapsed() {
+  stopExportElapsed()
+  exportStartedAt.value = Date.now()
+  exportElapsedSec.value = 0
+  exportElapsedTimer = setInterval(() => {
+    exportElapsedSec.value = Math.floor((Date.now() - exportStartedAt.value) / 1000)
+  }, 500)
+}
+
+async function loadExportTargets() {
+  loadingExportTargets.value = true
+  try {
+    const [dbRes, connRes] = await Promise.all([
+      callWithRetry(() => listBlobMigrationDatabasesApi()),
+      callWithRetry(() => listExternalDbConnectionsApi()),
+    ])
+    const dbs = dbRes.data || []
+    const conns = (connRes.data || []).filter((item) => item.enabled !== 0)
+    const items = []
+    for (const db of dbs) {
+      items.push({
+        key: `alias:${db.alias}`,
+        label: db.label
+          ? `${db.label}（${db.alias}）`
+          : `${db.alias}（${db.name || db.alias}@${db.host || 'local'}）`,
+        type: 'alias',
+        alias: db.alias,
+        dbName: db.name || '',
+      })
+    }
+    for (const conn of conns) {
+      // Skip if already represented as migration alias
+      if (items.some((i) => i.type === 'alias' && i.alias === conn.alias)) continue
+      items.push({
+        key: `conn:${conn.id}`,
+        label: `${conn.name}（${conn.host}/${conn.db_name}）`,
+        type: 'conn',
+        connectionId: conn.id,
+        dbName: conn.db_name || '',
+      })
+    }
+    if (items.length || !exportTargets.value.length) {
+      exportTargets.value = items
+    }
+  } catch {
+    if (!exportTargets.value.length) exportTargets.value = []
+  } finally {
+    loadingExportTargets.value = false
+  }
+}
+
+async function loadExportDatabasesForTarget(target) {
+  const prevDb = exportForm.database
+  if (!target) {
+    exportDatabases.value = []
+    exportForm.database = ''
+    return
+  }
   loadingExportDatabases.value = true
   try {
-    const res = await callWithRetry(() =>
-      listBlobCatalogDatabasesApi({ connectionId }),
-    )
+    const params = target.type === 'conn'
+      ? { connectionId: target.connectionId }
+      : { dbAlias: target.alias }
+    const res = await callWithRetry(() => listBlobCatalogDatabasesApi(params))
     const list = res.data?.databases || res.data || []
-    exportDatabases.value = Array.isArray(list)
+    const names = Array.isArray(list)
       ? list.map((item) => (typeof item === 'string' ? item : item.name || item.database || '')).filter(Boolean)
       : []
-    const preferred = exportConnections.value.find((c) => c.id === connectionId)?.db_name || ''
-    if (preferred && exportDatabases.value.includes(preferred)) {
-      exportForm.database = preferred
-    } else if (exportDatabases.value.length === 1) {
-      exportForm.database = exportDatabases.value[0]
+    exportDatabases.value = names
+    if (prevDb && names.includes(prevDb)) {
+      exportForm.database = prevDb
+    } else if (target.dbName && names.includes(target.dbName)) {
+      exportForm.database = target.dbName
+    } else if (names.length === 1) {
+      exportForm.database = names[0]
+    } else {
+      exportForm.database = ''
     }
   } catch (err) {
-    ElMessage.error(err.message || '加载目标库列表失败')
+    if (!exportDatabases.value.length) {
+      ElMessage.error(err.message || '加载目标库列表失败')
+    }
   } finally {
     loadingExportDatabases.value = false
   }
@@ -853,24 +928,42 @@ async function loadExportDatabases(connectionId) {
 async function openExportDialog() {
   const view = savedViewForSelection.value
   if (!view) return
-  exportForm.connectionId = null
+  exportPhase.value = 'form'
+  exportError.value = ''
+  exportResult.value = null
+  exportForm.targetKey = ''
   exportForm.database = ''
   exportForm.tableName = view.source_table || ''
   exportForm.ifExists = 'fail'
   exportDatabases.value = []
-  await loadExportConnections()
+  stopExportElapsed()
+  await loadExportTargets()
   exportDialogVisible.value = true
 }
 
-async function onExportConnectionChange(connectionId) {
-  await loadExportDatabases(connectionId)
+async function onExportTargetChange(targetKey) {
+  const target = exportTargets.value.find((t) => t.key === targetKey) || null
+  await loadExportDatabasesForTarget(target)
+}
+
+async function openTargetBrowseView(result) {
+  const viewId = result?.target_view_id
+  if (!viewId) return
+  catalogTreeKey.value += 1
+  await loadViews()
+  activeViewId.value = viewId
+  rightTab.value = 'browse'
+  await router.replace({ query: { ...route.query, viewId: String(viewId) } }).catch(() => {})
+  browseReady.value = true
+  await loadRows({ append: false })
 }
 
 async function submitExportToConnection() {
   const view = savedViewForSelection.value
   if (!view?.id) return
-  if (!exportForm.connectionId) {
-    ElMessage.warning('请选择目标连接')
+  const target = selectedExportTarget.value
+  if (!target) {
+    ElMessage.warning('请选择目标连接 / 数据库别名')
     return
   }
   if (!exportForm.database) {
@@ -882,37 +975,57 @@ async function submitExportToConnection() {
     return
   }
   exportSaving.value = true
+  exportPhase.value = 'running'
+  exportError.value = ''
+  exportResult.value = null
+  startExportElapsed()
   try {
-    const res = await exportBlobTableViewToConnectionApi(view.id, {
-      target_connection_id: exportForm.connectionId,
+    const payload = {
       target_database: exportForm.database,
       target_table: exportForm.tableName.trim(),
       if_exists: exportForm.ifExists,
-    })
-    const data = res.data || {}
-    const rows = data.rows_written ?? 0
-    const table = data.target_table || exportForm.tableName
-    const viewName = data.target_view_name || table
-    await loadViews()
-    // 留在原表：导出是复制，不是搬家；目标库在目录里另有「已保存」配置可打开。
-    if (data.target_view_error) {
-      ElMessage.warning(
-        `已导出 ${rows} 行到 ${exportForm.database}.${table}，但浏览配置未创建：${data.target_view_error}`,
-      )
-    } else if (data.target_view_id) {
-      const action = data.target_view_created ? '已创建' : '已更新'
-      ElMessage.success(
-        `已导出 ${rows} 行到 ${exportForm.database}.${table}，${action}浏览配置「${viewName}」。原表仍可继续浏览预览。`,
-      )
-    } else {
-      ElMessage.success(`已导出 ${rows} 行到 ${exportForm.database}.${table}`)
     }
-    exportDialogVisible.value = false
+    if (target.type === 'conn') {
+      payload.target_connection_id = target.connectionId
+    } else {
+      payload.target_db_alias = target.alias
+    }
+    const res = await exportBlobTableViewToConnectionApi(view.id, payload)
+    const data = res.data || {}
+    exportResult.value = data
+    exportPhase.value = 'success'
+    await loadViews()
+    catalogTreeKey.value += 1
+    if (data.target_view_error) {
+      ElMessage.warning(`表已导出，但浏览配置未就绪：${data.target_view_error}`)
+    } else {
+      ElMessage.success(
+        `导出成功：${data.rows_written ?? 0} 行 → ${exportForm.database}.${data.target_table || exportForm.tableName}`,
+      )
+    }
   } catch (err) {
-    ElMessage.error(err.message || '导出失败')
+    exportPhase.value = 'failed'
+    exportError.value = err.message || '导出失败'
+    ElMessage.error(exportError.value)
   } finally {
     exportSaving.value = false
+    stopExportElapsed()
   }
+}
+
+function closeExportDialog() {
+  if (exportSaving.value) return
+  exportDialogVisible.value = false
+  exportPhase.value = 'form'
+  exportError.value = ''
+  exportResult.value = null
+  stopExportElapsed()
+}
+
+async function openExportResultView() {
+  if (!exportResult.value?.target_view_id) return
+  await openTargetBrowseView(exportResult.value)
+  closeExportDialog()
 }
 
 async function openCreateViewDialog() {
@@ -1668,9 +1781,7 @@ watch(rightTab, (tab) => {
   }
 })
 
-onMounted(async () => {
-  window.addEventListener('resize', syncTableHeight)
-
+async function bootstrapBrowsePage() {
   browseReady.value = false
   await loadViews()
   restoreBrowseUiState()
@@ -1696,12 +1807,34 @@ onMounted(async () => {
     await loadRows({ append: false })
   }
   persistBrowseUiState()
+}
+
+let browseBootstrapped = false
+usePageDataRefresh(
+  async () => {
+    if (!browseBootstrapped) {
+      await bootstrapBrowsePage()
+      browseBootstrapped = true
+      return
+    }
+    await loadViews()
+  },
+  {
+    isEmpty: () => !views.value.length,
+    intervalMs: 2500,
+    maxEmptyRetries: 10,
+  },
+)
+
+onMounted(() => {
+  window.addEventListener('resize', syncTableHeight)
 })
 
 onUnmounted(() => {
   unbindTableScroll()
   resizeObserver?.disconnect()
   window.removeEventListener('resize', syncTableHeight)
+  stopExportElapsed()
 })
 </script>
 
@@ -1717,12 +1850,20 @@ onUnmounted(() => {
         <aside class="view-list-panel">
           <div class="panel-head">
             <span>数据库目录</span>
-            <el-button link type="primary" :loading="loadingViews" title="刷新表视图配置" @click="loadViews">
+            <el-button
+              link
+              type="primary"
+              :loading="loadingViews"
+              title="刷新目录与表视图"
+              @click="catalogTreeKey += 1; loadViews()"
+            >
               <el-icon><Refresh /></el-icon>
             </el-button>
           </div>
           <div class="catalog-tree-wrap">
             <el-tree
+              :key="catalogTreeKey"
+              ref="catalogTreeRef"
               lazy
               :load="loadCatalogTree"
               node-key="id"
@@ -2185,55 +2326,120 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="exportDialogVisible" title="导出到连接" width="560px">
+    <el-dialog
+      v-model="exportDialogVisible"
+      title="导出到连接"
+      width="600px"
+      :close-on-click-modal="!exportSaving"
+      :close-on-press-escape="!exportSaving"
+      @close="closeExportDialog"
+    >
       <p class="field-hint migrate-dialog-desc">
-        将「{{ savedViewForSelection?.source_table }}」复制写成目标库物理表（BLOB 列填路径，未迁移为空）。
-        原库表不受影响，两边都可浏览；目标侧会自动挂浏览配置并支持图片预览。
+        将「{{ savedViewForSelection?.source_table }}」写成目标库物理表（BLOB 列填路径）。
+        原表不动；目标会挂上<strong>共享同一套路径映射</strong>的浏览配置，两边都能预览图片。
       </p>
-      <el-form label-width="110px">
-        <el-form-item label="目标连接" required>
-          <el-select
-            v-model="exportForm.connectionId"
-            placeholder="选择外部库连接"
-            filterable
-            style="width: 100%"
-            @change="onExportConnectionChange"
-          >
-            <el-option
-              v-for="conn in exportConnections"
-              :key="conn.id"
-              :label="`${conn.name} (${conn.host})`"
-              :value="conn.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="目标数据库" required>
-          <el-select
-            v-model="exportForm.database"
-            placeholder="选择数据库"
-            filterable
-            :loading="loadingExportDatabases"
-            style="width: 100%"
-          >
-            <el-option v-for="db in exportDatabases" :key="db" :label="db" :value="db" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="目标表名" required>
-          <el-input v-model="exportForm.tableName" maxlength="64" placeholder="默认与源表同名" />
-        </el-form-item>
-        <el-form-item label="已存在时">
-          <el-radio-group v-model="exportForm.ifExists">
-            <el-radio label="fail">失败（不覆盖）</el-radio>
-            <el-radio label="replace">替换（删表重建）</el-radio>
-            <el-radio label="truncate">清空后写入</el-radio>
-          </el-radio-group>
-        </el-form-item>
-      </el-form>
+
+      <template v-if="exportPhase === 'form' || exportPhase === 'failed'">
+        <el-alert
+          v-if="exportPhase === 'failed'"
+          type="error"
+          :closable="false"
+          show-icon
+          class="export-status-alert"
+          :title="exportError || '导出失败'"
+        />
+        <el-form label-width="110px">
+          <el-form-item label="目标连接" required>
+            <el-select
+              v-model="exportForm.targetKey"
+              placeholder="选择目标库 / 连接"
+              filterable
+              :loading="loadingExportTargets"
+              :empty-text="loadingExportTargets ? '加载中…' : '暂无目标，请先在迁移页添加连接'"
+              style="width: 100%"
+              @change="onExportTargetChange"
+            >
+              <el-option
+                v-for="t in exportTargets"
+                :key="t.key"
+                :label="t.label"
+                :value="t.key"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="目标数据库" required>
+            <el-select
+              v-model="exportForm.database"
+              placeholder="选择数据库"
+              filterable
+              :loading="loadingExportDatabases"
+              :empty-text="loadingExportDatabases ? '加载中…' : '请先选择目标连接'"
+              style="width: 100%"
+            >
+              <el-option v-for="db in exportDatabases" :key="db" :label="db" :value="db" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="目标表名" required>
+            <el-input v-model="exportForm.tableName" maxlength="64" placeholder="默认与源表同名" />
+          </el-form-item>
+          <el-form-item label="已存在时">
+            <el-radio-group v-model="exportForm.ifExists">
+              <el-radio value="fail">失败（不覆盖）</el-radio>
+              <el-radio value="replace">替换（删表重建）</el-radio>
+              <el-radio value="truncate">清空后写入</el-radio>
+            </el-radio-group>
+          </el-form-item>
+        </el-form>
+      </template>
+
+      <div v-else-if="exportPhase === 'running'" class="export-progress-panel">
+        <el-progress :percentage="100" :indeterminate="true" :duration="3" status="warning" />
+        <p class="export-progress-title">正在导出到目标库…</p>
+        <p class="export-progress-meta">已用时 {{ exportElapsedSec }} 秒 · 大表可能需数分钟，请勿关闭</p>
+      </div>
+
+      <div v-else-if="exportPhase === 'success'" class="export-progress-panel export-success-panel">
+        <el-result icon="success" title="导出成功">
+          <template #sub-title>
+            <div class="export-result-lines">
+              <div>
+                目标表：
+                <code>{{ exportForm.database }}.{{ exportResult?.target_table || exportForm.tableName }}</code>
+              </div>
+              <div>写入行数：{{ exportResult?.rows_written ?? 0 }}</div>
+              <div v-if="exportResult?.target_view_name">
+                浏览配置：{{ exportResult.target_view_name }}
+                <span v-if="exportResult.target_view_created">（新建）</span>
+                <span v-else>（已更新，共享原表路径映射）</span>
+              </div>
+              <div v-if="exportResult?.target_view_error" class="export-warn">
+                {{ exportResult.target_view_error }}
+              </div>
+            </div>
+          </template>
+        </el-result>
+      </div>
+
       <template #footer>
-        <el-button @click="exportDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="exportSaving" @click="submitExportToConnection">
-          开始导出
-        </el-button>
+        <template v-if="exportPhase === 'form' || exportPhase === 'failed'">
+          <el-button @click="closeExportDialog">取消</el-button>
+          <el-button type="primary" :loading="exportSaving" @click="submitExportToConnection">
+            {{ exportPhase === 'failed' ? '重试导出' : '开始导出' }}
+          </el-button>
+        </template>
+        <template v-else-if="exportPhase === 'running'">
+          <el-button disabled>导出进行中…</el-button>
+        </template>
+        <template v-else>
+          <el-button @click="closeExportDialog">关闭</el-button>
+          <el-button
+            v-if="exportResult?.target_view_id"
+            type="primary"
+            @click="openExportResultView"
+          >
+            打开目标浏览
+          </el-button>
+        </template>
       </template>
     </el-dialog>
   </div>
@@ -2887,6 +3093,37 @@ onUnmounted(() => {
 
 .load-more-hint.muted {
   color: var(--el-text-color-placeholder);
+}
+
+.export-status-alert {
+  margin-bottom: 12px;
+}
+.export-progress-panel {
+  padding: 12px 4px 4px;
+  text-align: center;
+}
+.export-progress-title {
+  margin: 14px 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.export-progress-meta {
+  margin: 0;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.export-success-panel :deep(.el-result) {
+  padding: 8px 0 0;
+}
+.export-result-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  font-size: 13px;
+}
+.export-warn {
+  color: var(--el-color-warning);
 }
 
 @media (max-width: 960px) {

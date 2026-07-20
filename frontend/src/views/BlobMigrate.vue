@@ -1,8 +1,9 @@
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { callWithRetry } from '@/utils/callWithRetry'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Connection, Refresh, Search } from '@element-plus/icons-vue'
 import {
@@ -38,6 +39,8 @@ const route = useRoute()
 
 const databases = ref([])
 const connections = ref([])
+const loadingDatabases = ref(false)
+const loadingConnections = ref(false)
 const discoveredTables = ref([])
 const sources = ref([])
 const discovering = ref(false)
@@ -106,23 +109,37 @@ function dbOptionLabel(db) {
 }
 
 async function loadConnections() {
+  loadingConnections.value = true
   try {
     const res = await callWithRetry(() => listExternalDbConnectionsApi())
-    connections.value = res.data || []
+    const list = res.data || []
+    if (list.length || !connections.value.length) {
+      connections.value = list
+    }
   } catch {
-    connections.value = []
+    if (!connections.value.length) connections.value = []
+  } finally {
+    loadingConnections.value = false
   }
 }
 
 async function loadDatabases() {
+  loadingDatabases.value = true
   try {
     const res = await callWithRetry(() => listBlobMigrationDatabasesApi())
-    databases.value = res.data || []
+    const list = res.data || []
+    if (list.length || !databases.value.length) {
+      databases.value = list
+    }
     if (!databases.value.some((d) => d.alias === form.dbAlias) && databases.value.length) {
       form.dbAlias = databases.value[0].alias
     }
   } catch {
-    databases.value = [{ alias: 'default', label: '本系统库', name: 'default', host: '' }]
+    if (!databases.value.length) {
+      databases.value = [{ alias: 'default', label: '本系统库', name: 'default', host: '' }]
+    }
+  } finally {
+    loadingDatabases.value = false
   }
 }
 
@@ -805,9 +822,20 @@ async function executeMigration() {
   }
 }
 
-onMounted(async () => {
+const routePrefillApplied = ref(false)
+
+async function refreshPageOptions() {
   await Promise.all([loadConnections(), loadDatabases(), loadSources(), loadJobHistory()])
-  applyRoutePrefill()
+  if (!routePrefillApplied.value) {
+    applyRoutePrefill()
+    routePrefillApplied.value = true
+  }
+}
+
+usePageDataRefresh(refreshPageOptions, {
+  isEmpty: () => !databases.value.length,
+  intervalMs: 2000,
+  maxEmptyRetries: 15,
 })
 
 function applyRoutePrefill() {
@@ -941,7 +969,12 @@ onUnmounted(() => {
         <h3>2. 选择数据源并扫描</h3>
         <el-form label-width="110px" class="compact-form">
           <el-form-item label="数据库">
-            <el-select v-model="form.dbAlias" style="min-width: 320px">
+            <el-select
+              v-model="form.dbAlias"
+              style="min-width: 320px"
+              :loading="loadingDatabases"
+              :empty-text="loadingDatabases ? '加载中…' : '暂无可用库，正在自动重试…'"
+            >
               <el-option
                 v-for="db in databases"
                 :key="db.alias"
@@ -949,6 +982,16 @@ onUnmounted(() => {
                 :value="db.alias"
               />
             </el-select>
+            <el-button
+              link
+              type="primary"
+              :loading="loadingDatabases"
+              class="ml-8"
+              @click="loadDatabases"
+            >
+              <el-icon><Refresh /></el-icon>
+              刷新库列表
+            </el-button>
             <el-button
               type="primary"
               plain
