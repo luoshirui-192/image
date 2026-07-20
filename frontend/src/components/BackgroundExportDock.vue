@@ -12,6 +12,7 @@ function statusLabel(status) {
   const map = {
     pending: '排队中',
     running: '导出中',
+    paused: '已暂停',
     completed: '已完成',
     failed: '失败',
     cancelled: '已取消',
@@ -23,6 +24,7 @@ function statusType(status) {
   if (status === 'completed') return 'success'
   if (status === 'failed') return 'danger'
   if (status === 'cancelled') return 'info'
+  if (status === 'paused') return 'warning'
   return 'warning'
 }
 
@@ -41,7 +43,7 @@ async function openResult(job) {
     <div class="export-panel-head">
       <h3>路径导出任务</h3>
       <el-button
-        v-if="store.visibleJobs.some((j) => !['pending', 'running'].includes(j.status))"
+        v-if="store.visibleJobs.some((j) => !['pending', 'running', 'paused'].includes(j.status))"
         link
         type="primary"
         size="small"
@@ -51,7 +53,7 @@ async function openResult(job) {
       </el-button>
     </div>
     <p class="field-hint">
-      从「数据库模拟」发起的路径导出在此查看进度；离开本页不挡视野，任务仍在后台跑。
+      全局串行排队：完成/暂停/取消后自动开始下一个。支持暂停与断点续传；容器重启后会自动重新排队续跑。
     </p>
 
     <el-empty
@@ -89,6 +91,23 @@ async function openResult(job) {
       <div class="export-actions">
         <el-button
           v-if="['pending', 'running'].includes(job.status)"
+          size="small"
+          type="warning"
+          plain
+          @click="store.pauseJob(job.id)"
+        >
+          暂停
+        </el-button>
+        <el-button
+          v-if="job.status === 'paused'"
+          size="small"
+          type="primary"
+          @click="store.resumeJob(job.id)"
+        >
+          继续
+        </el-button>
+        <el-button
+          v-if="['pending', 'running', 'paused'].includes(job.status)"
           size="small"
           @click="store.cancelJob(job.id)"
         >

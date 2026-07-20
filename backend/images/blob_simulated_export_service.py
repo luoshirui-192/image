@@ -40,6 +40,15 @@ class SimulatedExportCancelled(SimulatedExportError):
     """Raised when an async export job is cancelled mid-run."""
 
 
+class SimulatedExportPaused(SimulatedExportError):
+    """Raised when an async export job is paused mid-run (keeps checkpoint)."""
+
+    def __init__(self, message: str = "已暂停", *, offset: int = 0, rows_written: int = 0):
+        super().__init__(message)
+        self.offset = int(offset or 0)
+        self.rows_written = int(rows_written or 0)
+
+
 def _path_cell_to_string(value: Any) -> str:
     """Write real path only; pending / no_data / deleted become empty string."""
     if isinstance(value, dict):
@@ -359,13 +368,17 @@ def export_simulated_table_to_connection(
     target_table: str = "",
     if_exists: str = IF_EXISTS_FAIL,
     page_size: int | None = None,
+    start_offset: int = 0,
+    skip_prepare: bool = False,
     progress_callback=None,
     should_cancel=None,
+    should_pause=None,
 ) -> dict[str, Any]:
     """Materialize path-substituted browse rows into a physical table on another connection.
 
-    progress_callback(rows_written=..., total_estimate=...) is optional for async jobs.
-    should_cancel() -> bool stops the loop early (caller should treat as cancel).
+    progress_callback(rows_written=..., total_estimate=..., offset=...) is optional for async jobs.
+    should_cancel() / should_pause() stop the loop early.
+    start_offset + skip_prepare resume after pause/restart without wiping the target table.
     """
     mode = (if_exists or IF_EXISTS_FAIL).strip().lower()
     if mode not in IF_EXISTS_CHOICES:
@@ -421,35 +434,53 @@ def export_simulated_table_to_connection(
     column_names = [c["name"] for c in export_cols]
     path_columns = {c["name"] for c in export_cols if c.get("is_path_substitute") or c.get("is_blob")}
     batch = max(1, min(page_size or MAX_ROW_LIMIT, MAX_ROW_LIMIT))
+    offset = max(0, int(start_offset or 0))
+    rows_written = offset if skip_prepare else 0
 
     with db_alias_session(target_alias, database=target_db or None) as session_alias:
         conn = connections[session_alias]
-        _prepare_target_table(conn, table=dest_table, columns=export_cols, if_exists=mode)
+        if skip_prepare:
+            if not _table_exists(conn, dest_table):
+                raise SimulatedExportError(
+                    f"续传失败：目标表不存在 {dest_table}（请重新导出并选择替换/新建）"
+                )
+            expected = column_names
+            actual = _list_target_columns(conn, dest_table)
+            if actual != expected:
+                raise SimulatedExportError(
+                    f"续传失败：目标表列与源不一致。目标={actual} 期望={expected}"
+                )
+        else:
+            _prepare_target_table(conn, table=dest_table, columns=export_cols, if_exists=mode)
 
         placeholders = ", ".join(["%s"] * len(column_names))
         col_list = ", ".join(_quote_ident(n) for n in column_names)
         insert_sql = f"INSERT INTO {_quote_ident(dest_table)} ({col_list}) VALUES ({placeholders})"
 
-        rows_written = 0
-        offset = 0
         total_estimate: int | None = None
         while True:
             if should_cancel and should_cancel():
                 raise SimulatedExportCancelled("用户取消导出")
+            if should_pause and should_pause():
+                raise SimulatedExportPaused("用户暂停导出", offset=offset, rows_written=rows_written)
             page = fetch_simulated_table_rows(
                 view,
                 offset=offset,
                 limit=batch,
-                include_total=(offset == 0),
+                include_total=(offset == 0 or total_estimate is None),
                 touch_last_viewed=False,
             )
-            if offset == 0 and page.get("total") is not None:
+            if total_estimate is None and page.get("total") is not None:
                 try:
                     total_estimate = int(page.get("total") or 0)
                 except (TypeError, ValueError):
                     total_estimate = None
                 if progress_callback:
-                    progress_callback(rows_written=0, total_estimate=total_estimate)
+                    progress_callback(
+                        rows_written=rows_written,
+                        total_estimate=total_estimate,
+                        offset=offset,
+                    )
             rows = page.get("rows") or []
             if not rows:
                 break
@@ -457,11 +488,19 @@ def export_simulated_table_to_connection(
             with conn.cursor() as cursor:
                 cursor.executemany(insert_sql, values)
             rows_written += len(values)
+            offset += len(rows)
             if progress_callback:
-                progress_callback(rows_written=rows_written, total_estimate=total_estimate)
+                progress_callback(
+                    rows_written=rows_written,
+                    total_estimate=total_estimate,
+                    offset=offset,
+                )
+            if should_cancel and should_cancel():
+                raise SimulatedExportCancelled("用户取消导出")
+            if should_pause and should_pause():
+                raise SimulatedExportPaused("用户暂停导出", offset=offset, rows_written=rows_written)
             if not page.get("has_more"):
                 break
-            offset += len(rows)
 
     result: dict[str, Any] = {
         "view_id": view.id,
@@ -473,6 +512,7 @@ def export_simulated_table_to_connection(
         "target_table": dest_table,
         "if_exists": mode,
         "rows_written": rows_written,
+        "last_offset": offset,
         "columns": [
             {
                 "name": c["name"],

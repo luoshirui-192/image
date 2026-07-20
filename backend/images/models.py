@@ -265,6 +265,7 @@ class BlobSimulatedExportJob(models.Model):
 
     STATUS_PENDING = "pending"
     STATUS_RUNNING = "running"
+    STATUS_PAUSED = "paused"
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
     STATUS_CANCELLED = "cancelled"
@@ -278,7 +279,9 @@ class BlobSimulatedExportJob(models.Model):
     status = models.CharField(max_length=20, default=STATUS_PENDING)
     total_estimate = models.PositiveIntegerField(default=0)
     rows_written = models.PositiveIntegerField(default=0)
+    last_offset = models.PositiveIntegerField(default=0)
     cancel_requested = models.SmallIntegerField(default=0)
+    pause_requested = models.SmallIntegerField(default=0)
     message = models.CharField(max_length=500, default="")
     last_error = models.CharField(max_length=500, default="")
     result_json = models.TextField(null=True, blank=True)

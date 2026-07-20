@@ -945,9 +945,8 @@ class BlobMigrationTestCase(TestCase):
         count = reclaim_orphaned_migration_jobs(reason="测试重启")
         self.assertEqual(count, 1)
         job.refresh_from_db()
-        self.assertEqual(job.status, BlobMigrationJob.STATUS_PAUSED)
+        self.assertEqual(job.status, BlobMigrationJob.STATUS_PENDING)
         self.assertIn("测试重启", job.message)
-        self.assertIn("已暂停", job.message)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_api_delete_finished_job(self):

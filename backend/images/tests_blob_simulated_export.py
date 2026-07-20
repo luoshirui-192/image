@@ -112,7 +112,9 @@ CREATE TABLE IF NOT EXISTS blob_simulated_export_job (
     status VARCHAR(20) NOT NULL DEFAULT 'pending',
     total_estimate INTEGER NOT NULL DEFAULT 0,
     rows_written INTEGER NOT NULL DEFAULT 0,
+    last_offset INTEGER NOT NULL DEFAULT 0,
     cancel_requested SMALLINT NOT NULL DEFAULT 0,
+    pause_requested SMALLINT NOT NULL DEFAULT 0,
     message VARCHAR(500) NOT NULL DEFAULT '',
     last_error VARCHAR(500) NOT NULL DEFAULT '',
     result_json TEXT NULL,
@@ -190,6 +192,7 @@ class SimulatedExportTestCase(TestCase):
             cursor.execute("DELETE FROM image_source_map")
             cursor.execute("DELETE FROM blob_table_view")
             cursor.execute("DELETE FROM image_info")
+            cursor.execute("DELETE FROM blob_simulated_export_job")
             cursor.execute(f"DROP TABLE IF EXISTS {EXPORT_TABLE}")
             png = make_png_bytes()
             cursor.execute(
@@ -385,3 +388,81 @@ class SimulatedExportTestCase(TestCase):
         self.assertEqual(row1["photo"]["image_info_id"], self.image.id)
         row2 = next(r for r in page["rows"] if str(r.get("id")) == "2")
         self.assertEqual(row2["photo"]["status"], "no_data")
+
+    def test_export_resume_from_offset(self):
+        from images.blob_simulated_export_service import SimulatedExportPaused
+
+        checks = {"n": 0}
+
+        def pause_after_first_page():
+            checks["n"] += 1
+            # First loop-start check: continue; after first page write: pause.
+            return checks["n"] > 1
+
+        with self.assertRaises(SimulatedExportPaused) as ctx:
+            export_simulated_table_to_connection(
+                self.view.id,
+                target_db_alias="default",
+                target_table=EXPORT_TABLE,
+                if_exists="fail",
+                page_size=1,
+                should_pause=pause_after_first_page,
+            )
+        self.assertEqual(ctx.exception.offset, 1)
+        self.assertEqual(len(self._read_export_rows()), 1)
+
+        result = export_simulated_table_to_connection(
+            self.view.id,
+            target_db_alias="default",
+            target_table=EXPORT_TABLE,
+            if_exists="fail",
+            start_offset=ctx.exception.offset,
+            skip_prepare=True,
+            page_size=1,
+        )
+        self.assertEqual(result["rows_written"], 2)
+        self.assertEqual(len(self._read_export_rows()), 2)
+
+    def test_export_job_pause_resume_and_reclaim(self):
+        from images.blob_simulated_export_job_service import (
+            create_export_job,
+            pause_export_job,
+            reclaim_orphaned_export_jobs,
+            resume_export_job,
+        )
+        from images.models import BlobSimulatedExportJob
+
+        job = create_export_job(
+            view_id=self.view.id,
+            created_by="export_admin",
+            target_db_alias="default",
+            target_table=EXPORT_TABLE,
+            if_exists="fail",
+        )
+        pause_export_job(job.id)
+        job.refresh_from_db()
+        self.assertEqual(job.status, BlobSimulatedExportJob.STATUS_PAUSED)
+
+        resume_export_job(job.id)
+        job.refresh_from_db()
+        # sqlite sync: resume kicks queue and finishes immediately
+        self.assertEqual(job.status, BlobSimulatedExportJob.STATUS_COMPLETED)
+        self.assertEqual(job.rows_written, 2)
+
+        job2 = create_export_job(
+            view_id=self.view.id,
+            created_by="export_admin",
+            target_db_alias="default",
+            target_table=EXPORT_TABLE + "_2",
+            if_exists="fail",
+        )
+        BlobSimulatedExportJob.objects.filter(pk=job2.id).update(
+            status=BlobSimulatedExportJob.STATUS_RUNNING,
+            rows_written=1,
+            last_offset=1,
+        )
+        count = reclaim_orphaned_export_jobs(reason="测试重启")
+        self.assertEqual(count, 1)
+        job2.refresh_from_db()
+        self.assertEqual(job2.status, BlobSimulatedExportJob.STATUS_PENDING)
+        self.assertEqual(job2.last_offset, 1)

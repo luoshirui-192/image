@@ -114,6 +114,10 @@ def cancel_migration_job(job_id: int) -> BlobMigrationJob:
         BlobMigrationJob.STATUS_CANCELLED,
     }:
         raise JobServiceError("任务已结束，无法取消")
+    was_pending_or_paused = job.status in {
+        BlobMigrationJob.STATUS_PENDING,
+        BlobMigrationJob.STATUS_PAUSED,
+    }
     now = timezone.now()
     BlobMigrationJob.objects.filter(pk=job.pk).update(
         cancel_requested=1,
@@ -124,6 +128,8 @@ def cancel_migration_job(job_id: int) -> BlobMigrationJob:
         updated_at=now,
     )
     job.refresh_from_db()
+    if was_pending_or_paused:
+        kick_migration_queue()
     return job
 
 
@@ -150,6 +156,7 @@ def pause_migration_job(job_id: int) -> BlobMigrationJob:
             message="已暂停（尚未开始）",
             updated_at=now,
         )
+        kick_migration_queue()
     else:
         BlobMigrationJob.objects.filter(pk=job.pk).update(
             pause_requested=1,
@@ -180,17 +187,22 @@ def resume_migration_job(job_id: int) -> BlobMigrationJob:
     return job
 
 
-def reclaim_orphaned_migration_jobs(*, reason: str = "服务重启，已自动暂停") -> int:
-    """Mark running jobs as paused after container restart (worker thread is gone)."""
+def reclaim_orphaned_migration_jobs(*, reason: str = "服务重启，已自动重新排队") -> int:
+    """Re-queue orphaned running jobs after container restart (worker thread is gone).
+
+    Keeps last_pk_cursor so resume continues mid-migration. Explicitly paused jobs are untouched.
+    """
     now = timezone.now()
     running = list(
-        BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_RUNNING).only("id", "succeeded", "skipped", "failed")
+        BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_RUNNING).only(
+            "id", "succeeded", "skipped", "failed"
+        )
     )
     if not running:
         return 0
     for job in running:
         BlobMigrationJob.objects.filter(pk=job.pk).update(
-            status=BlobMigrationJob.STATUS_PAUSED,
+            status=BlobMigrationJob.STATUS_PENDING,
             pause_requested=0,
             cancel_requested=0,
             message=f"{reason}；{_pause_completion_message(job)}"[:500],
@@ -539,6 +551,7 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
 
     Only the claimant that transitions pending→running executes batches.
     Concurrent kicks (API thread + scheduler) are safe: the loser exits here.
+    Global serial: at most one migration job runs at a time across sources.
     """
     with transaction.atomic():
         job = (
@@ -548,6 +561,11 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
         )
         if not job:
             return _load_job(job_id)
+        if BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_RUNNING).exclude(
+            pk=job_id
+        ).exists():
+            # Another job is running — leave this one pending for the queue.
+            return job
         if job.cancel_requested:
             now = timezone.now()
             BlobMigrationJob.objects.filter(pk=job_id).update(
@@ -614,6 +632,11 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
             updated_at=timezone.now(),
         )
 
+    try:
+        kick_migration_queue()
+    except Exception:
+        logger.warning("kick migration queue after job failed", exc_info=True)
+
     return _load_job(job_id)
 
 
@@ -676,3 +699,19 @@ def _kick_migration_thread(job_id: int) -> None:
 def kick_migration_job_async(job_id: int) -> None:
     """Run migration in a background thread inside the backend container."""
     _kick_migration_thread(job_id)
+
+
+def kick_migration_queue() -> int | None:
+    """Start the oldest pending migration if none is running. Returns kicked job id or None."""
+    if BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_RUNNING).exists():
+        return None
+    next_id = (
+        BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_PENDING)
+        .order_by("id")
+        .values_list("id", flat=True)
+        .first()
+    )
+    if not next_id:
+        return None
+    kick_migration_job_async(int(next_id))
+    return int(next_id)

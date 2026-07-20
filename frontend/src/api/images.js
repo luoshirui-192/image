@@ -316,6 +316,14 @@ export function cancelBlobSimulatedExportJobApi(jobId) {
   return request.post(`/images/blob-browse/export-jobs/${jobId}/`, { action: 'cancel' })
 }
 
+export function pauseBlobSimulatedExportJobApi(jobId) {
+  return request.post(`/images/blob-browse/export-jobs/${jobId}/`, { action: 'pause' })
+}
+
+export function resumeBlobSimulatedExportJobApi(jobId) {
+  return request.post(`/images/blob-browse/export-jobs/${jobId}/`, { action: 'resume' })
+}
+
 export function getBlobTableViewSchemaApi(id) {
   return request.get(`/images/blob-migration/table-views/${id}/schema/`)
 }

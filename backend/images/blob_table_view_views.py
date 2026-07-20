@@ -10,7 +10,9 @@ from rest_framework.views import APIView
 from images.blob_simulated_export_job_service import (
     cancel_export_job,
     create_export_job,
-    kick_export_job_async,
+    kick_export_queue,
+    pause_export_job,
+    resume_export_job,
     serialize_export_job,
 )
 from images.blob_simulated_export_service import SimulatedExportError
@@ -239,7 +241,7 @@ class BlobTableViewExportToConnectionView(APIView):
                 target_table=data.get("target_table") or "",
                 if_exists=data.get("if_exists") or "fail",
             )
-            kick_export_job_async(job.id)
+            kick_export_queue()
         except Exception:
             logger.exception("create export job failed view_id=%s", pk)
             return error_response("创建导出任务失败", code=5001, status=500)
@@ -256,14 +258,14 @@ class BlobTableViewExportToConnectionView(APIView):
         )
         return success_response(
             {"job": serialize_export_job(job), "async": True},
-            message="导出任务已启动",
+            message="导出任务已加入队列",
             status=202,
         )
 
 
 @extend_schema(tags=["blob-table-view"])
 class BlobSimulatedExportJobDetailView(APIView):
-    """GET/POST /api/images/blob-browse/export-jobs/{id}/ — status or cancel."""
+    """GET/POST /api/images/blob-browse/export-jobs/{id}/ — status or cancel/pause/resume."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
 
@@ -275,11 +277,19 @@ class BlobSimulatedExportJobDetailView(APIView):
 
     def post(self, request, pk: int):
         action = str(request.data.get("action") or "").strip().lower()
-        if action != "cancel":
-            return error_response("仅支持 action=cancel", code=4001, status=400)
+        if action not in {"cancel", "pause", "resume"}:
+            return error_response("仅支持 action=cancel|pause|resume", code=4001, status=400)
         try:
-            job = cancel_export_job(pk)
+            if action == "cancel":
+                job = cancel_export_job(pk)
+                write_operate_log(request, "export_job_cancel", detail=f"job_id={pk}")
+                return success_response(serialize_export_job(job), message="已请求取消")
+            if action == "pause":
+                job = pause_export_job(pk)
+                write_operate_log(request, "export_job_pause", detail=f"job_id={pk}")
+                return success_response(serialize_export_job(job), message="已请求暂停")
+            job = resume_export_job(pk)
+            write_operate_log(request, "export_job_resume", detail=f"job_id={pk}")
+            return success_response(serialize_export_job(job), message="已重新排队")
         except SimulatedExportError as exc:
-            return error_response(str(exc), code=4041, status=404)
-        write_operate_log(request, "export_job_cancel", detail=f"job_id={pk}")
-        return success_response(serialize_export_job(job), message="已请求取消")
+            return error_response(str(exc), code=4001, status=400)

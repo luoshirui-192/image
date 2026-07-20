@@ -193,7 +193,9 @@ def ensure_migration_tables() -> None:
           `status` varchar(20) NOT NULL DEFAULT 'pending',
           `total_estimate` int(10) UNSIGNED NOT NULL DEFAULT 0,
           `rows_written` int(10) UNSIGNED NOT NULL DEFAULT 0,
+          `last_offset` int(10) UNSIGNED NOT NULL DEFAULT 0,
           `cancel_requested` tinyint(4) NOT NULL DEFAULT 0,
+          `pause_requested` tinyint(4) NOT NULL DEFAULT 0,
           `message` varchar(500) NOT NULL DEFAULT '',
           `last_error` varchar(500) NOT NULL DEFAULT '',
           `result_json` mediumtext NULL,
@@ -216,6 +218,7 @@ def ensure_migration_tables() -> None:
     except Exception:
         logger.warning("ensure migration tables failed", exc_info=True)
     ensure_blob_pr1_schema()
+    ensure_blob_export_job_schema()
 
 
 def _mysql_column_exists(cursor, table: str, column: str) -> bool:
@@ -277,6 +280,34 @@ def _ensure_image_source_map_unique_index(cursor) -> None:
         "(`source_table`, `source_id`, `source_column`)"
     )
     logger.info("ensured image_source_map.uk_source columns=%s", desired)
+
+
+def ensure_blob_export_job_schema() -> None:
+    """Pause/resume checkpoint columns for simulated export jobs."""
+    from django.db import connection
+
+    if connection.vendor != "mysql":
+        return
+    alters = [
+        (
+            "blob_simulated_export_job",
+            "last_offset",
+            "int(10) UNSIGNED NOT NULL DEFAULT 0 COMMENT '导出断点 offset' AFTER `rows_written`",
+        ),
+        (
+            "blob_simulated_export_job",
+            "pause_requested",
+            "tinyint(4) NOT NULL DEFAULT 0 COMMENT '1=请求暂停' AFTER `cancel_requested`",
+        ),
+    ]
+    try:
+        with connection.cursor() as cursor:
+            for table, column, ddl in alters:
+                if not _mysql_column_exists(cursor, table, column):
+                    cursor.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {ddl}")
+                    logger.info("added %s.%s", table, column)
+    except Exception:
+        logger.warning("ensure blob export job schema failed", exc_info=True)
 
 
 def ensure_blob_pr1_schema() -> None:

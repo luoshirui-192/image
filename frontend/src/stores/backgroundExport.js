@@ -4,6 +4,8 @@ import { ElMessage } from 'element-plus'
 import {
   cancelBlobSimulatedExportJobApi,
   getBlobSimulatedExportJobApi,
+  pauseBlobSimulatedExportJobApi,
+  resumeBlobSimulatedExportJobApi,
 } from '@/api/images'
 
 const STORAGE_KEY = 'image_db_bg_export_jobs'
@@ -47,7 +49,6 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     if (idx < 0) return
     const job = jobs.value[idx]
     if (['pending', 'running'].includes(job.status)) {
-      // Keep tracking but hide from dock? Better: don't dismiss active — cancel first.
       return
     }
     jobs.value.splice(idx, 1)
@@ -56,7 +57,9 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
   }
 
   function clearFinished() {
-    jobs.value = jobs.value.filter((j) => ['pending', 'running'].includes(j.status))
+    jobs.value = jobs.value.filter((j) =>
+      ['pending', 'running', 'paused'].includes(j.status),
+    )
     persistIds(jobs.value.map((j) => j.id))
   }
 
@@ -73,6 +76,8 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
       ElMessage.error(job.message || job.last_error || `导出任务 #${jobId} 失败`)
     } else if (wasActive && job.status === 'cancelled') {
       ElMessage.warning(job.message || `导出任务 #${jobId} 已取消`)
+    } else if (wasActive && job.status === 'paused') {
+      ElMessage.info(job.message || `导出任务 #${jobId} 已暂停`)
     }
     return job
   }
@@ -116,7 +121,7 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     if (!job?.id) return
     upsertJob(job)
     if (notify) {
-      ElMessage.success(`导出已在后台运行（任务 #${job.id}），可到「迁移任务台」查看进度`)
+      ElMessage.success(`导出已加入队列（任务 #${job.id}），可到「迁移任务台」查看进度`)
     }
     void pollAll()
     startPolling()
@@ -126,6 +131,20 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     await cancelBlobSimulatedExportJobApi(jobId)
     await refreshJob(jobId)
     ElMessage.info(`已请求取消导出 #${jobId}`)
+  }
+
+  async function pauseJob(jobId) {
+    await pauseBlobSimulatedExportJobApi(jobId)
+    await refreshJob(jobId)
+    startPolling()
+    ElMessage.info(`已请求暂停导出 #${jobId}`)
+  }
+
+  async function resumeJob(jobId) {
+    await resumeBlobSimulatedExportJobApi(jobId)
+    await refreshJob(jobId)
+    startPolling()
+    ElMessage.success(`导出 #${jobId} 已重新排队`)
   }
 
   /** Resume tracking after page reload / layout mount. */
@@ -143,7 +162,6 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
         }
       }),
     )
-    // Drop ancient finished jobs older than keep — keep recent finished for dock
     if (activeJobs.value.length) startPolling()
   }
 
@@ -156,6 +174,8 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     dismissJob,
     clearFinished,
     cancelJob,
+    pauseJob,
+    resumeJob,
     restoreFromSession,
     refreshJob,
     startPolling,
