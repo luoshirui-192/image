@@ -46,7 +46,8 @@ async function loadFull() {
   revoke()
   failed.value = false
   if (!props.imageId && !props.imagePath) {
-    failed.value = true
+    // Intentionally empty (e.g. no_data row while browsing ↑↓) — not a load failure.
+    loading.value = false
     return
   }
   loading.value = true
@@ -149,6 +150,9 @@ onUnmounted(() => {
     >
       <img v-if="src" :src="src" :alt="title || imagePath || 'preview'" class="lightbox-img" />
       <div v-else-if="failed" class="lightbox-empty">无法加载原图</div>
+      <div v-else-if="!imageId && !imagePath" class="lightbox-empty">
+        {{ title || '本行无图片数据' }}
+      </div>
       <div v-else class="lightbox-empty">加载中…</div>
     </div>
   </el-dialog>

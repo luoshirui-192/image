@@ -102,7 +102,16 @@ function syncBrowseLightboxFromRow() {
   if (!browseLightboxOpen.value) return
   const items = selectedRowPreviewItems.value
   if (!items.length) {
-    browseLightboxOpen.value = false
+    // Keep lightbox open on no-data / pending rows so ↑↓ can keep browsing.
+    const col = browseLightboxColumn.value || blobColumnNames()[0] || ''
+    const cell = selectedRow.value && col ? pathCell(selectedRow.value, col) : null
+    const status = cell?.status || 'no_data'
+    browseLightboxColumn.value = col
+    browseLightboxImageId.value = null
+    browseLightboxPath.value = ''
+    browseLightboxTitle.value = col
+      ? `${col} · ${statusLabel(status)}`
+      : statusLabel(status)
     return
   }
   const match =
