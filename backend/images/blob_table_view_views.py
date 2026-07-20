@@ -191,6 +191,7 @@ class BlobTableViewRowsView(APIView):
                 offset=data.get("offset", 0),
                 limit=data.get("limit", 100),
                 include_total=data.get("include_total", True),
+                skip_blob_presence=data.get("skip_blob_presence", False),
             )
         except BlobTableViewError as exc:
             return error_response(str(exc), code=4001, status=400)

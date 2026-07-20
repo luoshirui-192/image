@@ -187,15 +187,47 @@ def resume_export_job(job_id: int) -> BlobSimulatedExportJob:
 
 def reclaim_orphaned_export_jobs(*, reason: str = "服务重启，已自动重新排队") -> int:
     """Mark orphaned running exports as pending so they resume from last_offset."""
-    now = timezone.now()
-    running = list(
+    running_ids = list(
         BlobSimulatedExportJob.objects.filter(
             status=BlobSimulatedExportJob.STATUS_RUNNING
-        ).only("id", "rows_written", "last_offset")
+        ).values_list("id", flat=True)
     )
-    if not running:
+    if not running_ids:
         return 0
-    for job in running:
+    return _reclaim_export_ids(running_ids, reason=reason)
+
+
+def reclaim_stale_running_export_jobs(*, stale_seconds: int = 180) -> int:
+    """Re-queue RUNNING exports with no progress heartbeat (worker/thread died)."""
+    from datetime import timedelta
+
+    from django.db.models import Q
+
+    stale_seconds = max(30, int(stale_seconds or 180))
+    cutoff = timezone.now() - timedelta(seconds=stale_seconds)
+    ids = list(
+        BlobSimulatedExportJob.objects.filter(status=BlobSimulatedExportJob.STATUS_RUNNING)
+        .filter(
+            Q(updated_at__lt=cutoff)
+            | Q(updated_at__isnull=True, started_at__lt=cutoff)
+            | Q(updated_at__isnull=True, started_at__isnull=True, create_time__lt=cutoff)
+        )
+        .values_list("id", flat=True)
+    )
+    if not ids:
+        return 0
+    return _reclaim_export_ids(
+        ids,
+        reason=f"进度超时（>{stale_seconds}s），已自动重新排队",
+    )
+
+
+def _reclaim_export_ids(ids: list[int], *, reason: str) -> int:
+    now = timezone.now()
+    jobs = list(
+        BlobSimulatedExportJob.objects.filter(pk__in=ids).only("id", "rows_written", "last_offset")
+    )
+    for job in jobs:
         offset = int(getattr(job, "last_offset", 0) or 0)
         written = int(job.rows_written or 0)
         BlobSimulatedExportJob.objects.filter(pk=job.pk).update(
@@ -205,19 +237,12 @@ def reclaim_orphaned_export_jobs(*, reason: str = "服务重启，已自动重�
             message=f"{reason}（已写 {written} 行，offset={offset}）"[:500],
             updated_at=now,
         )
-    return len(running)
+    return len(jobs)
 
 
 def _update_job(job_id: int, **fields) -> None:
     fields["updated_at"] = timezone.now()
     BlobSimulatedExportJob.objects.filter(pk=job_id).update(**fields)
-
-
-def _has_running_export(*, exclude_id: int | None = None) -> bool:
-    qs = BlobSimulatedExportJob.objects.filter(status=BlobSimulatedExportJob.STATUS_RUNNING)
-    if exclude_id is not None:
-        qs = qs.exclude(pk=exclude_id)
-    return qs.exists()
 
 
 def _export_queue_held(*, exclude_id: int | None = None) -> bool:
@@ -233,7 +258,7 @@ def _export_queue_held(*, exclude_id: int | None = None) -> bool:
     return qs.exists()
 
 
-def execute_export_job(job_id: int) -> None:
+def execute_export_job(job_id: int, *, kick_next: bool = True) -> None:
     close_old_connections()
     advance_queue = True
     try:
@@ -245,8 +270,9 @@ def execute_export_job(job_id: int) -> None:
             )
             if not job:
                 return
-            if _has_running_export(exclude_id=job_id):
-                # Global serial queue: leave pending for later.
+            if _export_queue_held(exclude_id=job_id):
+                # Slot held by another running/paused job — leave pending; do not kick-storm.
+                advance_queue = False
                 return
             if job.cancel_requested:
                 _update_job(
@@ -380,7 +406,7 @@ def execute_export_job(job_id: int) -> None:
         close_old_connections()
         connection.close()
         # Advance only on terminal outcomes (complete / fail / cancel), not pause.
-        if advance_queue:
+        if advance_queue and kick_next:
             try:
                 kick_export_queue()
             except Exception:
@@ -410,11 +436,17 @@ def kick_export_job_async(job_id: int) -> None:
     logger.info("kicked simulated export thread job_id=%s", job_id)
 
 
-def kick_export_queue() -> int | None:
+def kick_export_queue(*, reclaim_stale: bool = True) -> int | None:
     """Start the oldest pending export if the queue slot is free.
 
     Paused jobs hold the slot so pause does not auto-start the next task.
+    Optionally reclaim stale RUNNING zombies first (dead gunicorn/CLI threads).
     """
+    if reclaim_stale:
+        try:
+            reclaim_stale_running_export_jobs(stale_seconds=180)
+        except Exception:
+            logger.warning("reclaim stale exports before kick failed", exc_info=True)
     if _export_queue_held():
         return None
     next_id = (
@@ -429,17 +461,34 @@ def kick_export_queue() -> int | None:
     return int(next_id)
 
 
-def process_pending_export_jobs(*, max_jobs: int = 1) -> int:
-    """Claim and run pending export jobs (global serial). Returns count started."""
+def process_pending_export_jobs(
+    *,
+    max_jobs: int = 1,
+    stale_seconds: int = 180,
+) -> int:
+    """Run pending exports synchronously (scheduler). Returns count of jobs executed.
+
+    Unlike kick_export_queue (daemon thread in API workers), this runs inline so the
+    worker process survives for the whole job — same pattern as migration jobs.
+    """
+    try:
+        reclaim_stale_running_export_jobs(stale_seconds=stale_seconds)
+    except Exception:
+        logger.warning("reclaim stale exports before process failed", exc_info=True)
+
     started = 0
     for _ in range(max(1, max_jobs)):
         if _export_queue_held():
             break
-        job_id = kick_export_queue()
-        if not job_id:
+        next_id = (
+            BlobSimulatedExportJob.objects.filter(status=BlobSimulatedExportJob.STATUS_PENDING)
+            .order_by("id")
+            .values_list("id", flat=True)
+            .first()
+        )
+        if not next_id:
             break
+        # kick_next=False: this loop advances the queue; avoid spawning a short-lived daemon.
+        execute_export_job(int(next_id), kick_next=False)
         started += 1
-        # Sync mode already finished inside kick; async only starts one at a time.
-        if connection.vendor != "sqlite" and not getattr(settings, "BLOB_EXPORT_SYNC", False):
-            break
     return started

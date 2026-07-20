@@ -73,10 +73,14 @@ let browseHScrollLock = false
 
 const PAGE_SIZE = 80
 const SCROLL_LOAD_DISTANCE = 120
+const PREFETCH_DISTANCE = 900
 const TABLE_SCROLLBAR_GUTTER = 14
 
 const browseReady = ref(false)
 let rowsLoadSeq = 0
+/** @type {{ viewId: number, offset: number, rows: any[], hasMore: boolean } | null} */
+let prefetchedPage = null
+let prefetchInFlight = false
 
 const selectedRow = ref(null)
 
@@ -158,12 +162,10 @@ function rowIdentityKey(row) {
 }
 
 function getRowKey(row) {
-  const idx = tableRows.value.indexOf(row)
   const base = rowIdentityKey(row)
-  if (idx >= 0) {
-    return base ? `${base}#${idx}` : `row#${idx}`
-  }
-  return base || JSON.stringify(row)
+  if (base) return base
+  // Fallback for rows without a stable pk (should be rare).
+  return `row:${String(row?.id ?? row?.ID ?? Math.random())}`
 }
 
 const loadingCatalog = ref(false)
@@ -1466,9 +1468,12 @@ function getTableScrollElement() {
 
 function onTableBodyScroll(event) {
   const el = event.target
-  if (!el || loadingRows.value || loadingMore.value || !hasMore.value) return
+  if (!el || loadingRows.value) return
   const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-  if (distance <= SCROLL_LOAD_DISTANCE) {
+  if (distance <= PREFETCH_DISTANCE && hasMore.value && !loadingMore.value) {
+    void prefetchNextRows()
+  }
+  if (distance <= SCROLL_LOAD_DISTANCE && hasMore.value && !loadingMore.value && !loadingRows.value) {
     loadMore()
   }
 }
@@ -1545,7 +1550,7 @@ async function loadViews() {
   }
 }
 
-async function loadRows({ append = false, includeTotal = !append } = {}) {
+async function loadRows({ append = false, includeTotal = false } = {}) {
   if (!activeViewId.value) {
     columns.value = []
     tableRows.value = []
@@ -1554,71 +1559,148 @@ async function loadRows({ append = false, includeTotal = !append } = {}) {
     selectedRow.value = null
     loadingRows.value = false
     loadingMore.value = false
+    prefetchedPage = null
     return
-  }
-
-  const seq = ++rowsLoadSeq
-  const restorePk = !append ? (pendingRestorePk.value || rowIdentityKey(selectedRow.value)) : ''
-  if (!append) {
-    pendingRestorePk.value = ''
   }
 
   if (append) {
     if (!hasMore.value || loadingMore.value || loadingRows.value) return
+    // Instant path: consume prefetch buffer when it matches current offset.
+    if (
+      prefetchedPage
+      && prefetchedPage.viewId === activeViewId.value
+      && prefetchedPage.offset === offset.value
+    ) {
+      const buffered = prefetchedPage
+      prefetchedPage = null
+      loadingMore.value = true
+      try {
+        tableRows.value = tableRows.value.concat(buffered.rows)
+        offset.value += buffered.rows.length
+        hasMore.value = buffered.hasMore
+      } finally {
+        loadingMore.value = false
+        void prefetchNextRows()
+      }
+      return
+    }
+
+    const seq = rowsLoadSeq
     loadingMore.value = true
-  } else {
-    loadingRows.value = true
-    offset.value = 0
-    tableRows.value = []
+    try {
+      const res = await callWithRetry(() => fetchBlobTableViewRowsApi(activeViewId.value, {
+        offset: offset.value,
+        limit: PAGE_SIZE,
+        includeTotal: false,
+        skipBlobPresence: true,
+      }))
+      if (seq !== rowsLoadSeq) return
+      const data = res.data || {}
+      const rows = data.rows || []
+      tableRows.value = tableRows.value.concat(rows)
+      offset.value += rows.length
+      hasMore.value = Boolean(data.has_more)
+      void prefetchNextRows()
+    } catch (err) {
+      if (seq !== rowsLoadSeq) return
+      ElMessage.error(err.message || '加载数据失败')
+    } finally {
+      if (seq === rowsLoadSeq) loadingMore.value = false
+    }
+    return
   }
+
+  const seq = ++rowsLoadSeq
+  prefetchedPage = null
+  const restorePk = pendingRestorePk.value || rowIdentityKey(selectedRow.value)
+  pendingRestorePk.value = ''
+  loadingRows.value = true
+  offset.value = 0
+  tableRows.value = []
 
   try {
     const res = await callWithRetry(() => fetchBlobTableViewRowsApi(activeViewId.value, {
-      offset: append ? offset.value : 0,
+      offset: 0,
       limit: PAGE_SIZE,
       includeTotal,
+      skipBlobPresence: false,
     }))
     if (seq !== rowsLoadSeq) return
 
     const data = res.data || {}
     columns.value = data.columns || []
     const rows = data.rows || []
-    if (append) {
-      tableRows.value = [...tableRows.value, ...rows]
-    } else {
-      tableRows.value = rows
-    }
-    offset.value = (append ? offset.value : 0) + rows.length
+    tableRows.value = rows
+    offset.value = rows.length
     const nextTotal = Number(data.total)
     if (!Number.isNaN(nextTotal) && nextTotal >= 0) {
       total.value = nextTotal
-    } else if (!append) {
+    } else {
       total.value = -1
     }
     hasMore.value = Boolean(data.has_more)
-    if (!append) {
-      if (restorePk) {
-        const found = tableRows.value.find((row) => rowIdentityKey(row) === restorePk)
-        selectPreviewRow(found ?? tableRows.value[0] ?? null)
-      } else {
-        autoSelectFirstRow()
-      }
-      if (!includeTotal && tableRows.value.length) {
-        void loadRowTotal(seq)
-      }
+    if (restorePk) {
+      const found = tableRows.value.find((row) => rowIdentityKey(row) === restorePk)
+      selectPreviewRow(found ?? tableRows.value[0] ?? null)
+    } else {
+      autoSelectFirstRow()
     }
+    if (!includeTotal && tableRows.value.length) {
+      void loadRowTotal(seq)
+    } else if (includeTotal && tableRows.value.length && total.value < 0) {
+      void loadRowTotal(seq)
+    }
+    setupTableViewport()
+    void prefetchNextRows()
   } catch (err) {
     if (seq !== rowsLoadSeq) return
-    if (!append) {
-      columns.value = []
-      tableRows.value = []
-    }
+    columns.value = []
+    tableRows.value = []
     ElMessage.error(err.message || '加载数据失败')
   } finally {
-    if (seq !== rowsLoadSeq) return
-    loadingRows.value = false
-    loadingMore.value = false
-    setupTableViewport()
+    if (seq === rowsLoadSeq) {
+      loadingRows.value = false
+      setupTableViewport()
+    }
+  }
+}
+
+async function prefetchNextRows() {
+  if (
+    !activeViewId.value
+    || !hasMore.value
+    || loadingRows.value
+    || loadingMore.value
+    || prefetchInFlight
+    || prefetchedPage
+  ) {
+    return
+  }
+  const viewId = activeViewId.value
+  const atOffset = offset.value
+  const seq = rowsLoadSeq
+  prefetchInFlight = true
+  try {
+    const res = await fetchBlobTableViewRowsApi(viewId, {
+      offset: atOffset,
+      limit: PAGE_SIZE,
+      includeTotal: false,
+      skipBlobPresence: true,
+    })
+    if (seq !== rowsLoadSeq || viewId !== activeViewId.value || atOffset !== offset.value) {
+      return
+    }
+    const data = res.data || {}
+    prefetchedPage = {
+      viewId,
+      offset: atOffset,
+      rows: data.rows || [],
+      hasMore: Boolean(data.has_more),
+    }
+  } catch {
+    // Prefetch is best-effort
+  } finally {
+    prefetchInFlight = false
   }
 }
 
@@ -1720,7 +1802,6 @@ watch(tableRows, () => {
   if (selectedRow.value && !tableRows.value.includes(selectedRow.value)) {
     selectedRow.value = null
   }
-  setupTableViewport()
 })
 
 watch(sqlTableData, () => {

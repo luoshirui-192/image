@@ -43,8 +43,8 @@ sys.exit(1)
 PY
 
 echo "==> reclaim orphaned migration/export jobs"
-python manage.py reclaim_blob_migration_jobs || true
-python manage.py reclaim_blob_export_jobs || true
+python manage.py reclaim_blob_migration_jobs --no-kick || true
+python manage.py reclaim_blob_export_jobs --no-kick || true
 
 run_maintenance() {
   echo "==> $(date -Iseconds) run_scheduled_maintenance"
@@ -53,6 +53,10 @@ run_maintenance() {
 
 run_migration_jobs() {
   python manage.py process_blob_migration_jobs --once --max-jobs 1
+}
+
+run_export_jobs() {
+  python manage.py process_blob_export_jobs --once --max-jobs 1
 }
 
 run_blob_sync() {
@@ -68,6 +72,12 @@ while true; do
     :
   else
     echo "[scheduler] migration job worker failed (will retry)" >&2
+  fi
+
+  if run_export_jobs; then
+    :
+  else
+    echo "[scheduler] export job worker failed (will retry)" >&2
   fi
 
   if run_blob_sync; then

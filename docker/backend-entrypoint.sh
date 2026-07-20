@@ -39,8 +39,8 @@ echo "==> ensure file_hash column"
 python /app/docker/ensure_file_hash_column.py
 
 echo "==> reclaim orphaned export/migration jobs"
-python manage.py reclaim_blob_export_jobs || true
-python manage.py reclaim_blob_migration_jobs || true
+python manage.py reclaim_blob_export_jobs --no-kick || true
+python manage.py reclaim_blob_migration_jobs --no-kick || true
 
 echo "==> start gunicorn"
 exec gunicorn -c /app/deploy/gunicorn/gunicorn.conf.py config.wsgi:application

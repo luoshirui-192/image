@@ -362,6 +362,7 @@ class BlobTableViewRowsSerializer(serializers.Serializer):
     offset = serializers.IntegerField(required=False, default=0, min_value=0)
     limit = serializers.IntegerField(required=False, default=100, min_value=1, max_value=500)
     include_total = serializers.BooleanField(required=False, default=True)
+    skip_blob_presence = serializers.BooleanField(required=False, default=False)
 
 
 class BlobTableViewPreviewSchemaSerializer(serializers.Serializer):

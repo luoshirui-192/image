@@ -848,6 +848,7 @@ def fetch_simulated_table_rows(
     extra_where: str = "",
     touch_last_viewed: bool = True,
     include_total: bool = True,
+    skip_blob_presence: bool = False,
 ) -> dict:
     """Fetch paginated rows with BLOB columns replaced by path cells (no BLOB bytes)."""
     if offset < 0:
@@ -925,18 +926,23 @@ def fetch_simulated_table_rows(
                 source_uid=getattr(view, "source_uid", "") or "",
             )
 
-        blob_presence = _compute_blob_presence_for_page(
-            conn,
-            raw_rows=raw_rows,
-            col_names=col_names,
-            blob_cols=blob_cols,
-            path_mappings=path_mappings or None,
-            pk_column=pk,
-            source_table=view.source_table,
-            per_row_path_maps=per_row_path_maps,
-            legacy_path_map=legacy_path_map,
-            pk_index=pk_index,
-        )
+        if skip_blob_presence:
+            # Infinite-scroll fast path: skip remote LENGTH(blob) scans.
+            # Unmapped rows default to "has data" → pending (not no_data).
+            blob_presence = [{col: True for col in blob_cols} for _ in raw_rows]
+        else:
+            blob_presence = _compute_blob_presence_for_page(
+                conn,
+                raw_rows=raw_rows,
+                col_names=col_names,
+                blob_cols=blob_cols,
+                path_mappings=path_mappings or None,
+                pk_column=pk,
+                source_table=view.source_table,
+                per_row_path_maps=per_row_path_maps,
+                legacy_path_map=legacy_path_map,
+                pk_index=pk_index,
+            )
         # For path-export varchar columns, nonempty path string means "has data".
         for row_idx, raw in enumerate(raw_rows):
             for col_name in stored_path_cols:
@@ -994,7 +1000,7 @@ def fetch_simulated_table_rows(
     # scanning on every infinite-scroll append.
     total = row_total if offset == 0 else -1
     has_more = len(rows) >= limit if total < 0 else (offset + len(rows)) < total
-    if touch_last_viewed and view.pk:
+    if touch_last_viewed and view.pk and offset == 0:
         BlobTableView.objects.filter(pk=view.id).update(last_viewed_at=timezone.now())
 
     return {
@@ -1022,6 +1028,7 @@ def fetch_view_rows(
     offset: int = 0,
     limit: int = DEFAULT_ROW_LIMIT,
     include_total: bool = True,
+    skip_blob_presence: bool = False,
 ) -> dict:
     view = _load_view(view_id)
     return fetch_simulated_table_rows(
@@ -1029,6 +1036,8 @@ def fetch_view_rows(
         offset=offset,
         limit=limit,
         include_total=include_total,
+        skip_blob_presence=skip_blob_presence,
+        touch_last_viewed=offset == 0,
     )
 
 

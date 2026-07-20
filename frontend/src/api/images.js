@@ -296,9 +296,19 @@ export function deleteBlobTableViewApi(id) {
   return request.delete(`/images/blob-migration/table-views/${id}/`)
 }
 
-export function fetchBlobTableViewRowsApi(id, { offset = 0, limit = 100, includeTotal = true } = {}) {
+export function fetchBlobTableViewRowsApi(id, {
+  offset = 0,
+  limit = 100,
+  includeTotal = true,
+  skipBlobPresence = false,
+} = {}) {
   return request.get(`/images/blob-migration/table-views/${id}/rows/`, {
-    params: { offset, limit, include_total: includeTotal ? 1 : 0 },
+    params: {
+      offset,
+      limit,
+      include_total: includeTotal ? 1 : 0,
+      skip_blob_presence: skipBlobPresence ? 1 : 0,
+    },
     timeout: 120000,
   })
 }
