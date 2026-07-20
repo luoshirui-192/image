@@ -155,7 +155,7 @@ def pause_export_job(job_id: int) -> BlobSimulatedExportJob:
             message="已暂停（尚未开始）",
             updated_at=now,
         )
-        kick_export_queue()
+        # Pause holds the queue slot — do not auto-start the next job.
     else:
         BlobSimulatedExportJob.objects.filter(pk=job.pk).update(
             pause_requested=1,
@@ -220,8 +220,22 @@ def _has_running_export(*, exclude_id: int | None = None) -> bool:
     return qs.exists()
 
 
+def _export_queue_held(*, exclude_id: int | None = None) -> bool:
+    """Running or paused jobs occupy the serial queue slot (pause does not advance)."""
+    qs = BlobSimulatedExportJob.objects.filter(
+        status__in={
+            BlobSimulatedExportJob.STATUS_RUNNING,
+            BlobSimulatedExportJob.STATUS_PAUSED,
+        }
+    )
+    if exclude_id is not None:
+        qs = qs.exclude(pk=exclude_id)
+    return qs.exists()
+
+
 def execute_export_job(job_id: int) -> None:
     close_old_connections()
+    advance_queue = True
     try:
         with transaction.atomic():
             job = (
@@ -314,6 +328,7 @@ def execute_export_job(job_id: int) -> None:
                 should_pause=should_pause,
             )
         except SimulatedExportPaused as exc:
+            advance_queue = False
             _update_job(
                 job_id,
                 status=BlobSimulatedExportJob.STATUS_PAUSED,
@@ -364,11 +379,12 @@ def execute_export_job(job_id: int) -> None:
     finally:
         close_old_connections()
         connection.close()
-        # Finish-one → start-next (also after pause/cancel/fail).
-        try:
-            kick_export_queue()
-        except Exception:
-            logger.warning("kick export queue after job failed", exc_info=True)
+        # Advance only on terminal outcomes (complete / fail / cancel), not pause.
+        if advance_queue:
+            try:
+                kick_export_queue()
+            except Exception:
+                logger.warning("kick export queue after job failed", exc_info=True)
 
 
 def _run_export_worker(job_id: int) -> None:
@@ -395,8 +411,11 @@ def kick_export_job_async(job_id: int) -> None:
 
 
 def kick_export_queue() -> int | None:
-    """Start the oldest pending export if none is running. Returns kicked job id or None."""
-    if _has_running_export():
+    """Start the oldest pending export if the queue slot is free.
+
+    Paused jobs hold the slot so pause does not auto-start the next task.
+    """
+    if _export_queue_held():
         return None
     next_id = (
         BlobSimulatedExportJob.objects.filter(status=BlobSimulatedExportJob.STATUS_PENDING)
@@ -414,7 +433,7 @@ def process_pending_export_jobs(*, max_jobs: int = 1) -> int:
     """Claim and run pending export jobs (global serial). Returns count started."""
     started = 0
     for _ in range(max(1, max_jobs)):
-        if _has_running_export():
+        if _export_queue_held():
             break
         job_id = kick_export_queue()
         if not job_id:

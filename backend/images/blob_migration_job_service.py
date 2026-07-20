@@ -156,7 +156,7 @@ def pause_migration_job(job_id: int) -> BlobMigrationJob:
             message="已暂停（尚未开始）",
             updated_at=now,
         )
-        kick_migration_queue()
+        # Pause holds the queue slot — do not auto-start the next job.
     else:
         BlobMigrationJob.objects.filter(pk=job.pk).update(
             pause_requested=1,
@@ -213,6 +213,11 @@ def reclaim_orphaned_migration_jobs(*, reason: str = "服务重启，已自动�
 
 def delete_migration_job(job_id: int) -> None:
     job = _load_job(job_id)
+    should_advance = job.status in {
+        BlobMigrationJob.STATUS_PENDING,
+        BlobMigrationJob.STATUS_RUNNING,
+        BlobMigrationJob.STATUS_PAUSED,
+    }
     if job.status in ACTIVE_STATUSES:
         now = timezone.now()
         BlobMigrationJob.objects.filter(pk=job_id).update(
@@ -224,6 +229,8 @@ def delete_migration_job(job_id: int) -> None:
         )
     BlobMigrationJobError.objects.filter(job_id=job_id).delete()
     BlobMigrationJob.objects.filter(pk=job_id).delete()
+    if should_advance:
+        kick_migration_queue()
 
 
 def clear_migration_job_history(*, source_id: int | None = None) -> int:
@@ -236,6 +243,7 @@ def clear_migration_job_history(*, source_id: int | None = None) -> int:
         return 0
     BlobMigrationJobError.objects.filter(job_id__in=job_ids).delete()
     deleted, _ = BlobMigrationJob.objects.filter(pk__in=job_ids).delete()
+    kick_migration_queue()
     return deleted
 
 
@@ -587,6 +595,7 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
     if job.status != BlobMigrationJob.STATUS_RUNNING or job.cancel_requested:
         return job
 
+    advance_queue = True
     try:
         if job.retry_failed_only:
             prepare_migration_source(_load_source(job.source_id))
@@ -604,6 +613,7 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
                 updated_at=timezone.now(),
             )
         elif job.pause_requested or job.status == BlobMigrationJob.STATUS_PAUSED:
+            advance_queue = False
             job.refresh_from_db()
             BlobMigrationJob.objects.filter(pk=job.pk).update(
                 status=BlobMigrationJob.STATUS_PAUSED,
@@ -632,10 +642,11 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
             updated_at=timezone.now(),
         )
 
-    try:
-        kick_migration_queue()
-    except Exception:
-        logger.warning("kick migration queue after job failed", exc_info=True)
+    if advance_queue:
+        try:
+            kick_migration_queue()
+        except Exception:
+            logger.warning("kick migration queue after job failed", exc_info=True)
 
     return _load_job(job_id)
 
@@ -702,8 +713,13 @@ def kick_migration_job_async(job_id: int) -> None:
 
 
 def kick_migration_queue() -> int | None:
-    """Start the oldest pending migration if none is running. Returns kicked job id or None."""
-    if BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_RUNNING).exists():
+    """Start the oldest pending migration if the queue slot is free.
+
+    Paused jobs hold the slot so pause does not auto-start the next task.
+    """
+    if BlobMigrationJob.objects.filter(
+        status__in={BlobMigrationJob.STATUS_RUNNING, BlobMigrationJob.STATUS_PAUSED}
+    ).exists():
         return None
     next_id = (
         BlobMigrationJob.objects.filter(status=BlobMigrationJob.STATUS_PENDING)
