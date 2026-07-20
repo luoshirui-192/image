@@ -32,7 +32,7 @@ def write_operate_log(
         OperateLog.objects.create(
             user_id=user_id,
             username=username or "",
-            action_type=action_type,
+            action_type=(action_type or "")[:20],
             sql_content=sql_content,
             detail=detail[:500],
             ip=get_client_ip(request),
