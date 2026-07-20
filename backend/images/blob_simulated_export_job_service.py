@@ -181,6 +181,7 @@ def resume_export_job(job_id: int) -> BlobSimulatedExportJob:
         message="已排队，等待继续…",
         updated_at=now,
     )
+    kick_export_job_async(job.pk)
     kick_export_queue()
     return BlobSimulatedExportJob.objects.get(pk=job.pk)
 
@@ -441,14 +442,12 @@ def kick_export_job_async(job_id: int) -> None:
     logger.info("kicked simulated export thread job_id=%s", job_id)
 
 
-def kick_export_queue(*, reclaim_stale: bool = True, force_async: bool = False) -> int | None:
-    """Ensure the oldest pending export can run.
+def kick_export_queue(*, reclaim_stale: bool = True) -> int | None:
+    """Start the oldest pending export in a worker thread if the queue slot is free.
 
-    By default we do NOT spawn a gunicorn daemon thread (those die with worker recycle
-    and leave RUNNING zombies). The long-lived export worker in backend-entrypoint /
-    scheduler claims pending jobs synchronously.
-
-    force_async / sqlite / BLOB_EXPORT_SYNC still run in-process for tests and overrides.
+    Paused/running jobs hold the slot (pause does not auto-start the next job).
+    Always spawns work here — leaving jobs pending for a sidecar alone caused
+    permanent「排队中」when the sidecar/scheduler path failed to run.
     """
     if reclaim_stale:
         try:
@@ -474,14 +473,7 @@ def kick_export_queue(*, reclaim_stale: bool = True, force_async: bool = False) 
     )
     if not next_id:
         return None
-    if (
-        force_async
-        or connection.vendor == "sqlite"
-        or getattr(settings, "BLOB_EXPORT_SYNC", False)
-    ):
-        kick_export_job_async(int(next_id))
-        return int(next_id)
-    logger.info("export job_id=%s left pending for export worker", next_id)
+    kick_export_job_async(int(next_id))
     return int(next_id)
 
 
@@ -490,19 +482,21 @@ def process_pending_export_jobs(
     max_jobs: int = 1,
     stale_seconds: int = 300,
 ) -> int:
-    """Run pending exports synchronously (scheduler / sidecar). Returns count executed.
-
-    Unlike kick_export_queue (daemon thread in API workers), this runs inline so the
-    worker process survives for the whole job — same pattern as migration jobs.
-    """
+    """Run pending exports synchronously (scheduler / sidecar). Returns count executed."""
     try:
-        # Only reclaim RUNNING with stale heartbeat — never reclaim a live in-process job.
+        from images.schema_ensure import ensure_blob_export_job_schema
+
+        ensure_blob_export_job_schema()
+    except Exception:
+        logger.warning("ensure export schema before process failed", exc_info=True)
+    try:
         reclaim_stale_running_export_jobs(stale_seconds=stale_seconds)
     except Exception:
         logger.warning("reclaim exports before process failed", exc_info=True)
 
     started = 0
     for _ in range(max(1, max_jobs)):
+        # RUNNING or PAUSED hold the slot (pause must not auto-start the next job).
         if _export_queue_held():
             holders = list(
                 BlobSimulatedExportJob.objects.filter(
@@ -523,7 +517,6 @@ def process_pending_export_jobs(
         if not next_id:
             break
         logger.info("process_pending_export starting job_id=%s", next_id)
-        # kick_next=False: this loop advances the queue; avoid spawning a short-lived daemon.
         execute_export_job(int(next_id), kick_next=False)
         started += 1
     return started

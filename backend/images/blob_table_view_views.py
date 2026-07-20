@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 from images.blob_simulated_export_job_service import (
     cancel_export_job,
     create_export_job,
+    kick_export_job_async,
     kick_export_queue,
     pause_export_job,
     resume_export_job,
@@ -232,6 +233,16 @@ class BlobTableViewExportToConnectionView(APIView):
             return error_response(_format_errors(serializer.errors), code=4001, status=400)
         data = serializer.validated_data
         username = getattr(request.user, "username", "") or ""
+        blocker = (
+            BlobSimulatedExportJob.objects.filter(
+                status__in={
+                    BlobSimulatedExportJob.STATUS_RUNNING,
+                    BlobSimulatedExportJob.STATUS_PAUSED,
+                }
+            )
+            .order_by("id")
+            .first()
+        )
         try:
             job = create_export_job(
                 view_id=pk,
@@ -242,6 +253,8 @@ class BlobTableViewExportToConnectionView(APIView):
                 target_table=data.get("target_table") or "",
                 if_exists=data.get("if_exists") or "fail",
             )
+            # Start this job immediately. Claim logic keeps exports serial.
+            kick_export_job_async(job.id)
             kick_export_queue()
         except Exception:
             logger.exception("create export job failed view_id=%s", pk)
@@ -257,9 +270,16 @@ class BlobTableViewExportToConnectionView(APIView):
                 f"{job.target_database}.{job.target_table}"
             ),
         )
+        msg = "导出任务已加入队列"
+        if blocker and job.status == BlobSimulatedExportJob.STATUS_PENDING:
+            msg = (
+                f"导出任务已创建（#{job.id}），但队列被"
+                f"{'进行中' if blocker.status == 'running' else '已暂停'}"
+                f"任务 #{blocker.id} 占用；请到任务台继续/取消该任务，或等待其完成"
+            )
         return success_response(
-            {"job": serialize_export_job(job), "async": True},
-            message="导出任务已加入队列",
+            {"job": serialize_export_job(job), "async": True, "blocked_by": blocker.id if blocker else None},
+            message=msg,
             status=202,
         )
 
