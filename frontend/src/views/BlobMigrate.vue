@@ -1,51 +1,39 @@
 <script setup>
-import { computed, onUnmounted, reactive, ref } from 'vue'
+/**
+ * BLOB 迁移任务台：管任务（预检 / 全量 / 暂停继续 / 历史）。
+ * 扫表建配置、一键迁移 → 数据库模拟；旧库连接 → 模拟页「管理连接」。
+ */
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { callWithRetry } from '@/utils/callWithRetry'
 import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Connection, Refresh, Search } from '@element-plus/icons-vue'
+import { Refresh } from '@element-plus/icons-vue'
 import {
-  createBlobMigrationSourceApi,
-  createBlobTableViewApi,
-  createExternalDbConnectionApi,
-  createBlobMigrationJobApi,
   cancelBlobMigrationJobApi,
-  pauseBlobMigrationJobApi,
-  resumeBlobMigrationJobApi,
   clearBlobMigrationJobHistoryApi,
+  createBlobMigrationJobApi,
   deleteBlobMigrationJobApi,
   deleteBlobMigrationSourceApi,
-  deleteExternalDbConnectionApi,
-  discoverBlobTablesApi,
   exportBlobMigrationJobErrorsUrl,
   getBlobMigrationJobApi,
-  listBlobMigrationDatabasesApi,
+  getBlobMigrationSourceApi,
   listBlobMigrationJobsApi,
   listBlobMigrationSourcesApi,
-  getBlobMigrationSourceApi,
-  listExternalDbConnectionsApi,
-  provisionExternalDbTableViewsApi,
+  pauseBlobMigrationJobApi,
+  resumeBlobMigrationJobApi,
   retryBlobMigrationJobApi,
   runBlobMigrationApi,
   runGlobalDataSyncApi,
-  testExternalDbConnectionApi,
-  testSavedExternalDbConnectionApi,
 } from '@/api/images'
+import ExternalDbConnectionsDialog from '@/components/ExternalDbConnectionsDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
 
-const databases = ref([])
-const connections = ref([])
-const loadingDatabases = ref(false)
-const loadingConnections = ref(false)
-const discoveredTables = ref([])
 const sources = ref([])
-const discovering = ref(false)
-const saving = ref(false)
-const savingView = ref(false)
+const loadingSources = ref(false)
 const running = ref(false)
 const runResult = ref(null)
 const activeJob = ref(null)
@@ -54,23 +42,9 @@ const jobHistory = ref([])
 const pollTimer = ref(null)
 const pollingJobId = ref(null)
 const jobRefreshSeq = ref(0)
-
 const globalSyncLoading = ref(false)
-
-const form = reactive({
-  name: '',
-  dbAlias: 'default',
-  sourceTable: '',
-  sourcePkColumn: 'id',
-  blobColumn: '',
-  blobColumns: [],
-  sourceObjectType: 'table',
-  pathLookupTable: '',
-  nameColumn: '',
-  suffixColumn: '',
-  tags: '',
-  whereClause: '',
-})
+const connDialogVisible = ref(false)
+const routeApplied = ref(false)
 
 const runOptions = reactive({
   sourceId: null,
@@ -80,166 +54,28 @@ const runOptions = reactive({
   warmThumbsAfter: true,
 })
 
-const connForm = reactive({
-  name: '',
-  host: '',
-  port: 3306,
-  db_name: '',
-  username: '',
-  password: '',
-  charset: 'utf8',
-  remark: '',
-})
-const connSaving = ref(false)
-const connTesting = ref(false)
-const provisionConnId = ref(null)
+const jobInProgress = computed(
+  () =>
+    activeJob.value &&
+    ['pending', 'running'].includes(activeJob.value.status) &&
+    !activeJob.value.cancel_requested,
+)
+const jobCanPause = computed(
+  () =>
+    activeJob.value &&
+    ['pending', 'running'].includes(activeJob.value.status) &&
+    !activeJob.value.pause_requested,
+)
+const jobIsPaused = computed(() => activeJob.value?.status === 'paused')
+const clearableJobCount = computed(() => jobHistory.value.length)
 
-const selectedDb = computed(() => databases.value.find((d) => d.alias === form.dbAlias))
-
-const discoveredColumnsForTable = computed(() => {
-  const row = discoveredTables.value.find((item) => item.table === form.sourceTable)
-  return row?.columns || []
-})
-
-function dbOptionLabel(db) {
-  if (db.label) {
-    return `${db.label} (${db.name}@${db.host || 'local'})`
-  }
-  return `${db.alias} (${db.name}@${db.host || 'local'})`
-}
-
-async function loadConnections() {
-  loadingConnections.value = true
-  try {
-    const res = await callWithRetry(() => listExternalDbConnectionsApi())
-    const list = res.data || []
-    if (list.length || !connections.value.length) {
-      connections.value = list
-    }
-  } catch {
-    if (!connections.value.length) connections.value = []
-  } finally {
-    loadingConnections.value = false
-  }
-}
-
-async function loadDatabases() {
-  loadingDatabases.value = true
-  try {
-    const res = await callWithRetry(() => listBlobMigrationDatabasesApi())
-    const list = res.data || []
-    if (list.length || !databases.value.length) {
-      databases.value = list
-    }
-    if (!databases.value.some((d) => d.alias === form.dbAlias) && databases.value.length) {
-      form.dbAlias = databases.value[0].alias
-    }
-  } catch {
-    if (!databases.value.length) {
-      databases.value = [{ alias: 'default', label: '本系统库', name: 'default', host: '' }]
-    }
-  } finally {
-    loadingDatabases.value = false
-  }
-}
-
-async function saveConnection() {
-  if (!connForm.name.trim() || !connForm.host.trim() || !connForm.db_name.trim() || !connForm.username.trim()) {
-    ElMessage.warning('请填写连接名称、主机、库名和用户名')
-    return
-  }
-  if (!connForm.password) {
-    ElMessage.warning('请填写密码')
-    return
-  }
-  connSaving.value = true
-  try {
-    const res = await createExternalDbConnectionApi({
-      name: connForm.name.trim(),
-      host: connForm.host.trim(),
-      port: Number(connForm.port) || 3306,
-      db_name: connForm.db_name.trim(),
-      username: connForm.username.trim(),
-      password: connForm.password,
-      charset: connForm.charset || 'utf8',
-      remark: connForm.remark.trim(),
-    })
-    ElMessage.success(res.message || '旧库连接已保存')
-    connForm.password = ''
-    await Promise.all([loadConnections(), loadDatabases()])
-  } catch (err) {
-    ElMessage.error(err.message || '保存失败')
-  } finally {
-    connSaving.value = false
-  }
-}
-
-async function testNewConnection() {
-  if (!connForm.host.trim() || !connForm.db_name.trim() || !connForm.username.trim() || !connForm.password) {
-    ElMessage.warning('测试连接需填写主机、库名、用户名和密码')
-    return
-  }
-  connTesting.value = true
-  try {
-    const res = await testExternalDbConnectionApi({
-      name: connForm.name.trim() || 'test',
-      host: connForm.host.trim(),
-      port: Number(connForm.port) || 3306,
-      db_name: connForm.db_name.trim(),
-      username: connForm.username.trim(),
-      password: connForm.password,
-      charset: connForm.charset || 'utf8',
-    })
-    ElMessage.success(res.message || '连接成功')
-  } catch (err) {
-    ElMessage.error(err.message || '连接失败')
-  } finally {
-    connTesting.value = false
-  }
-}
-
-async function testSavedConnection(row) {
-  connTesting.value = true
-  try {
-    const res = await testSavedExternalDbConnectionApi(row.id)
-    ElMessage.success(res.message || '连接成功')
-    await loadConnections()
-  } catch (err) {
-    ElMessage.error(err.message || '连接失败')
-    await loadConnections()
-  } finally {
-    connTesting.value = false
-  }
-}
-
-async function syncConnectionTableViews(row) {
-  provisionConnId.value = row.id
-  try {
-    const res = await provisionExternalDbTableViewsApi(row.id)
-    ElMessage.success(res.message || '表视图同步完成')
-  } catch (err) {
-    ElMessage.error(err.message || '表视图同步失败')
-  } finally {
-    provisionConnId.value = null
-  }
-}
-
-async function removeConnection(row) {
-  try {
-    await ElMessageBox.confirm(`确定删除连接「${row.name}」？`, '确认', { type: 'warning' })
-    await deleteExternalDbConnectionApi(row.id)
-    ElMessage.success('已删除')
-    await Promise.all([loadConnections(), loadDatabases()])
-  } catch {
-    // cancelled or error handled globally
-  }
-}
-
-function useConnection(row) {
-  form.dbAlias = row.alias
+function formatSourceColumns(row) {
+  const cols = row.blob_columns?.length ? row.blob_columns : [row.blob_column].filter(Boolean)
+  return cols.join(', ')
 }
 
 async function loadSources() {
+  loadingSources.value = true
   try {
     const res = await callWithRetry(() => listBlobMigrationSourcesApi({ includeStats: false }))
     sources.value = res.data || []
@@ -249,6 +85,8 @@ async function loadSources() {
   } catch (err) {
     sources.value = []
     ElMessage.error(err.message || '加载迁移配置失败')
+  } finally {
+    loadingSources.value = false
   }
 }
 
@@ -259,128 +97,19 @@ async function refreshSourceStats(sourceId) {
     const stats = res.data?.stats || null
     const idx = sources.value.findIndex((s) => s.id === sourceId)
     if (idx >= 0) {
-      sources.value[idx] = {
-        ...sources.value[idx],
-        ...(res.data || {}),
-        stats,
-      }
+      sources.value[idx] = { ...sources.value[idx], ...(res.data || {}), stats }
     }
   } catch {
-    // Keep the source row visible even if stats timing out.
-  }
-}
-
-async function discoverTables() {
-  discovering.value = true
-  discoveredTables.value = []
-  try {
-    const res = await discoverBlobTablesApi({ dbAlias: form.dbAlias })
-    discoveredTables.value = res.data?.tables || []
-    if (!discoveredTables.value.length) {
-      ElMessage.info('未发现含 BLOB 的表')
-    }
-  } catch (err) {
-    ElMessage.error(err.message || '扫描失败')
-  } finally {
-    discovering.value = false
-  }
-}
-
-function applyDiscovery(row, col) {
-  form.sourceTable = row.table
-  form.sourceObjectType = row.object_type || 'table'
-  if (col) {
-    const columnName = col.column
-    if (!form.blobColumns.includes(columnName)) {
-      form.blobColumns.push(columnName)
-    }
-    form.blobColumn = form.blobColumns[0] || columnName
-  } else if (row.columns?.length) {
-    form.blobColumns = row.columns.map((item) => item.column)
-    form.blobColumn = form.blobColumns[0] || ''
-  }
-}
-
-function applyAllDiscoveryColumns(row) {
-  applyDiscovery(row, null)
-}
-
-function formatSourceColumns(row) {
-  const cols = row.blob_columns?.length ? row.blob_columns : [row.blob_column].filter(Boolean)
-  return cols.join(', ')
-}
-
-function migrationPayloadBase() {
-  const dbName = selectedDb.value?.name
-  return {
-    name: form.name.trim() || undefined,
-    db_alias: form.dbAlias,
-    database_name: dbName && dbName !== 'default' ? dbName : undefined,
-    source_table: form.sourceTable.trim(),
-    source_pk_column: form.sourcePkColumn.trim() || 'id',
-    blob_column: (form.blobColumns[0] || form.blobColumn || '').trim(),
-    blob_columns: form.blobColumns.length ? [...form.blobColumns] : undefined,
-    source_object_type: form.sourceObjectType || 'table',
-    path_lookup_table: form.pathLookupTable.trim() || undefined,
-    where_clause: form.whereClause.trim(),
-  }
-}
-
-async function saveView() {
-  if (!form.sourceTable || (!form.blobColumn && !form.blobColumns.length)) {
-    ElMessage.warning('请填写源表与 BLOB 列')
-    return
-  }
-
-  savingView.value = true
-  try {
-    const res = await createBlobTableViewApi({
-      ...migrationPayloadBase(),
-      name: form.name.trim() || form.sourceTable.trim(),
-    })
-    ElMessage.success('配置已保存')
-    const viewId = res.data?.id
-    if (viewId) {
-      router.push({ path: '/blob-browse', query: { viewId: String(viewId) } })
-    }
-  } catch (err) {
-    ElMessage.error(err.message || '保存配置失败')
-  } finally {
-    savingView.value = false
-  }
-}
-
-async function saveSource() {
-  if (!form.sourceTable || (!form.blobColumn && !form.blobColumns.length)) {
-    ElMessage.warning('请填写源表与 BLOB 列')
-    return
-  }
-  saving.value = true
-  try {
-    await createBlobMigrationSourceApi({
-      ...migrationPayloadBase(),
-      name: form.name.trim() || `${form.sourceTable}.${form.blobColumns[0] || form.blobColumn}`,
-      name_column: form.nameColumn.trim(),
-      suffix_column: form.suffixColumn.trim(),
-      tags: form.tags.trim(),
-    })
-    ElMessage.success('迁移配置已保存')
-    await loadSources()
-  } catch (err) {
-    ElMessage.error(err.message || '保存失败')
-  } finally {
-    saving.value = false
+    // keep row
   }
 }
 
 async function removeSource(id) {
   try {
-    await ElMessageBox.confirm('删除配置不会撤销已迁移的数据，确定删除？', '确认', { type: 'warning' })
+    await ElMessageBox.confirm('确定删除该迁移配置？不影响已迁移图片。', '确认', { type: 'warning' })
     await deleteBlobMigrationSourceApi(id)
+    if (runOptions.sourceId === id) runOptions.sourceId = null
     ElMessage.success('已删除')
-    if (runOptions.sourceId === id) {
-      runOptions.sourceId = null
-    }
     await loadSources()
   } catch {
     // cancelled
@@ -389,7 +118,7 @@ async function removeSource(id) {
 
 async function loadJobHistoryList() {
   try {
-    const res = await callWithRetry(() => listBlobMigrationJobsApi())
+    const res = await listBlobMigrationJobsApi()
     jobHistory.value = res.data || []
   } catch {
     jobHistory.value = []
@@ -407,9 +136,7 @@ async function loadJobHistory() {
 
 function setActiveJob(job) {
   activeJob.value = job
-  if (job) {
-    displayJob.value = job
-  }
+  if (job) displayJob.value = job
 }
 
 function clearActiveJob() {
@@ -487,14 +214,9 @@ function jobProgressCount(job) {
 
 function jobProgressTotal(job) {
   if (!job) return 0
-  const fromJob = Math.max(
-    Number(job.display_total || 0),
-    Number(job.total_estimate || 0),
-  )
+  const fromJob = Math.max(Number(job.display_total || 0), Number(job.total_estimate || 0))
   const stats = liveStatsForJob(job)
   const fromStats = stats ? Number(stats.total_with_blob || 0) : 0
-  // Prefer the larger known denominator so a stale pending-only estimate
-  // is not preferred over a correct source total when paused.
   return Math.max(fromJob, fromStats)
 }
 
@@ -508,8 +230,7 @@ function formatJobProgress(job) {
         ? `${done} / ${done}`
         : '0 / 0（无数据）'
   }
-  const percent = Math.round((100 * done) / total)
-  return `${done} / ${total} (${percent}%)`
+  return `${done} / ${total} (${Math.round((100 * done) / total)}%)`
 }
 
 function formatLiveProgress(job) {
@@ -545,11 +266,7 @@ function jobProgressPercent(job) {
 }
 
 function jobProgressIndeterminate(job) {
-  return Boolean(
-    job &&
-      ['pending', 'running'].includes(job.status) &&
-      !jobProgressTotal(job),
-  )
+  return Boolean(job && ['pending', 'running'].includes(job.status) && !jobProgressTotal(job))
 }
 
 async function refreshActiveJob(jobId) {
@@ -568,19 +285,13 @@ async function refreshActiveJob(jobId) {
       stopJobPolling()
       running.value = false
       await Promise.all([loadSources(), loadJobHistoryList()])
-      // One opt-in COUNT after finish — not a fan-out on page load.
-      if (res.data.source_id) {
-        await refreshSourceStats(res.data.source_id)
-      }
+      if (res.data.source_id) await refreshSourceStats(res.data.source_id)
       if (res.data.status === 'completed') {
         const pending = Number(sourceById(res.data.source_id)?.stats?.pending ?? -1)
-        if (pending > 0) {
-          ElMessage.warning(`任务结束，仍有 ${pending} 条待迁移`)
-        } else if (Number(res.data.succeeded || 0) <= 0) {
+        if (pending > 0) ElMessage.warning(`任务结束，仍有 ${pending} 条待迁移`)
+        else if (Number(res.data.succeeded || 0) <= 0) {
           ElMessage.warning(res.data.message || '任务结束，但未迁移任何图片')
-        } else {
-          ElMessage.success(res.message || '迁移已完成')
-        }
+        } else ElMessage.success(res.message || '迁移已完成')
       } else if (res.data.status === 'cancelled') {
         ElMessage.warning('迁移任务已取消')
       } else if (res.data.status === 'failed') {
@@ -588,7 +299,7 @@ async function refreshActiveJob(jobId) {
       }
     }
   } catch {
-    // keep last known job state on transient poll errors
+    // keep last state
   }
 }
 
@@ -611,7 +322,6 @@ async function startFullMigration() {
     ElMessage.info('全量迁移请取消「仅预检」；预检请用「预检一批」')
     return
   }
-
   running.value = true
   runResult.value = null
   try {
@@ -682,16 +392,12 @@ async function removeJob(job) {
   const force = ['pending', 'running'].includes(job.status)
   try {
     await ElMessageBox.confirm(
-      force
-        ? '该任务可能仍在队列中，确定强制删除这条记录？'
-        : '确定删除这条任务历史？',
+      force ? '该任务可能仍在队列中，确定强制删除？' : '确定删除这条任务历史？',
       force ? '强制删除' : '确认',
       { type: 'warning' },
     )
     await deleteBlobMigrationJobApi(job.id)
-    if (activeJob.value?.id === job.id) {
-      clearActiveJob()
-    }
+    if (activeJob.value?.id === job.id) clearActiveJob()
     ElMessage.success('已删除')
     await loadJobHistory()
   } catch {
@@ -711,9 +417,7 @@ async function clearJobHistory() {
       { type: 'warning' },
     )
     const res = await clearBlobMigrationJobHistoryApi()
-    if (activeJob.value) {
-      clearActiveJob()
-    }
+    if (activeJob.value) clearActiveJob()
     ElMessage.success(res.message || '已清除全部历史')
     await loadJobHistory()
   } catch {
@@ -723,7 +427,6 @@ async function clearJobHistory() {
 
 async function retryFailedJob(job) {
   if (!job?.id) return
-  // If there are failed rows, retry those; otherwise start another full pass for remaining pending.
   if (!jobHasFailedRows(job)) {
     runOptions.sourceId = job.source_id
     await startFullMigration()
@@ -764,24 +467,6 @@ function downloadJobErrors(job) {
     .catch((err) => ElMessage.error(err.message || '导出失败'))
 }
 
-const jobInProgress = computed(
-  () =>
-    activeJob.value &&
-    ['pending', 'running'].includes(activeJob.value.status) &&
-    !activeJob.value.cancel_requested,
-)
-
-const jobCanPause = computed(
-  () =>
-    activeJob.value &&
-    ['pending', 'running'].includes(activeJob.value.status) &&
-    !activeJob.value.pause_requested,
-)
-
-const jobIsPaused = computed(() => activeJob.value?.status === 'paused')
-
-const clearableJobCount = computed(() => jobHistory.value.length)
-
 async function runGlobalDataSync() {
   globalSyncLoading.value = true
   try {
@@ -799,7 +484,6 @@ async function executeMigration() {
     ElMessage.warning('请选择迁移任务')
     return
   }
-
   running.value = true
   runResult.value = null
   try {
@@ -813,50 +497,59 @@ async function executeMigration() {
     ElMessage.success(res.message || '执行完成')
     await loadSources()
   } catch (err) {
-    if (err.data) {
-      runResult.value = err.data
-    }
+    if (err.data) runResult.value = err.data
     ElMessage.error(err.message || '执行失败')
   } finally {
     running.value = false
   }
 }
 
-const routePrefillApplied = ref(false)
-
-async function refreshPageOptions() {
-  await Promise.all([loadConnections(), loadDatabases(), loadSources(), loadJobHistory()])
-  if (!routePrefillApplied.value) {
-    applyRoutePrefill()
-    routePrefillApplied.value = true
-  }
-}
-
-usePageDataRefresh(refreshPageOptions, {
-  isEmpty: () => !databases.value.length,
-  intervalMs: 2000,
-  maxEmptyRetries: 15,
-})
-
-function applyRoutePrefill() {
+async function applyRouteQuery() {
   const q = route.query || {}
-  if (q.dbAlias) form.dbAlias = String(q.dbAlias)
-  if (q.sourceTable) form.sourceTable = String(q.sourceTable)
-  if (q.objectType === 'view' || q.objectType === 'table') {
-    form.sourceObjectType = String(q.objectType)
+  const sourceId = Number(q.sourceId)
+  if (sourceId && !Number.isNaN(sourceId)) {
+    runOptions.sourceId = sourceId
   }
-  if (q.blobColumns) {
-    const cols = String(q.blobColumns)
-      .split(',')
-      .map((c) => c.trim())
-      .filter(Boolean)
-    if (cols.length) {
-      form.blobColumns = cols
-      form.blobColumn = cols[0]
+  const jobId = Number(q.jobId)
+  if (jobId && !Number.isNaN(jobId)) {
+    try {
+      const res = await getBlobMigrationJobApi(jobId)
+      if (res.data) {
+        setActiveJob(res.data)
+        if (res.data.source_id) runOptions.sourceId = res.data.source_id
+        if (['pending', 'running'].includes(res.data.status)) {
+          startJobPolling(res.data.id)
+        }
+      }
+    } catch {
+      // ignore bad jobId
     }
   }
-  if (q.sourcePkColumn) form.sourcePkColumn = String(q.sourcePkColumn)
 }
+
+async function refreshConsole() {
+  await Promise.all([loadSources(), loadJobHistory()])
+  if (!routeApplied.value) {
+    await applyRouteQuery()
+    routeApplied.value = true
+  }
+}
+
+usePageDataRefresh(refreshConsole, {
+  isEmpty: () => !sources.value.length && !jobHistory.value.length,
+  intervalMs: 2500,
+  maxEmptyRetries: 6,
+})
+
+watch(
+  () => [route.query.sourceId, route.query.jobId],
+  () => {
+    routeApplied.value = false
+    void applyRouteQuery().then(() => {
+      routeApplied.value = true
+    })
+  },
+)
 
 onUnmounted(() => {
   stopJobPolling()
@@ -866,290 +559,42 @@ onUnmounted(() => {
 <template>
   <div class="migrate-page">
     <div class="page-card">
-      <h2 class="page-title">数据库 BLOB 迁移</h2>
-      <p class="page-desc">
-        可在下方<strong>直接添加旧库连接</strong>（无需改 .env），然后从旧表 BLOB 列导出到
-        <code>upload/</code> 并写入 <code>image_info</code>；原表结构<strong>不会修改</strong>。
-      </p>
+      <div class="page-head">
+        <div>
+          <h2 class="page-title">迁移任务台</h2>
+          <p class="page-desc">
+            管理已创建的迁移源与后台任务（预检、全量、暂停/继续、错误导出）。
+            日常扫表建配置、一键迁移请用「数据库模拟」。
+          </p>
+        </div>
+        <div class="page-actions">
+          <el-button @click="connDialogVisible = true">管理旧库连接</el-button>
+          <el-button type="primary" plain @click="router.push('/blob-browse')">打开数据库模拟</el-button>
+        </div>
+      </div>
 
       <el-alert
-        title="管理员专用。先添加并测试旧库连接，再扫描 BLOB 表。建议先预检，再正式迁移。"
-        type="warning"
+        title="部署更新 backend/scheduler 前请先暂停进行中的任务。配置与启迁在「数据库模拟」完成。"
+        type="info"
         show-icon
         :closable="false"
         class="info-alert"
       />
 
       <section class="section">
-        <h3>1. 连接旧库</h3>
-        <el-form label-width="110px" class="compact-form">
-          <el-row :gutter="16">
-            <el-col :xs="24" :sm="12">
-              <el-form-item label="连接名称" required>
-                <el-input v-model="connForm.name" placeholder="例如：生产旧库" clearable />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item label="主机" required>
-                <el-input
-                  v-model="connForm.host"
-                  placeholder="192.168.1.154 或 host.docker.internal"
-                  clearable
-                />
-                <div class="field-hint">Docker 部署时，本机 MySQL 请填 <code>host.docker.internal</code> 或局域网 IP，不要用 127.0.0.1</div>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <el-form-item label="端口">
-                <el-input-number v-model="connForm.port" :min="1" :max="65535" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <el-form-item label="数据库" required>
-                <el-input v-model="connForm.db_name" placeholder="legacy_db" clearable />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <el-form-item label="用户名" required>
-                <el-input v-model="connForm.username" clearable />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item label="密码" required>
-                <el-input v-model="connForm.password" type="password" show-password />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item label="备注">
-                <el-input v-model="connForm.remark" maxlength="500" clearable />
-              </el-form-item>
-            </el-col>
-          </el-row>
-          <el-form-item>
-            <el-button type="primary" plain :loading="connTesting" @click="testNewConnection">
-              测试连接
-            </el-button>
-            <el-button type="primary" :loading="connSaving" @click="saveConnection">
-              保存连接
-            </el-button>
-          </el-form-item>
-        </el-form>
-
-        <el-table :data="connections" size="small" border empty-text="尚未配置旧库连接">
-          <el-table-column prop="name" label="名称" min-width="120" />
-          <el-table-column label="地址" min-width="180">
-            <template #default="{ row }">{{ row.username }}@{{ row.host }}:{{ row.port }}/{{ row.db_name }}</template>
-          </el-table-column>
-          <el-table-column label="最近测试" width="100">
-            <template #default="{ row }">
-              <el-tag v-if="row.last_test_ok === 1" type="success" size="small">成功</el-tag>
-              <el-tag v-else-if="row.last_test_at" type="danger" size="small">失败</el-tag>
-              <span v-else>—</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="260">
-            <template #default="{ row }">
-              <el-button link type="primary" @click="useConnection(row)">选用</el-button>
-              <el-button link type="primary" :loading="connTesting" @click="testSavedConnection(row)">测试</el-button>
-              <el-button
-                link
-                type="primary"
-                :loading="provisionConnId === row.id"
-                @click="syncConnectionTableViews(row)"
-              >
-                同步表视图
-              </el-button>
-              <el-button link type="danger" @click="removeConnection(row)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </section>
-
-      <section class="section">
-        <h3>2. 选择数据源并扫描</h3>
-        <el-form label-width="110px" class="compact-form">
-          <el-form-item label="数据库">
-            <el-select
-              v-model="form.dbAlias"
-              style="min-width: 320px"
-              :loading="loadingDatabases"
-              :empty-text="loadingDatabases ? '加载中…' : '暂无可用库，正在自动重试…'"
-            >
-              <el-option
-                v-for="db in databases"
-                :key="db.alias"
-                :label="dbOptionLabel(db)"
-                :value="db.alias"
-              />
-            </el-select>
-            <el-button
-              link
-              type="primary"
-              :loading="loadingDatabases"
-              class="ml-8"
-              @click="loadDatabases"
-            >
-              <el-icon><Refresh /></el-icon>
-              刷新库列表
-            </el-button>
-            <el-button
-              type="primary"
-              plain
-              :loading="discovering"
-              class="ml-8"
-              @click="discoverTables"
-            >
-              <el-icon><Search /></el-icon>
-              扫描 BLOB 表
-            </el-button>
-          </el-form-item>
-          <div v-if="selectedDb" class="field-hint">
-            当前：<code>{{ selectedDb.alias }}</code>
-            <span v-if="selectedDb.type === 'external'">（Web 配置的旧库）</span>
-            <span v-else-if="selectedDb.type === 'system'">（本系统库，旧表若在同一库可选此项）</span>
-          </div>
-        </el-form>
-
-        <el-table
-          v-if="discoveredTables.length"
-          :data="discoveredTables"
-          size="small"
-          border
-          class="discover-table"
-        >
-          <el-table-column prop="table" label="表/视图" width="200" />
-          <el-table-column label="BLOB 列">
-            <template #default="{ row }">
-              <el-tag
-                v-for="col in row.columns"
-                :key="col.column"
-                class="col-tag"
-                :type="form.blobColumns.includes(col.column) ? 'success' : 'info'"
-                @click="applyDiscovery(row, col)"
-              >
-                {{ col.column }} ({{ col.data_type }})
-              </el-tag>
-              <el-button
-                v-if="row.columns?.length > 1"
-                link
-                type="primary"
-                size="small"
-                class="ml-4"
-                @click="applyAllDiscoveryColumns(row)"
-              >
-                全选列
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-        <p v-if="discoveredTables.length" class="field-hint">点击列名可填入下方表单</p>
-      </section>
-
-      <section class="section">
-        <h3>3. 配置迁移任务</h3>
-        <el-form label-width="110px" class="compact-form">
-          <el-row :gutter="16">
-            <el-col :xs="24" :sm="12">
-              <el-form-item label="任务名称">
-                <el-input v-model="form.name" placeholder="可选" clearable />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item label="源表" required>
-                <el-input v-model="form.sourceTable" placeholder="legacy_images" clearable />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <el-form-item label="主键列">
-                <el-input v-model="form.sourcePkColumn" placeholder="id" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <el-form-item label="对象类型">
-                <el-select v-model="form.sourceObjectType" style="width: 100%">
-                  <el-option label="表" value="table" />
-                  <el-option label="数据库视图" value="view" />
-                </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <el-form-item label="BLOB 列" required>
-                <el-select
-                  v-model="form.blobColumns"
-                  multiple
-                  collapse-tags
-                  collapse-tags-tooltip
-                  placeholder="选择一个或多个 BLOB 列"
-                  style="width: 100%"
-                  @change="form.blobColumn = form.blobColumns[0] || ''"
-                >
-                  <el-option
-                    v-for="col in discoveredColumnsForTable"
-                    :key="col.column"
-                    :label="`${col.column} (${col.data_type})`"
-                    :value="col.column"
-                  />
-                </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col v-if="form.sourceObjectType === 'view'" :xs="24" :sm="8">
-              <el-form-item label="路径映射表">
-                <el-input
-                  v-model="form.pathLookupTable"
-                  placeholder="留空则自动识别简单视图"
-                  clearable
-                />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <el-form-item label="文件名列">
-                <el-input v-model="form.nameColumn" placeholder="可选" clearable />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <el-form-item label="后缀列">
-                <el-input v-model="form.suffixColumn" placeholder="可选" clearable />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="24">
-              <el-form-item label="WHERE 条件">
-                <el-input
-                  v-model="form.whereClause"
-                  placeholder="例如：status = 1（不含 WHERE 关键字）"
-                  clearable
-                />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="24">
-              <el-form-item label="标签">
-                <el-input v-model="form.tags" placeholder="写入 image_info.tags" maxlength="500" clearable />
-              </el-form-item>
-            </el-col>
-          </el-row>
-          <el-form-item>
-            <el-button type="primary" :loading="saving" @click="saveSource">
-              <el-icon><Connection /></el-icon>
-              保存迁移配置
-            </el-button>
-            <el-button type="success" plain :loading="savingView" @click="saveView">
-              保存为表配置
-            </el-button>
-            <span class="field-hint inline-hint">用于远程表/对象的数据查看，BLOB 列显示为本地路径，不执行迁移</span>
-          </el-form-item>
-        </el-form>
-      </section>
-
-      <section class="section">
         <div class="section-head-row">
-          <h3>4. 已保存的任务</h3>
-          <el-button type="primary" plain :loading="globalSyncLoading" @click="runGlobalDataSync">
-            全局数据同步
-          </el-button>
+          <h3>1. 已保存的迁移源</h3>
+          <div>
+            <el-button :loading="loadingSources" @click="loadSources">刷新</el-button>
+            <el-button type="primary" plain :loading="globalSyncLoading" @click="runGlobalDataSync">
+              全局数据同步
+            </el-button>
+          </div>
         </div>
         <p class="field-hint">
-          所有迁移配置默认开启后台自动同步（Scheduler 定时检测外部 BLOB 变更并重迁）。可手动触发一次全量数据同步。
+          源由「数据库模拟」创建配置 / 一键迁移时自动生成。此处可选用、看进度或删除。
         </p>
-        <el-table :data="sources" size="small" border empty-text="暂无配置">
+        <el-table v-loading="loadingSources" :data="sources" size="small" border empty-text="暂无迁移源，请先到数据库模拟创建配置并一键迁移">
           <el-table-column prop="id" label="ID" width="60" />
           <el-table-column prop="name" label="名称" min-width="140" />
           <el-table-column label="源" min-width="220">
@@ -1163,26 +608,17 @@ onUnmounted(() => {
             <template #default="{ row }">
               <span v-if="row.stats">
                 已迁移 {{ row.stats.migrated }} / 共 {{ row.stats.total_with_blob }}
-                <el-tag
-                  v-if="row.stats.pending > 0"
-                  size="small"
-                  type="warning"
-                  style="margin-left: 8px"
-                >待处理 {{ row.stats.pending }}</el-tag>
+                <el-tag v-if="row.stats.pending > 0" size="small" type="warning" style="margin-left: 8px">
+                  待处理 {{ row.stats.pending }}
+                </el-tag>
                 <el-tag v-else size="small" type="success" style="margin-left: 8px">已完成</el-tag>
               </span>
-              <el-button
-                v-else
-                link
-                type="primary"
-                size="small"
-                @click="refreshSourceStats(row.id)"
-              >
+              <el-button v-else link type="primary" size="small" @click="refreshSourceStats(row.id)">
                 加载进度
               </el-button>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="100">
+          <el-table-column label="操作" width="120">
             <template #default="{ row }">
               <el-button link type="primary" @click="runOptions.sourceId = row.id">选用</el-button>
               <el-button link type="danger" @click="removeSource(row.id)">删除</el-button>
@@ -1192,10 +628,10 @@ onUnmounted(() => {
       </section>
 
       <section class="section">
-        <h3>5. 执行迁移</h3>
+        <h3>2. 执行与监控</h3>
         <el-form inline class="run-form">
           <el-form-item label="任务">
-            <el-select v-model="runOptions.sourceId" placeholder="选择任务" style="min-width: 220px">
+            <el-select v-model="runOptions.sourceId" placeholder="选择迁移源" style="min-width: 220px">
               <el-option
                 v-for="src in sources"
                 :key="src.id"
@@ -1214,13 +650,16 @@ onUnmounted(() => {
             <el-checkbox v-model="runOptions.skipExisting">跳过已迁移</el-checkbox>
           </el-form-item>
           <el-form-item>
-            <el-checkbox v-model="runOptions.warmThumbsAfter">完成后预热缩略图（默认开启）</el-checkbox>
+            <el-checkbox v-model="runOptions.warmThumbsAfter">完成后预热缩略图</el-checkbox>
           </el-form-item>
           <el-form-item>
-            <el-button :loading="running && !jobInProgress" @click="executeMigration">
-              预检一批
-            </el-button>
-            <el-button type="primary" :loading="jobInProgress" :disabled="runOptions.dryRun || jobInProgress" @click="startFullMigration">
+            <el-button :loading="running && !jobInProgress" @click="executeMigration">预检一批</el-button>
+            <el-button
+              type="primary"
+              :loading="jobInProgress"
+              :disabled="runOptions.dryRun || jobInProgress"
+              @click="startFullMigration"
+            >
               <el-icon><Refresh /></el-icon>
               开始全量迁移
             </el-button>
@@ -1233,27 +672,29 @@ onUnmounted(() => {
         <div v-if="displayJob" class="job-progress-panel">
           <div class="job-progress-head">
             <span>{{ jobStatusLabel(displayJob.status) }}</span>
-            <span v-if="displayJob.eta_seconds != null" class="job-eta">剩余 {{ formatEta(displayJob.eta_seconds) }}</span>
+            <span v-if="displayJob.eta_seconds != null" class="job-eta">
+              剩余 {{ formatEta(displayJob.eta_seconds) }}
+            </span>
           </div>
           <el-progress
             :percentage="jobProgressPercent(displayJob)"
             :indeterminate="jobProgressIndeterminate(displayJob)"
-            :status="!jobInProgress && Number(liveStatsForJob(displayJob)?.pending ?? 1) <= 0
-              ? 'success'
-              : displayJob.status === 'failed' && jobNeedsRetry(displayJob)
-                ? 'exception'
-                : displayJob.status === 'completed'
-                  ? 'success'
-                  : undefined"
+            :status="
+              !jobInProgress && Number(liveStatsForJob(displayJob)?.pending ?? 1) <= 0
+                ? 'success'
+                : displayJob.status === 'failed' && jobNeedsRetry(displayJob)
+                  ? 'exception'
+                  : displayJob.status === 'completed'
+                    ? 'success'
+                    : undefined
+            "
             :stroke-width="16"
             striped
             :striped-flow="jobInProgress && displayJob.status === 'running'"
           />
-          <p class="job-stats">
-            {{ formatLiveProgress(displayJob) }}
-          </p>
+          <p class="job-stats">{{ formatLiveProgress(displayJob) }}</p>
           <p v-if="jobInProgress" class="job-message field-hint">
-            任务由 scheduler 执行；更新部署前请先点「暂停」。首批可能较慢（预取 BLOB 期间进度暂不动）。
+            任务由 scheduler 执行；更新部署前请先点「暂停」。
           </p>
           <p v-else-if="jobIsPaused" class="job-message field-hint">
             任务已暂停，可安全更新 backend/scheduler，完成后点「继续迁移」。
@@ -1271,7 +712,13 @@ onUnmounted(() => {
             <el-button v-else size="small" type="primary" @click="retryFailedJob(displayJob)">
               {{ jobHasFailedRows(displayJob) ? '重试失败项' : '继续迁移待处理项' }}
             </el-button>
-            <el-button v-if="jobHasFailedRows(displayJob)" size="small" @click="downloadJobErrors(displayJob)">导出错误 CSV</el-button>
+            <el-button
+              v-if="jobHasFailedRows(displayJob)"
+              size="small"
+              @click="downloadJobErrors(displayJob)"
+            >
+              导出错误 CSV
+            </el-button>
           </div>
         </div>
 
@@ -1320,7 +767,9 @@ onUnmounted(() => {
           <el-table-column label="操作" width="220">
             <template #default="{ row }">
               <el-button link type="primary" @click="viewJob(row)">查看</el-button>
-              <el-button v-if="row.status === 'paused'" link type="primary" @click="resumePausedJob(row)">继续</el-button>
+              <el-button v-if="row.status === 'paused'" link type="primary" @click="resumePausedJob(row)">
+                继续
+              </el-button>
               <el-button v-else-if="jobNeedsRetry(row)" link type="primary" @click="retryFailedJob(row)">
                 {{ jobHasFailedRows(row) ? '重试失败' : '继续迁移' }}
               </el-button>
@@ -1330,81 +779,64 @@ onUnmounted(() => {
         </el-table>
       </section>
     </div>
+
+    <ExternalDbConnectionsDialog v-model="connDialogVisible" />
   </div>
 </template>
 
 <style scoped>
-.migrate-page {
-  max-width: 1100px;
-}
-
+.migrate-page { max-width: 1100px; }
 .page-card {
   background: var(--el-bg-color);
   border-radius: 8px;
-  padding: 24px;
+  padding: 20px 24px 28px;
   box-shadow: 0 1px 4px rgb(0 0 0 / 6%);
 }
-
-.page-title {
-  margin: 0 0 8px;
-  font-size: 20px;
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
 }
-
+.page-title { margin: 0 0 6px; font-size: 22px; }
 .page-desc {
-  margin: 0 0 16px;
+  margin: 0;
   color: var(--el-text-color-secondary);
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.5;
+  max-width: 720px;
 }
-
-.info-alert {
-  margin-bottom: 20px;
-}
-
+.page-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.info-alert { margin: 14px 0 8px; }
 .section {
-  margin-bottom: 28px;
+  margin-top: 22px;
+  padding-top: 8px;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
-
-.section h3 {
-  margin: 0 0 12px;
-  font-size: 16px;
-}
-
+.section h3 { margin: 0 0 10px; font-size: 16px; }
 .section-head-row {
   display: flex;
-  align-items: center;
   justify-content: space-between;
+  align-items: center;
   gap: 12px;
   margin-bottom: 8px;
 }
-
-.section-head-row h3 {
-  margin: 0;
-}
-
+.section-head-row h3 { margin: 0; }
 .field-hint {
-  margin-top: 4px;
+  margin: 0 0 10px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+  line-height: 1.5;
 }
-
-.inline-hint {
-  margin-left: 12px;
-  margin-top: 0;
-}
-
-.discover-table,
-.result-table {
-  margin-top: 12px;
-}
-
+.run-form { margin-bottom: 8px; }
 .job-progress-panel {
-  margin: 16px 0;
-  padding: 16px;
+  margin: 12px 0;
+  padding: 12px 14px;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   background: var(--el-fill-color-blank);
 }
-
 .job-progress-head {
   display: flex;
   justify-content: space-between;
@@ -1412,19 +844,9 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: 600;
 }
-
-.job-eta {
-  color: var(--el-text-color-secondary);
-  font-weight: normal;
-}
-
-.job-stats,
-.job-message {
-  margin: 8px 0 0;
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-}
-
+.job-eta { font-weight: 400; color: var(--el-text-color-secondary); }
+.job-stats { margin: 8px 0 0; font-size: 13px; }
+.job-message { margin: 6px 0 0; font-size: 12px; }
 .job-errors {
   margin-top: 8px;
   max-height: 120px;
@@ -1432,49 +854,14 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--el-color-danger);
 }
-
-.job-error-line {
-  padding: 2px 0;
-}
-
-.job-actions {
-  margin-top: 10px;
-  display: flex;
-  gap: 8px;
-}
-
-.subsection-title {
-  margin: 20px 0 8px;
-  font-size: 14px;
-}
-
+.job-error-line { padding: 2px 0; }
+.job-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+.result-table { margin-top: 12px; }
 .job-history-head {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  align-items: center;
+  margin: 18px 0 8px;
 }
-
-.job-history-head .subsection-title {
-  margin: 20px 0 8px;
-}
-
-.col-tag {
-  margin: 2px 6px 2px 0;
-  cursor: pointer;
-}
-
-.category-row {
-  display: flex;
-  gap: 8px;
-  width: 100%;
-}
-
-.ml-8 {
-  margin-left: 8px;
-}
-
-.run-form {
-  flex-wrap: wrap;
-}
+.subsection-title { margin: 0; font-size: 14px; }
 </style>

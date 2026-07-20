@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, VideoPlay, View } from '@element-plus/icons-vue'
+import { Refresh, VideoPlay, View, Connection } from '@element-plus/icons-vue'
 import ImagePreview from '@/components/ImagePreview.vue'
 import ImageLightbox from '@/components/ImageLightbox.vue'
 import SqlEditor from '@/components/SqlEditor.vue'
@@ -40,10 +40,12 @@ import { callWithRetry } from '@/utils/callWithRetry'
 import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 import { readBrowseUiState, writeBrowseUiState } from '@/utils/browseUiState'
 import { useBackgroundExportStore } from '@/stores/backgroundExport'
+import ExternalDbConnectionsDialog from '@/components/ExternalDbConnectionsDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
 const bgExport = useBackgroundExportStore()
+const connDialogVisible = ref(false)
 
 const views = ref([])
 const loadingViews = ref(false)
@@ -821,6 +823,18 @@ async function submitSavedViewMigration() {
     migrateDialogVisible.value = false
     migrateSaving.value = false
     void Promise.all([loadMigrationSources(), loadMapStats()]).then(() => refreshSelectionMigrationStats())
+    if (jobId) {
+      try {
+        await ElMessageBox.confirm(
+          '任务已在后台排队。是否打开「迁移任务台」查看进度（暂停/继续/错误）？',
+          '迁移已启动',
+          { type: 'success', confirmButtonText: '打开任务台', cancelButtonText: '留在本页' },
+        )
+        await router.push({ path: '/blob-migrate', query: { jobId: String(jobId), sourceId: String(sourceId) } })
+      } catch {
+        // stay
+      }
+    }
   } catch (err) {
     ElMessage.error(err.message || '启动迁移失败')
   } finally {
@@ -992,6 +1006,11 @@ function closeExportDialog() {
   exportSaving.value = false
 }
 
+function onConnectionsChanged() {
+  catalogTreeKey.value += 1
+  void loadViews()
+}
+
 async function openCreateViewDialog() {
   if (!selectedCatalogObject.value) return
   const obj = selectedCatalogObject.value
@@ -1065,6 +1084,29 @@ async function submitCreateView() {
         } else {
           message += jobId ? `；已启动迁移任务 #${jobId}` : '；已启动迁移任务'
         }
+        ElMessage.success(message)
+        createViewDialogVisible.value = false
+        await loadViews()
+        if (res.data?.id) {
+          activeViewId.value = res.data.id
+          rightTab.value = 'browse'
+        }
+        if (jobId && !(estimate <= 0 && job?.status === 'completed')) {
+          try {
+            await ElMessageBox.confirm(
+              '是否打开「迁移任务台」查看进度？',
+              '迁移已启动',
+              { type: 'success', confirmButtonText: '打开任务台', cancelButtonText: '留在本页' },
+            )
+            await router.push({
+              path: '/blob-migrate',
+              query: { jobId: String(jobId), sourceId: String(sourceId) },
+            })
+          } catch {
+            // stay
+          }
+        }
+        return
       }
     }
 
@@ -1806,22 +1848,28 @@ onUnmounted(() => {
     <div class="page-card">
       <h2 class="page-title">数据库模拟</h2>
       <p class="page-desc">
-        左侧按连接与数据库查看表与对象；支持保存配置、多图预览，以及在同一页面执行 SQL 查询。
+        目录浏览、建配置、一键迁移、SQL 与导出。旧库连接点左侧「连接」管理；任务暂停/继续在「迁移任务台」。
       </p>
 
       <div class="layout">
         <aside class="view-list-panel">
           <div class="panel-head">
             <span>数据库目录</span>
-            <el-button
-              link
-              type="primary"
-              :loading="loadingViews"
-              title="刷新目录与表视图"
-              @click="catalogTreeKey += 1; loadViews()"
-            >
-              <el-icon><Refresh /></el-icon>
-            </el-button>
+            <div class="panel-head-actions">
+              <el-button link type="primary" title="管理旧库连接" @click="connDialogVisible = true">
+                <el-icon><Connection /></el-icon>
+                连接
+              </el-button>
+              <el-button
+                link
+                type="primary"
+                :loading="loadingViews"
+                title="刷新目录与表视图"
+                @click="catalogTreeKey += 1; loadViews()"
+              >
+                <el-icon><Refresh /></el-icon>
+              </el-button>
+            </div>
           </div>
           <div class="catalog-tree-wrap">
             <el-tree
@@ -2314,7 +2362,7 @@ onUnmounted(() => {
             placeholder="选择目标库 / 连接"
             filterable
             :loading="loadingExportTargets"
-            :empty-text="loadingExportTargets ? '加载中…' : '暂无目标，请先在迁移页添加连接'"
+            :empty-text="loadingExportTargets ? '加载中…' : '暂无目标，请先点左侧「连接」添加'"
             style="width: 100%"
             @change="onExportTargetChange"
           >
@@ -2356,6 +2404,11 @@ onUnmounted(() => {
         </el-button>
       </template>
     </el-dialog>
+
+    <ExternalDbConnectionsDialog
+      v-model="connDialogVisible"
+      @changed="onConnectionsChanged"
+    />
   </div>
 </template>
 
@@ -2599,6 +2652,11 @@ onUnmounted(() => {
   justify-content: space-between;
   font-weight: 600;
   flex-shrink: 0;
+}
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .data-panel {

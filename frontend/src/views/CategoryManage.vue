@@ -33,7 +33,7 @@ const backTarget = computed(() => {
     return { path: '/upload', label: '返回上传' }
   }
   if (from === 'blob-migrate') {
-    return { path: '/blob-migrate', label: '返回迁移' }
+    return { path: '/blob-migrate', label: '返回任务台' }
   }
   return { path: '/', label: '返回首页' }
 })

@@ -21,10 +21,10 @@ export const MENU_ITEMS = [
   {
     path: 'blob-migrate',
     name: 'blob-migrate',
-    title: 'BLOB 迁移',
+    title: '迁移任务台',
     icon: 'Connection',
     adminOnly: false,
-    description: '从旧库 BLOB 导出到 upload 并生成路径表',
+    description: '迁移源进度、预检/全量任务、暂停继续与错误导出',
   },
   {
     path: 'blob-browse',
@@ -32,7 +32,7 @@ export const MENU_ITEMS = [
     title: '数据库模拟',
     icon: 'View',
     adminOnly: false,
-    description: '目录、表数据、SQL 查询与多图预览',
+    description: '目录、连接、建配置、一键迁移、SQL 与导出',
   },
   {
     path: 'fingerprint-pairs',
