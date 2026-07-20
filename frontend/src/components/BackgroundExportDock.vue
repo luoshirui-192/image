@@ -2,11 +2,16 @@
 /**
  * Inline panel for path/simulated export jobs — used on 迁移任务台 (not a floating overlay).
  */
+import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useBackgroundExportStore } from '@/stores/backgroundExport'
 
 const store = useBackgroundExportStore()
 const router = useRouter()
+
+onMounted(() => {
+  void store.syncFromServer()
+})
 
 function statusLabel(status) {
   const map = {
@@ -42,19 +47,23 @@ async function openResult(job) {
   <div class="export-panel">
     <div class="export-panel-head">
       <h3>路径导出任务</h3>
-      <el-button
-        v-if="store.visibleJobs.some((j) => !['pending', 'running', 'paused'].includes(j.status))"
-        link
-        type="primary"
-        size="small"
-        @click="store.clearFinished()"
-      >
-        清除已完成
-      </el-button>
+      <div class="export-panel-actions">
+        <el-button link type="primary" size="small" :loading="store.loadingList" @click="store.syncFromServer()">
+          刷新
+        </el-button>
+        <el-button
+          v-if="store.visibleJobs.some((j) => !['pending', 'running', 'paused'].includes(j.status))"
+          link
+          type="primary"
+          size="small"
+          @click="store.clearFinished()"
+        >
+          清除已完成
+        </el-button>
+      </div>
     </div>
     <p class="field-hint">
-      全局串行排队：仅在完成、失败、取消或删除后自动开始下一个；暂停会占住队列位，不会开下一个。
-      支持断点续传；容器重启后会自动重新排队续跑。
+      显示服务器上的导出任务（含其他会话 / 重启后恢复的任务）。仅完成/取消/删除后自动开始下一个；暂停会占住队列。
     </p>
 
     <el-empty
@@ -146,6 +155,11 @@ async function openResult(job) {
 .export-panel-head h3 {
   margin: 0;
   font-size: 16px;
+}
+.export-panel-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
 }
 .field-hint {
   margin: 0 0 12px;

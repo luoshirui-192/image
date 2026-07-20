@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import {
   cancelBlobSimulatedExportJobApi,
   getBlobSimulatedExportJobApi,
+  listBlobSimulatedExportJobsApi,
   pauseBlobSimulatedExportJobApi,
   resumeBlobSimulatedExportJobApi,
 } from '@/api/images'
@@ -27,18 +28,24 @@ function persistIds(ids) {
 export const useBackgroundExportStore = defineStore('backgroundExport', () => {
   /** @type {import('vue').Ref<Array<Record<string, any>>>} */
   const jobs = ref([])
+  const loadingList = ref(false)
   let pollTimer = null
 
   const activeJobs = computed(() =>
-    jobs.value.filter((j) => ['pending', 'running'].includes(j.status)),
+    jobs.value.filter((j) => ['pending', 'running', 'paused'].includes(j.status)),
   )
-  const visibleJobs = computed(() => jobs.value.filter((j) => !j._dismissed))
+  const visibleJobs = computed(() =>
+    [...jobs.value]
+      .filter((j) => !j._dismissed)
+      .sort((a, b) => Number(b.id) - Number(a.id)),
+  )
   const hasVisible = computed(() => visibleJobs.value.length > 0)
 
   function upsertJob(job) {
     if (!job?.id) return
     const idx = jobs.value.findIndex((j) => j.id === job.id)
-    const next = { ...(idx >= 0 ? jobs.value[idx] : {}), ...job, _dismissed: false }
+    const prev = idx >= 0 ? jobs.value[idx] : {}
+    const next = { ...prev, ...job, _dismissed: false }
     if (idx >= 0) jobs.value[idx] = next
     else jobs.value.unshift(next)
     persistIds(jobs.value.map((j) => j.id))
@@ -48,7 +55,7 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     const idx = jobs.value.findIndex((j) => j.id === jobId)
     if (idx < 0) return
     const job = jobs.value[idx]
-    if (['pending', 'running'].includes(job.status)) {
+    if (['pending', 'running', 'paused'].includes(job.status)) {
       return
     }
     jobs.value.splice(idx, 1)
@@ -82,23 +89,73 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     return job
   }
 
-  async function pollAll() {
-    const ids = jobs.value
-      .filter((j) => ['pending', 'running'].includes(j.status))
-      .map((j) => j.id)
-    if (!ids.length) {
-      stopPolling()
-      return
-    }
-    await Promise.all(
-      ids.map(async (id) => {
-        try {
-          await refreshJob(id)
-        } catch {
-          // ignore transient poll errors
+  /** Pull active (+ recent) jobs from server so UI matches DB even after refresh/other clients. */
+  async function syncFromServer() {
+    loadingList.value = true
+    try {
+      const res = await listBlobSimulatedExportJobsApi({ activeOnly: false, limit: 30 })
+      const list = Array.isArray(res?.data) ? res.data : []
+      for (const job of list) {
+        if (!job?.id) continue
+        // Keep finished jobs only if already tracked, or if still active/paused.
+        const active = ['pending', 'running', 'paused'].includes(job.status)
+        const known = jobs.value.some((j) => j.id === job.id)
+        if (active || known) upsertJob(job)
+      }
+      // Also ensure any session ids not in list get refreshed.
+      const listedIds = new Set(list.map((j) => j.id))
+      for (const id of loadPersistedIds()) {
+        if (!listedIds.has(id)) {
+          try {
+            await refreshJob(id)
+          } catch {
+            // drop
+          }
         }
-      }),
-    )
+      }
+      if (activeJobs.value.length) startPolling()
+    } catch {
+      // ignore list errors; session restore may still work
+    } finally {
+      loadingList.value = false
+    }
+  }
+
+  async function pollAll() {
+    // Prefer a cheap list of active jobs so we discover server-side workers (unstick/sidecar).
+    try {
+      const res = await listBlobSimulatedExportJobsApi({ activeOnly: true, limit: 50 })
+      const list = Array.isArray(res?.data) ? res.data : []
+      const seen = new Set()
+      for (const job of list) {
+        if (!job?.id) continue
+        seen.add(job.id)
+        upsertJob(job)
+      }
+      // Refresh any locally tracked active ids missing from list (race).
+      for (const j of jobs.value) {
+        if (['pending', 'running', 'paused'].includes(j.status) && !seen.has(j.id)) {
+          try {
+            await refreshJob(j.id)
+          } catch {
+            // ignore
+          }
+        }
+      }
+    } catch {
+      const ids = jobs.value
+        .filter((j) => ['pending', 'running', 'paused'].includes(j.status))
+        .map((j) => j.id)
+      await Promise.all(
+        ids.map(async (id) => {
+          try {
+            await refreshJob(id)
+          } catch {
+            // ignore
+          }
+        }),
+      )
+    }
     if (!activeJobs.value.length) stopPolling()
   }
 
@@ -147,12 +204,13 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     ElMessage.success(`导出 #${jobId} 已重新排队`)
   }
 
-  /** Resume tracking after page reload / layout mount. */
+  /** Resume tracking after page reload / layout mount — prefer server list. */
   async function restoreFromSession() {
+    await syncFromServer()
     const ids = loadPersistedIds()
-    if (!ids.length) return
     await Promise.all(
       ids.map(async (id) => {
+        if (jobs.value.some((j) => j.id === id)) return
         try {
           const res = await getBlobSimulatedExportJobApi(id)
           const job = res?.data
@@ -167,6 +225,7 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
 
   return {
     jobs,
+    loadingList,
     activeJobs,
     visibleJobs,
     hasVisible,
@@ -177,6 +236,7 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     pauseJob,
     resumeJob,
     restoreFromSession,
+    syncFromServer,
     refreshJob,
     startPolling,
     stopPolling,

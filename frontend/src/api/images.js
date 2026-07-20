@@ -318,6 +318,15 @@ export function exportBlobTableViewToConnectionApi(id, data) {
   return request.post(`/images/blob-browse/${id}/export-to-connection/`, data, { timeout: 60000 })
 }
 
+export function listBlobSimulatedExportJobsApi({ activeOnly = false, limit = 50 } = {}) {
+  return request.get('/images/blob-browse/export-jobs/', {
+    params: {
+      active_only: activeOnly ? 1 : 0,
+      limit,
+    },
+  })
+}
+
 export function getBlobSimulatedExportJobApi(jobId) {
   return request.get(`/images/blob-browse/export-jobs/${jobId}/`)
 }

@@ -12,6 +12,7 @@ from images.blob_simulated_export_job_service import (
     create_export_job,
     kick_export_job_async,
     kick_export_queue,
+    list_export_jobs,
     pause_export_job,
     resume_export_job,
     serialize_export_job,
@@ -282,6 +283,26 @@ class BlobTableViewExportToConnectionView(APIView):
             message=msg,
             status=202,
         )
+
+
+@extend_schema(tags=["blob-table-view"])
+class BlobSimulatedExportJobListView(APIView):
+    """GET /api/images/blob-browse/export-jobs/ — list export jobs (for 任务台)."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request):
+        active_only = str(request.query_params.get("active_only") or "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        try:
+            limit = int(request.query_params.get("limit") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        jobs = list_export_jobs(limit=limit, active_only=active_only)
+        return success_response([serialize_export_job(j) for j in jobs])
 
 
 @extend_schema(tags=["blob-table-view"])

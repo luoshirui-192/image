@@ -39,6 +39,19 @@ def _parse_result_json(raw: str | None) -> dict:
         return {}
 
 
+def list_export_jobs(*, limit: int = 50, active_only: bool = False) -> list[BlobSimulatedExportJob]:
+    qs = BlobSimulatedExportJob.objects.all().order_by("-id")
+    if active_only:
+        qs = qs.filter(
+            status__in={
+                BlobSimulatedExportJob.STATUS_PENDING,
+                BlobSimulatedExportJob.STATUS_RUNNING,
+                BlobSimulatedExportJob.STATUS_PAUSED,
+            }
+        )
+    return list(qs[: max(1, min(int(limit or 50), 200))])
+
+
 def serialize_export_job(job: BlobSimulatedExportJob) -> dict[str, Any]:
     total = int(job.total_estimate or 0)
     done = int(job.rows_written or 0)
