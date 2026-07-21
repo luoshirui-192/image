@@ -75,7 +75,6 @@ let browseScrollLock = false
 const PAGE_SIZE = 80
 const SCROLL_LOAD_DISTANCE = 120
 const PREFETCH_DISTANCE = 900
-const SCROLLBAR_SIZE = 14
 
 const browseReady = ref(false)
 let rowsLoadSeq = 0
