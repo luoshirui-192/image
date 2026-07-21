@@ -73,16 +73,18 @@ let resizeObserver = null
 let sqlScrollLock = false
 let browseScrollLock = false
 
-const PAGE_SIZE = 50
+const PAGE_SIZE = 100
 const SCROLL_LOAD_DISTANCE = 120
 const PREFETCH_DISTANCE = 900
 const MAX_BUFFERED_ROWS = 800
+const MAX_AUTOFILL_PAGES = 15
 
 const browseReady = ref(false)
 let rowsLoadSeq = 0
 /** @type {{ viewId: number, afterPk: string|null, rows: any[], hasMore: boolean, nextAfterPk: string|null } | null} */
 let prefetchedPage = null
 let prefetchInFlight = false
+let autofillInFlight = false
 /** Cursor for keyset pagination (last loaded PK). */
 const nextAfterPk = ref(null)
 
@@ -1652,6 +1654,7 @@ async function loadRows({ append = false } = {}) {
     } finally {
       if (seq === rowsLoadSeq) loadingMore.value = false
     }
+    void ensureBrowseViewportFilled()
     return
   }
 
@@ -1701,6 +1704,7 @@ async function loadRows({ append = false } = {}) {
       setupTableViewport()
       // Prefetch only after loadingRows is false (guard inside prefetch).
       void prefetchNextRows()
+      void ensureBrowseViewportFilled()
     }
   }
 }
@@ -1725,6 +1729,26 @@ function applyAppendedRows(rows, more, cursor) {
   }
 }
 
+/** If first pages don't fill the viewport, scroll never fires — keep loading until it can. */
+async function ensureBrowseViewportFilled() {
+  if (autofillInFlight || loadingRows.value) return
+  autofillInFlight = true
+  try {
+    for (let i = 0; i < MAX_AUTOFILL_PAGES; i += 1) {
+      await nextTick()
+      syncBrowseDedicatedBars()
+      const wrap = tableWrapRef.value
+      if (!wrap || !hasMore.value || loadingRows.value) break
+      if (wrap.scrollHeight > wrap.clientHeight + SCROLL_LOAD_DISTANCE) break
+      const before = tableRows.value.length
+      await loadRows({ append: true })
+      if (tableRows.value.length <= before) break
+    }
+  } finally {
+    autofillInFlight = false
+  }
+}
+
 async function prefetchNextRows() {
   if (
     !activeViewId.value
@@ -1738,6 +1762,7 @@ async function prefetchNextRows() {
   }
   const viewId = activeViewId.value
   const cursor = nextAfterPk.value
+  if (cursor == null || cursor === '') return
   const seq = rowsLoadSeq
   prefetchInFlight = true
   try {
@@ -1747,7 +1772,7 @@ async function prefetchNextRows() {
       skipBlobPresence: true,
       afterPk: cursor,
     })
-    if (seq !== rowsLoadSeq || viewId !== activeViewId.value || cursor !== nextAfterPk.value) {
+    if (seq !== rowsLoadSeq || viewId !== activeViewId.value || String(cursor) !== String(nextAfterPk.value ?? '')) {
       return
     }
     const data = res.data || {}
@@ -2224,6 +2249,11 @@ onUnmounted(() => {
                       </div>
                     </div>
                     <div v-if="loadingMore" class="load-more-hint">加载更多…</div>
+                    <div v-else-if="tableRows.length && hasMore" class="load-more-hint">
+                      <el-button size="small" type="primary" plain @click="loadMore">
+                        加载更多（已加载 {{ tableRows.length }}<template v-if="total >= 0"> / {{ total }}</template>）
+                      </el-button>
+                    </div>
                     <div v-else-if="tableRows.length && !hasMore" class="load-more-hint muted">已全部加载</div>
                   </div>
 
