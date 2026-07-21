@@ -64,17 +64,18 @@ const loadingMore = ref(false)
 const tableRef = ref(null)
 const tableWrapRef = ref(null)
 const browseHBarRef = ref(null)
+const browseVBarRef = ref(null)
 const rowPreviewPanelRef = ref(null)
-const tableHeight = ref(520)
-let tableScrollEl = null
+const browseVBarInnerHeight = ref(1)
+const sqlVBarInnerHeight = ref(1)
 let resizeObserver = null
-let sqlHScrollLock = false
-let browseHScrollLock = false
+let sqlScrollLock = false
+let browseScrollLock = false
 
 const PAGE_SIZE = 80
 const SCROLL_LOAD_DISTANCE = 120
 const PREFETCH_DISTANCE = 900
-const TABLE_SCROLLBAR_GUTTER = 14
+const SCROLLBAR_SIZE = 14
 
 const browseReady = ref(false)
 let rowsLoadSeq = 0
@@ -195,6 +196,7 @@ const sqlSelectedRow = ref(null)
 const sqlTableRef = ref(null)
 const sqlTableWrapRef = ref(null)
 const sqlHBarRef = ref(null)
+const sqlVBarRef = ref(null)
 const sqlPreviewPanelRef = ref(null)
 
 const migrationSources = ref([])
@@ -1367,27 +1369,6 @@ function openPreview(pathCellValue, row) {
   selectPreviewRow(row, { focusPanel: true })
 }
 
-function syncBrowseTableHeight() {
-  const wrap = tableWrapRef.value
-  if (wrap) {
-    let available = wrap.clientHeight
-    if (available <= 0) {
-      available = wrap.parentElement?.clientHeight ?? 0
-    }
-    if (available > 200) {
-      tableHeight.value = Math.max(200, Math.floor(available) - TABLE_SCROLLBAR_GUTTER)
-      return
-    }
-  }
-
-  const reservedTop = 56 + 16 + 16 + 20 + 12 + 40 + 72 + 48 + 36 + 210
-  tableHeight.value = Math.max(420, window.innerHeight - reservedTop - TABLE_SCROLLBAR_GUTTER)
-}
-
-function syncTableHeight() {
-  syncBrowseTableHeight()
-}
-
 function syncScrollLeft(from, to) {
   if (!from || !to) return
   if (from.scrollLeft !== to.scrollLeft) {
@@ -1395,30 +1376,67 @@ function syncScrollLeft(from, to) {
   }
 }
 
+function syncScrollTop(from, to) {
+  if (!from || !to) return
+  if (from.scrollTop !== to.scrollTop) {
+    to.scrollTop = from.scrollTop
+  }
+}
+
+function syncBrowseDedicatedBars() {
+  const wrap = tableWrapRef.value
+  if (!wrap) return
+  browseVBarInnerHeight.value = Math.max(1, wrap.scrollHeight)
+  syncScrollTop(wrap, browseVBarRef.value)
+  syncScrollLeft(wrap, browseHBarRef.value)
+}
+
+function syncSqlDedicatedBars() {
+  const wrap = sqlTableWrapRef.value
+  if (!wrap) return
+  sqlVBarInnerHeight.value = Math.max(1, wrap.scrollHeight)
+  syncScrollTop(wrap, sqlVBarRef.value)
+  syncScrollLeft(wrap, sqlHBarRef.value)
+}
+
 function onSqlTableScroll(event) {
-  if (sqlHScrollLock) return
-  sqlHScrollLock = true
-  syncScrollLeft(event.target, sqlHBarRef.value)
+  if (sqlScrollLock) return
+  sqlScrollLock = true
+  const el = event.target
+  syncScrollLeft(el, sqlHBarRef.value)
+  syncScrollTop(el, sqlVBarRef.value)
   requestAnimationFrame(() => {
-    sqlHScrollLock = false
+    sqlScrollLock = false
   })
 }
 
 function onSqlHBarScroll(event) {
-  if (sqlHScrollLock) return
-  sqlHScrollLock = true
+  if (sqlScrollLock) return
+  sqlScrollLock = true
   syncScrollLeft(event.target, sqlTableWrapRef.value)
   requestAnimationFrame(() => {
-    sqlHScrollLock = false
+    sqlScrollLock = false
+  })
+}
+
+function onSqlVBarScroll(event) {
+  if (sqlScrollLock) return
+  sqlScrollLock = true
+  syncScrollTop(event.target, sqlTableWrapRef.value)
+  requestAnimationFrame(() => {
+    sqlScrollLock = false
   })
 }
 
 function onBrowseTableScroll(event) {
-  if (browseHScrollLock) return
-  browseHScrollLock = true
-  syncScrollLeft(event.target, browseHBarRef.value)
+  if (browseScrollLock) return
+  browseScrollLock = true
+  const el = event.target
+  syncScrollLeft(el, browseHBarRef.value)
+  syncScrollTop(el, browseVBarRef.value)
+  maybeLoadMoreFromScroll(el)
   requestAnimationFrame(() => {
-    browseHScrollLock = false
+    browseScrollLock = false
   })
 }
 
@@ -1434,17 +1452,27 @@ function maybeLoadMoreFromScroll(el) {
 }
 
 function onBrowseHBarScroll(event) {
-  if (browseHScrollLock) return
-  browseHScrollLock = true
+  if (browseScrollLock) return
+  browseScrollLock = true
   syncScrollLeft(event.target, tableWrapRef.value)
   requestAnimationFrame(() => {
-    browseHScrollLock = false
+    browseScrollLock = false
+  })
+}
+
+function onBrowseVBarScroll(event) {
+  if (browseScrollLock) return
+  browseScrollLock = true
+  syncScrollTop(event.target, tableWrapRef.value)
+  requestAnimationFrame(() => {
+    browseScrollLock = false
   })
 }
 
 function resetSqlHorizontalScroll() {
   if (sqlTableWrapRef.value) sqlTableWrapRef.value.scrollLeft = 0
   if (sqlHBarRef.value) sqlHBarRef.value.scrollLeft = 0
+  if (sqlVBarRef.value) sqlVBarRef.value.scrollTop = 0
 }
 
 let layoutRaf = 0
@@ -1455,6 +1483,8 @@ function layoutTableRefs() {
     layoutRaf = 0
     tableRef.value?.doLayout?.()
     sqlTableRef.value?.doLayout?.()
+    syncBrowseDedicatedBars()
+    syncSqlDedicatedBars()
   })
 }
 
@@ -1464,13 +1494,10 @@ function setupSqlTableViewport() {
 
 function setupTableViewport() {
   nextTick(() => {
-    syncTableHeight()
     if (tableWrapRef.value || sqlTableWrapRef.value) {
       if (!resizeObserver) {
         let resizeTimer = 0
         resizeObserver = new ResizeObserver(() => {
-          syncTableHeight()
-          // Debounce doLayout — resize storms during append freeze the UI.
           if (resizeTimer) clearTimeout(resizeTimer)
           resizeTimer = window.setTimeout(() => {
             resizeTimer = 0
@@ -1481,44 +1508,17 @@ function setupTableViewport() {
       resizeObserver.disconnect()
       if (tableWrapRef.value) {
         resizeObserver.observe(tableWrapRef.value)
+        const browseInner = tableWrapRef.value.querySelector('.table-h-scroll-inner')
+        if (browseInner) resizeObserver.observe(browseInner)
       }
       if (sqlTableWrapRef.value) {
         resizeObserver.observe(sqlTableWrapRef.value)
+        const sqlInner = sqlTableWrapRef.value.querySelector('.table-h-scroll-inner')
+        if (sqlInner) resizeObserver.observe(sqlInner)
       }
     }
-    bindTableScroll()
     layoutTableRefs()
   })
-}
-
-function getTableScrollElement() {
-  const table = tableRef.value
-  if (!table?.$refs?.bodyWrapper) return null
-  return (
-    table.$refs.bodyWrapper.querySelector('.el-scrollbar__wrap')
-    || table.$refs.bodyWrapper
-  )
-}
-
-function onTableBodyScroll(event) {
-  maybeLoadMoreFromScroll(event.target)
-}
-
-function bindTableScroll() {
-  unbindTableScroll()
-  nextTick(() => {
-    const el = getTableScrollElement()
-    if (!el) return
-    tableScrollEl = el
-    el.addEventListener('scroll', onTableBodyScroll, { passive: true })
-  })
-}
-
-function unbindTableScroll() {
-  if (tableScrollEl) {
-    tableScrollEl.removeEventListener('scroll', onTableBodyScroll)
-    tableScrollEl = null
-  }
 }
 
 function persistBrowseUiState() {
@@ -1829,6 +1829,7 @@ watch(tableRows, () => {
   if (selectedRow.value && !tableRows.value.includes(selectedRow.value)) {
     selectedRow.value = null
   }
+  nextTick(() => syncBrowseDedicatedBars())
 })
 
 watch(sqlTableData, () => {
@@ -1836,11 +1837,11 @@ watch(sqlTableData, () => {
     resetSqlHorizontalScroll()
     setupSqlTableViewport()
   }
+  nextTick(() => syncSqlDedicatedBars())
 })
 
 watch(activeViewId, (id, oldId) => {
   if (!browseReady.value || id === oldId) return
-  unbindTableScroll()
   if (!id) {
     rowsLoadSeq += 1
     loadingRows.value = false
@@ -1866,8 +1867,6 @@ watch(
   (view) => {
     if (view) {
       setupTableViewport()
-    } else {
-      unbindTableScroll()
     }
   },
 )
@@ -1965,13 +1964,12 @@ usePageDataRefresh(
 )
 
 onMounted(() => {
-  window.addEventListener('resize', syncTableHeight)
+  window.addEventListener('resize', layoutTableRefs)
 })
 
 onUnmounted(() => {
-  unbindTableScroll()
   resizeObserver?.disconnect()
-  window.removeEventListener('resize', syncTableHeight)
+  window.removeEventListener('resize', layoutTableRefs)
 })
 </script>
 
@@ -2109,75 +2107,89 @@ onUnmounted(() => {
                 <div class="table-panel">
                   <div class="browse-result-list-wrap">
                     <div class="result-table-area">
-                      <div
-                        ref="tableWrapRef"
-                        v-loading="loadingRows && !tableRows.length"
-                        class="browse-result-list-scroll"
-                        tabindex="0"
-                        @scroll="onBrowseTableScroll"
-                        @keydown="onPreviewKeydown"
-                      >
-                        <template v-if="columns.length">
-                          <div class="table-h-scroll-inner" :style="browseTableInnerStyle">
-                            <el-table
-                              ref="tableRef"
-                              :data="tableRows"
-                              :height="tableHeight"
-                              :fit="false"
-                              size="small"
-                              border
-                              stripe
-                              highlight-current-row
-                              :row-key="getRowKey"
-                              class="data-table data-table--wide compact-table"
-                              empty-text="无数据"
-                              @row-click="onTableRowClick"
-                            >
-                        <el-table-column
-                          v-for="col in columns"
-                          :key="col.name"
-                          :prop="col.name"
-                          :label="col.name"
-                          :width="col.is_path_substitute ? 200 : 100"
-                          show-overflow-tooltip
+                      <div class="result-table-body">
+                        <div
+                          ref="tableWrapRef"
+                          v-loading="loadingRows && !tableRows.length"
+                          class="browse-result-list-scroll"
+                          tabindex="0"
+                          @scroll="onBrowseTableScroll"
+                          @keydown="onPreviewKeydown"
                         >
-                          <template #default="{ row }">
-                            <template v-if="col.is_path_substitute">
-                              <div class="path-cell">
-                                <el-tag
-                                  :type="statusTagType(row[col.name]?.status)"
-                                  size="small"
-                                  class="path-tag"
-                                >
-                                  {{ statusLabel(row[col.name]?.status) }}
-                                </el-tag>
-                                <span class="path-text">{{ row[col.name]?.display || '—' }}</span>
-                                <el-button
-                                  v-if="row[col.name]?.image_info_id"
-                                  link
-                                  type="primary"
-                                  :icon="View"
-                                  @click="openPreview(row[col.name], row)"
-                                />
-                              </div>
+                          <template v-if="columns.length">
+                            <div class="table-h-scroll-inner" :style="browseTableInnerStyle">
+                              <el-table
+                                ref="tableRef"
+                                :data="tableRows"
+                                :fit="false"
+                                size="small"
+                                border
+                                stripe
+                                highlight-current-row
+                                :row-key="getRowKey"
+                                class="data-table data-table--wide compact-table"
+                                empty-text="无数据"
+                                @row-click="onTableRowClick"
+                              >
+                          <el-table-column
+                            v-for="col in columns"
+                            :key="col.name"
+                            :prop="col.name"
+                            :label="col.name"
+                            :width="col.is_path_substitute ? 200 : 100"
+                            show-overflow-tooltip
+                          >
+                            <template #default="{ row }">
+                              <template v-if="col.is_path_substitute">
+                                <div class="path-cell">
+                                  <el-tag
+                                    :type="statusTagType(row[col.name]?.status)"
+                                    size="small"
+                                    class="path-tag"
+                                  >
+                                    {{ statusLabel(row[col.name]?.status) }}
+                                  </el-tag>
+                                  <span class="path-text">{{ row[col.name]?.display || '—' }}</span>
+                                  <el-button
+                                    v-if="row[col.name]?.image_info_id"
+                                    link
+                                    type="primary"
+                                    :icon="View"
+                                    @click="openPreview(row[col.name], row)"
+                                  />
+                                </div>
+                              </template>
+                              <template v-else>
+                                {{ formatCell(row, col.name) }}
+                              </template>
                             </template>
-                            <template v-else>
-                              {{ formatCell(row, col.name) }}
-                            </template>
+                          </el-table-column>
+                              </el-table>
+                            </div>
                           </template>
-                        </el-table-column>
-                          </el-table>
-                          </div>
-                        </template>
-                        <el-empty v-else-if="!loadingRows" description="无数据" />
+                          <el-empty v-else-if="!loadingRows" description="无数据" />
+                        </div>
+                        <div
+                          v-if="columns.length"
+                          ref="browseVBarRef"
+                          class="result-v-scrollbar"
+                          @scroll="onBrowseVBarScroll"
+                        >
+                          <div
+                            class="result-v-scrollbar-inner"
+                            :style="{ height: `${browseVBarInnerHeight}px` }"
+                          />
+                        </div>
                       </div>
-                      <div
-                        v-if="columns.length"
-                        ref="browseHBarRef"
-                        class="result-h-scrollbar"
-                        @scroll="onBrowseHBarScroll"
-                      >
-                        <div class="result-h-scrollbar-inner" :style="browseTableInnerStyle" />
+                      <div v-if="columns.length" class="result-h-scrollbar-row">
+                        <div
+                          ref="browseHBarRef"
+                          class="result-h-scrollbar"
+                          @scroll="onBrowseHBarScroll"
+                        >
+                          <div class="result-h-scrollbar-inner" :style="browseTableInnerStyle" />
+                        </div>
+                        <div class="result-scrollbar-corner" />
                       </div>
                     </div>
                     <div v-if="loadingMore" class="load-more-hint">加载更多…</div>
@@ -2256,70 +2268,85 @@ onUnmounted(() => {
                 <div v-if="sqlTableData.length" class="table-panel sql-results-panel">
                   <div class="sql-result-list-wrap">
                     <div class="result-table-area">
-                      <div
-                        ref="sqlTableWrapRef"
-                        class="sql-result-list-scroll"
-                        tabindex="0"
-                        @scroll="onSqlTableScroll"
-                        @keydown="onSqlPreviewKeydown"
-                      >
-                        <div class="table-h-scroll-inner" :style="sqlTableInnerStyle">
-                          <el-table
-                            ref="sqlTableRef"
-                            :data="sqlTableData"
-                            :fit="false"
-                            size="small"
-                            border
-                            stripe
-                            highlight-current-row
-                            :row-key="getSqlRowKey"
-                            class="data-table data-table--wide compact-table"
-                            @row-click="onSqlTableRowClick"
-                          >
-                        <el-table-column
-                          v-for="col in sqlResult.columns"
-                          :key="col"
-                          :prop="col"
-                          :label="col"
-                          :width="sqlColumnWidth(col)"
-                          show-overflow-tooltip
+                      <div class="result-table-body">
+                        <div
+                          ref="sqlTableWrapRef"
+                          class="sql-result-list-scroll"
+                          tabindex="0"
+                          @scroll="onSqlTableScroll"
+                          @keydown="onSqlPreviewKeydown"
                         >
-                          <template #default="{ row }">
-                            <template v-if="sqlIsPathColumn(col) || sqlPathCell(row, col)">
-                              <div class="path-cell">
-                                <el-tag
-                                  :type="statusTagType(sqlPathCell(row, col)?.status)"
-                                  size="small"
-                                  class="path-tag"
-                                >
-                                  {{ statusLabel(sqlPathCell(row, col)?.status) }}
-                                </el-tag>
-                                <span class="path-text">{{ sqlFormatCell(row, col) }}</span>
-                                <el-button
-                                  v-if="sqlPathCell(row, col)?.image_info_id"
-                                  link
-                                  type="primary"
-                                  size="small"
-                                  @click.stop="openPreview(sqlPathCell(row, col), row)"
-                                >
-                                  预览
-                                </el-button>
-                              </div>
+                          <div class="table-h-scroll-inner" :style="sqlTableInnerStyle">
+                            <el-table
+                              ref="sqlTableRef"
+                              :data="sqlTableData"
+                              :fit="false"
+                              size="small"
+                              border
+                              stripe
+                              highlight-current-row
+                              :row-key="getSqlRowKey"
+                              class="data-table data-table--wide compact-table"
+                              @row-click="onSqlTableRowClick"
+                            >
+                          <el-table-column
+                            v-for="col in sqlResult.columns"
+                            :key="col"
+                            :prop="col"
+                            :label="col"
+                            :width="sqlColumnWidth(col)"
+                            show-overflow-tooltip
+                          >
+                            <template #default="{ row }">
+                              <template v-if="sqlIsPathColumn(col) || sqlPathCell(row, col)">
+                                <div class="path-cell">
+                                  <el-tag
+                                    :type="statusTagType(sqlPathCell(row, col)?.status)"
+                                    size="small"
+                                    class="path-tag"
+                                  >
+                                    {{ statusLabel(sqlPathCell(row, col)?.status) }}
+                                  </el-tag>
+                                  <span class="path-text">{{ sqlFormatCell(row, col) }}</span>
+                                  <el-button
+                                    v-if="sqlPathCell(row, col)?.image_info_id"
+                                    link
+                                    type="primary"
+                                    size="small"
+                                    @click.stop="openPreview(sqlPathCell(row, col), row)"
+                                  >
+                                    预览
+                                  </el-button>
+                                </div>
+                              </template>
+                              <template v-else>
+                                {{ formatCellValue(row[col]) }}
+                              </template>
                             </template>
-                            <template v-else>
-                              {{ formatCellValue(row[col]) }}
-                            </template>
-                          </template>
-                          </el-table-column>
-                          </el-table>
+                            </el-table-column>
+                            </el-table>
+                          </div>
+                        </div>
+                        <div
+                          ref="sqlVBarRef"
+                          class="result-v-scrollbar"
+                          @scroll="onSqlVBarScroll"
+                        >
+                          <div
+                            class="result-v-scrollbar-inner"
+                            :style="{ height: `${sqlVBarInnerHeight}px` }"
+                          />
                         </div>
                       </div>
-                      <div
-                        ref="sqlHBarRef"
-                        class="result-h-scrollbar"
-                        @scroll="onSqlHBarScroll"
-                      >
-                        <div class="result-h-scrollbar-inner" :style="sqlTableInnerStyle" />
+                      <div class="result-h-scrollbar-row">
+                        <div
+                          ref="sqlHBarRef"
+                          class="result-h-scrollbar"
+                          @scroll="onSqlHBarScroll"
+                        >
+                          <div class="result-h-scrollbar-inner" :style="sqlTableInnerStyle" />
+                        </div>
+                        <div class="result-scrollbar-corner" />
                       </div>
                     </div>
                   </div>
@@ -2881,47 +2908,81 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.browse-result-list-scroll {
+.result-table-body {
   flex: 1;
   min-width: 0;
-  min-height: 180px;
-  /* Browse: el-table :height owns vertical scroll; H uses .result-h-scrollbar */
-  overflow-x: hidden;
-  overflow-y: hidden;
-  overscroll-behavior: contain;
-  outline: none;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
 }
 
+/* Viewport: wheel scrolls here; native bars hidden so only dedicated bars show */
+.browse-result-list-scroll,
 .sql-result-list-scroll {
   flex: 1;
   min-width: 0;
   min-height: 180px;
-  /* SQL table has no fixed height — this panel scrolls vertically */
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: auto;
   overscroll-behavior: contain;
   outline: none;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.browse-result-list-scroll::-webkit-scrollbar,
+.sql-result-list-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.sql-result-list-scroll:focus,
+.browse-result-list-scroll:focus {
+  box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
+}
+
+.result-v-scrollbar {
+  flex-shrink: 0;
+  width: 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-left: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-lighter);
   scrollbar-width: thin;
   scrollbar-color: var(--el-border-color-darker) transparent;
 }
 
-.sql-result-list-scroll::-webkit-scrollbar {
+.result-v-scrollbar::-webkit-scrollbar {
   width: 12px;
 }
 
-.sql-result-list-scroll::-webkit-scrollbar-thumb {
+.result-v-scrollbar::-webkit-scrollbar-thumb {
   border-radius: 6px;
   background: var(--el-border-color-darker);
 }
 
-.result-h-scrollbar {
+.result-v-scrollbar-inner {
+  width: 1px;
+}
+
+.result-h-scrollbar-row {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: row;
+  min-width: 0;
+}
+
+.result-h-scrollbar {
+  flex: 1;
+  min-width: 0;
   height: 14px;
   overflow-x: auto;
   overflow-y: hidden;
   border-top: 1px solid var(--el-border-color-lighter);
   background: var(--el-fill-color-lighter);
   scrollbar-width: thin;
+  scrollbar-color: var(--el-border-color-darker) transparent;
 }
 
 .result-h-scrollbar::-webkit-scrollbar {
@@ -2937,71 +2998,13 @@ onUnmounted(() => {
   height: 1px;
 }
 
-.sql-result-list-scroll:focus,
-.browse-result-list-scroll:focus {
-  box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
-}
-
-/* Hide only Element Plus horizontal bar; keep / force vertical visible */
-.browse-result-list-scroll :deep(.el-scrollbar__bar.is-horizontal),
-.sql-result-list-scroll :deep(.el-scrollbar__bar.is-horizontal) {
-  display: none !important;
-}
-
-.browse-result-list-scroll :deep(.el-scrollbar__bar.is-vertical),
-.sql-result-list-scroll :deep(.el-scrollbar__bar.is-vertical) {
-  display: block !important;
-  opacity: 1 !important;
-  width: 12px !important;
-  right: 2px !important;
-  top: 2px !important;
-  bottom: 2px !important;
-}
-
-.browse-result-list-scroll :deep(.el-scrollbar__bar.is-vertical .el-scrollbar__thumb),
-.sql-result-list-scroll :deep(.el-scrollbar__bar.is-vertical .el-scrollbar__thumb) {
-  background-color: var(--el-border-color-darker) !important;
-  opacity: 1 !important;
-  border-radius: 6px;
-}
-
-/* Native fallback when EP uses body-wrapper scroll instead of el-scrollbar */
-.browse-result-list-scroll :deep(.el-table__body-wrapper),
-.sql-result-list-scroll :deep(.el-table__body-wrapper) {
-  overflow-y: auto !important;
-  overflow-x: hidden !important;
-  scrollbar-width: thin;
-  scrollbar-color: var(--el-border-color-darker) transparent;
-}
-
-.browse-result-list-scroll :deep(.el-table__body-wrapper::-webkit-scrollbar),
-.sql-result-list-scroll :deep(.el-table__body-wrapper::-webkit-scrollbar) {
-  width: 12px;
-}
-
-.browse-result-list-scroll :deep(.el-table__body-wrapper::-webkit-scrollbar-thumb),
-.sql-result-list-scroll :deep(.el-table__body-wrapper::-webkit-scrollbar-thumb) {
-  border-radius: 6px;
-  background: var(--el-border-color-darker);
-}
-
-.browse-result-list-scroll :deep(.el-scrollbar__wrap),
-.sql-result-list-scroll :deep(.el-scrollbar__wrap) {
-  overflow-x: hidden !important;
-  scrollbar-width: thin;
-  scrollbar-color: var(--el-border-color-darker) transparent;
-}
-
-.browse-result-list-scroll :deep(.el-scrollbar__wrap::-webkit-scrollbar),
-.sql-result-list-scroll :deep(.el-scrollbar__wrap::-webkit-scrollbar) {
-  width: 12px;
-  height: 0;
-}
-
-.browse-result-list-scroll :deep(.el-scrollbar__wrap::-webkit-scrollbar-thumb),
-.sql-result-list-scroll :deep(.el-scrollbar__wrap::-webkit-scrollbar-thumb) {
-  border-radius: 6px;
-  background: var(--el-border-color-darker);
+.result-scrollbar-corner {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  border-left: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-lighter);
 }
 
 .result-table-area .table-h-scroll-inner {
@@ -3011,6 +3014,18 @@ onUnmounted(() => {
 
 .result-table-area .table-h-scroll-inner :deep(.el-table) {
   width: 100% !important;
+}
+
+/* Table itself must not create nested scrollbars */
+.result-table-area :deep(.el-table__inner-wrapper),
+.result-table-area :deep(.el-table__body-wrapper),
+.result-table-area :deep(.el-table__header-wrapper),
+.result-table-area :deep(.el-scrollbar__wrap) {
+  overflow: visible !important;
+}
+
+.result-table-area :deep(.el-scrollbar__bar) {
+  display: none !important;
 }
 
 .row-preview-panel {
