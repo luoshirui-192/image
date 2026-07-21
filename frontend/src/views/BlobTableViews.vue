@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, VideoPlay, View, Connection } from '@element-plus/icons-vue'
@@ -55,9 +55,10 @@ const catalogTreeKey = ref(0)
 const catalogTreeRef = ref(null)
 
 const columns = ref([])
-const tableRows = ref([])
+const tableRows = shallowRef([])
 const total = ref(-1)
 const offset = ref(0)
+const loadedCount = ref(0)
 const hasMore = ref(false)
 const loadingRows = ref(false)
 const loadingMore = ref(false)
@@ -75,10 +76,13 @@ let tableScrollEl = null
 let sqlScrollLock = false
 let browseScrollLock = false
 
-const PAGE_SIZE = 200
-const SCROLL_LOAD_DISTANCE = 240
-const PREFETCH_DISTANCE = 1200
-const MAX_AUTOFILL_PAGES = 8
+const PAGE_SIZE = 100
+const SCROLL_LOAD_DISTANCE = 280
+const PREFETCH_DISTANCE = 800
+const MAX_AUTOFILL_PAGES = 2
+/** Keep a sliding window so el-table does not re-render thousands of rows (Navicat-like). */
+const MAX_KEEP_ROWS = 400
+const EST_ROW_HEIGHT = 37
 
 const browseReady = ref(false)
 let rowsLoadSeq = 0
@@ -1427,27 +1431,40 @@ function getTableScrollElement() {
   )
 }
 
+function freezePageRows(rows) {
+  return (rows || []).map((row) => (row && typeof row === 'object' ? Object.freeze(row) : row))
+}
+
 function onTableBodyScroll(event) {
   const el = event.target
-  if (!browseScrollLock) {
-    browseScrollLock = true
-    syncScrollTop(el, browseVBarRef.value)
-    requestAnimationFrame(() => {
-      browseScrollLock = false
-    })
-  }
   maybeLoadMoreFromScroll(el)
+  // Throttle dedicated V-bar sync — syncing every wheel event is a major jank source.
+  if (browseScrollLock) return
+  browseScrollLock = true
+  requestAnimationFrame(() => {
+    browseScrollLock = false
+    if (browseVBarRef.value && el) {
+      browseVBarRef.value.scrollTop = el.scrollTop
+    }
+  })
 }
 
 function bindTableScroll() {
+  const el = getTableScrollElement()
+  if (!el) {
+    nextTick(() => {
+      const retry = getTableScrollElement()
+      if (!retry || tableScrollEl === retry) return
+      unbindTableScroll()
+      tableScrollEl = retry
+      retry.addEventListener('scroll', onTableBodyScroll, { passive: true })
+    })
+    return
+  }
+  if (tableScrollEl === el) return
   unbindTableScroll()
-  nextTick(() => {
-    const el = getTableScrollElement()
-    if (!el) return
-    tableScrollEl = el
-    el.addEventListener('scroll', onTableBodyScroll, { passive: true })
-    syncBrowseDedicatedBars()
-  })
+  tableScrollEl = el
+  el.addEventListener('scroll', onTableBodyScroll, { passive: true })
 }
 
 function unbindTableScroll() {
@@ -1540,11 +1557,12 @@ function layoutTableRefs() {
   layoutRaf = requestAnimationFrame(() => {
     layoutRaf = 0
     syncBrowseTableHeight()
-    tableRef.value?.doLayout?.()
-    sqlTableRef.value?.doLayout?.()
-    syncBrowseDedicatedBars()
-    syncSqlDedicatedBars()
+    // Avoid doLayout on every tick — it rebuilds column widths and freezes scroll.
     bindTableScroll()
+    const body = getTableScrollElement()
+    if (body) {
+      browseVBarInnerHeight.value = Math.max(1, body.scrollHeight)
+    }
   })
 }
 
@@ -1644,6 +1662,7 @@ async function loadRows({ append = false } = {}) {
     total.value = -1
     hasMore.value = false
     nextAfterPk.value = null
+    loadedCount.value = 0
     selectedRow.value = null
     loadingRows.value = false
     loadingMore.value = false
@@ -1681,12 +1700,13 @@ async function loadRows({ append = false } = {}) {
     }
     loadingMore.value = true
     try {
-      const res = await callWithRetry(() => fetchBlobTableViewRowsApi(activeViewId.value, {
+      // No callWithRetry on append — retries make scroll feel stuck.
+      const res = await fetchBlobTableViewRowsApi(activeViewId.value, {
         limit: PAGE_SIZE,
         includeTotal: false,
         skipBlobPresence: true,
         afterPk: cursor,
-      }))
+      })
       if (seq !== rowsLoadSeq) return
       const data = res.data || {}
       applyAppendedRows(
@@ -1712,6 +1732,7 @@ async function loadRows({ append = false } = {}) {
   loadingRows.value = true
   // Do NOT clear tableRows here — clearing causes a visible first-page "refresh flash".
   offset.value = 0
+  loadedCount.value = 0
   nextAfterPk.value = null
 
   try {
@@ -1725,9 +1746,10 @@ async function loadRows({ append = false } = {}) {
 
     const data = res.data || {}
     columns.value = data.columns || []
-    const rows = data.rows || []
+    const rows = freezePageRows(data.rows || [])
     tableRows.value = rows
     offset.value = rows.length
+    loadedCount.value = rows.length
     nextAfterPk.value = data.next_after_pk != null ? String(data.next_after_pk) : (
       rows.length ? rowIdentityKey(rows[rows.length - 1]) || null : null
     )
@@ -1749,7 +1771,6 @@ async function loadRows({ append = false } = {}) {
     if (seq === rowsLoadSeq) {
       loadingRows.value = false
       setupTableViewport()
-      // Prefetch only after loadingRows is false (guard inside prefetch).
       void prefetchNextRows()
       void ensureBrowseViewportFilled()
     }
@@ -1761,22 +1782,38 @@ function applyAppendedRows(rows, more, cursor) {
     hasMore.value = false
     return
   }
-  // Keep appending like Navicat — no DOM window chopping.
-  tableRows.value = tableRows.value.concat(rows)
-  offset.value = tableRows.value.length
+  const body = getTableScrollElement()
+  const frozen = freezePageRows(rows)
+  let next = tableRows.value.concat(frozen)
+  let removed = 0
+  if (next.length > MAX_KEEP_ROWS) {
+    removed = next.length - MAX_KEEP_ROWS
+    next = next.slice(removed)
+  }
+  tableRows.value = next
+  loadedCount.value += frozen.length
+  offset.value = loadedCount.value
   hasMore.value = Boolean(more)
   if (cursor != null && cursor !== '') {
     nextAfterPk.value = String(cursor)
-  } else if (rows.length) {
-    nextAfterPk.value = rowIdentityKey(rows[rows.length - 1]) || nextAfterPk.value
+  } else if (frozen.length) {
+    nextAfterPk.value = rowIdentityKey(frozen[frozen.length - 1]) || nextAfterPk.value
+  }
+  // Keep selection if it was dropped from the sliding window.
+  if (selectedRow.value && !next.includes(selectedRow.value)) {
+    selectedRow.value = next[0] ?? null
   }
   nextTick(() => {
-    bindTableScroll()
-    syncBrowseDedicatedBars()
+    if (!body) return
+    if (removed > 0) {
+      body.scrollTop = Math.max(0, body.scrollTop - removed * EST_ROW_HEIGHT)
+    }
+    browseVBarInnerHeight.value = Math.max(1, body.scrollHeight)
+    if (browseVBarRef.value) browseVBarRef.value.scrollTop = body.scrollTop
   })
 }
 
-/** If first pages don't fill the table body, scroll never fires — keep loading until it can. */
+/** If first page does not fill the table body, load a bit more so scroll can start. */
 async function ensureBrowseViewportFilled() {
   if (autofillInFlight || loadingRows.value) return
   autofillInFlight = true
@@ -1784,7 +1821,6 @@ async function ensureBrowseViewportFilled() {
     for (let i = 0; i < MAX_AUTOFILL_PAGES; i += 1) {
       await nextTick()
       bindTableScroll()
-      syncBrowseDedicatedBars()
       const body = getTableScrollElement()
       if (!body || !hasMore.value || loadingRows.value) break
       if (body.scrollHeight > body.clientHeight + SCROLL_LOAD_DISTANCE) break
@@ -1827,7 +1863,7 @@ async function prefetchNextRows() {
     prefetchedPage = {
       viewId,
       afterPk: cursor,
-      rows: data.rows || [],
+      rows: freezePageRows(data.rows || []),
       hasMore: Boolean(data.has_more),
       nextAfterPk: data.next_after_pk != null ? String(data.next_after_pk) : null,
     }
@@ -1932,7 +1968,6 @@ watch(tableRows, () => {
   if (selectedRow.value && !tableRows.value.includes(selectedRow.value)) {
     selectedRow.value = null
   }
-  nextTick(() => syncBrowseDedicatedBars())
 })
 
 watch(sqlTableData, () => {
@@ -2202,7 +2237,7 @@ onUnmounted(() => {
                   </div>
                   <div class="data-head-actions">
                     <span class="row-count">
-                      已加载 {{ tableRows.length
+                      已浏览 {{ loadedCount
                       }}<template v-if="total >= 0"> / {{ total }}</template>
                     </span>
                     <el-button :loading="loadingRows" @click="refreshActiveView">刷新</el-button>
@@ -2247,23 +2282,10 @@ onUnmounted(() => {
                           >
                             <template #default="{ row }">
                               <template v-if="col.is_path_substitute">
-                                <div class="path-cell">
-                                  <el-tag
-                                    :type="statusTagType(row[col.name]?.status)"
-                                    size="small"
-                                    class="path-tag"
-                                  >
-                                    {{ statusLabel(row[col.name]?.status) }}
-                                  </el-tag>
-                                  <span class="path-text">{{ row[col.name]?.display || '—' }}</span>
-                                  <el-button
-                                    v-if="row[col.name]?.image_info_id"
-                                    link
-                                    type="primary"
-                                    :icon="View"
-                                    @click="openPreview(row[col.name], row)"
-                                  />
-                                </div>
+                                <span
+                                  class="path-text path-text--plain"
+                                  :data-status="row[col.name]?.status || ''"
+                                >{{ row[col.name]?.display || '—' }}</span>
                               </template>
                               <template v-else>
                                 {{ formatCell(row, col.name) }}
@@ -3372,6 +3394,17 @@ onUnmounted(() => {
   flex: 1;
   font-family: ui-monospace, monospace;
   font-size: 12px;
+}
+
+.path-text--plain[data-status='migrated'] {
+  color: var(--el-color-success);
+}
+.path-text--plain[data-status='pending'] {
+  color: var(--el-color-warning);
+}
+.path-text--plain[data-status='no_data'],
+.path-text--plain[data-status='deleted'] {
+  color: var(--el-text-color-secondary);
 }
 
 .load-more-hint {
