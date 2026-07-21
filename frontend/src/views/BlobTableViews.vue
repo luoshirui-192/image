@@ -161,11 +161,22 @@ function rowIdentityKey(row) {
   return ''
 }
 
+const rowKeyFallback = new WeakMap()
+let rowKeySeq = 0
+
 function getRowKey(row) {
   const base = rowIdentityKey(row)
   if (base) return base
-  // Fallback for rows without a stable pk (should be rare).
-  return `row:${String(row?.id ?? row?.ID ?? Math.random())}`
+  // Stable fallback — never Math.random() (that remounts every render and freezes scroll).
+  if (row && typeof row === 'object') {
+    let key = rowKeyFallback.get(row)
+    if (!key) {
+      key = `row:${++rowKeySeq}`
+      rowKeyFallback.set(row, key)
+    }
+    return key
+  }
+  return `row:${++rowKeySeq}`
 }
 
 const loadingCatalog = ref(false)
@@ -1411,6 +1422,17 @@ function onBrowseTableScroll(event) {
   })
 }
 
+function maybeLoadMoreFromScroll(el) {
+  if (!el || loadingRows.value) return
+  const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+  if (distance <= PREFETCH_DISTANCE && hasMore.value && !loadingMore.value) {
+    void prefetchNextRows()
+  }
+  if (distance <= SCROLL_LOAD_DISTANCE && hasMore.value && !loadingMore.value) {
+    loadMore()
+  }
+}
+
 function onBrowseHBarScroll(event) {
   if (browseHScrollLock) return
   browseHScrollLock = true
@@ -1425,9 +1447,15 @@ function resetSqlHorizontalScroll() {
   if (sqlHBarRef.value) sqlHBarRef.value.scrollLeft = 0
 }
 
+let layoutRaf = 0
+
 function layoutTableRefs() {
-  tableRef.value?.doLayout?.()
-  sqlTableRef.value?.doLayout?.()
+  if (layoutRaf) cancelAnimationFrame(layoutRaf)
+  layoutRaf = requestAnimationFrame(() => {
+    layoutRaf = 0
+    tableRef.value?.doLayout?.()
+    sqlTableRef.value?.doLayout?.()
+  })
 }
 
 function setupSqlTableViewport() {
@@ -1439,9 +1467,15 @@ function setupTableViewport() {
     syncTableHeight()
     if (tableWrapRef.value || sqlTableWrapRef.value) {
       if (!resizeObserver) {
+        let resizeTimer = 0
         resizeObserver = new ResizeObserver(() => {
           syncTableHeight()
-          layoutTableRefs()
+          // Debounce doLayout — resize storms during append freeze the UI.
+          if (resizeTimer) clearTimeout(resizeTimer)
+          resizeTimer = window.setTimeout(() => {
+            resizeTimer = 0
+            layoutTableRefs()
+          }, 80)
         })
       }
       resizeObserver.disconnect()
@@ -1467,15 +1501,7 @@ function getTableScrollElement() {
 }
 
 function onTableBodyScroll(event) {
-  const el = event.target
-  if (!el || loadingRows.value) return
-  const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-  if (distance <= PREFETCH_DISTANCE && hasMore.value && !loadingMore.value) {
-    void prefetchNextRows()
-  }
-  if (distance <= SCROLL_LOAD_DISTANCE && hasMore.value && !loadingMore.value && !loadingRows.value) {
-    loadMore()
-  }
+  maybeLoadMoreFromScroll(event.target)
 }
 
 function bindTableScroll() {
@@ -1623,7 +1649,8 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
       offset: 0,
       limit: PAGE_SIZE,
       includeTotal,
-      skipBlobPresence: false,
+      // Presence LENGTH(blob) scans block the UI; status can refine later via refresh.
+      skipBlobPresence: true,
     }))
     if (seq !== rowsLoadSeq) return
 
@@ -2118,19 +2145,19 @@ onUnmounted(() => {
                             <template v-if="col.is_path_substitute">
                               <div class="path-cell">
                                 <el-tag
-                                  :type="statusTagType(pathCell(row, col.name)?.status)"
+                                  :type="statusTagType(row[col.name]?.status)"
                                   size="small"
                                   class="path-tag"
                                 >
-                                  {{ statusLabel(pathCell(row, col.name)?.status) }}
+                                  {{ statusLabel(row[col.name]?.status) }}
                                 </el-tag>
-                                <span class="path-text">{{ formatCell(row, col.name) }}</span>
+                                <span class="path-text">{{ row[col.name]?.display || '—' }}</span>
                                 <el-button
-                                  v-if="pathCell(row, col.name)?.image_info_id"
+                                  v-if="row[col.name]?.image_info_id"
                                   link
                                   type="primary"
                                   :icon="View"
-                                  @click="openPreview(pathCell(row, col.name), row)"
+                                  @click="openPreview(row[col.name], row)"
                                 />
                               </div>
                             </template>
@@ -2854,12 +2881,22 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.browse-result-list-scroll,
+.browse-result-list-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 180px;
+  /* Browse: el-table :height owns vertical scroll; H uses .result-h-scrollbar */
+  overflow-x: hidden;
+  overflow-y: hidden;
+  overscroll-behavior: contain;
+  outline: none;
+}
+
 .sql-result-list-scroll {
   flex: 1;
   min-width: 0;
   min-height: 180px;
-  /* Vertical only here; horizontal is the single bar below (.result-h-scrollbar) */
+  /* SQL table has no fixed height — this panel scrolls vertically */
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -2868,12 +2905,10 @@ onUnmounted(() => {
   scrollbar-color: var(--el-border-color-darker) transparent;
 }
 
-.browse-result-list-scroll::-webkit-scrollbar,
 .sql-result-list-scroll::-webkit-scrollbar {
-  width: 10px;
+  width: 12px;
 }
 
-.browse-result-list-scroll::-webkit-scrollbar-thumb,
 .sql-result-list-scroll::-webkit-scrollbar-thumb {
   border-radius: 6px;
   background: var(--el-border-color-darker);
@@ -2907,24 +2942,66 @@ onUnmounted(() => {
   box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
 }
 
+/* Hide only Element Plus horizontal bar; keep / force vertical visible */
 .browse-result-list-scroll :deep(.el-scrollbar__bar.is-horizontal),
 .sql-result-list-scroll :deep(.el-scrollbar__bar.is-horizontal) {
   display: none !important;
 }
 
-.sql-result-list-scroll :deep(.el-table__inner-wrapper),
-.browse-result-list-scroll :deep(.el-table__inner-wrapper) {
-  overflow: visible !important;
+.browse-result-list-scroll :deep(.el-scrollbar__bar.is-vertical),
+.sql-result-list-scroll :deep(.el-scrollbar__bar.is-vertical) {
+  display: block !important;
+  opacity: 1 !important;
+  width: 12px !important;
+  right: 2px !important;
+  top: 2px !important;
+  bottom: 2px !important;
 }
 
-.sql-result-list-scroll :deep(.el-table__body-wrapper),
-.sql-result-list-scroll :deep(.el-table__header-wrapper),
-.browse-result-list-scroll :deep(.el-table__header-wrapper) {
-  overflow: visible !important;
+.browse-result-list-scroll :deep(.el-scrollbar__bar.is-vertical .el-scrollbar__thumb),
+.sql-result-list-scroll :deep(.el-scrollbar__bar.is-vertical .el-scrollbar__thumb) {
+  background-color: var(--el-border-color-darker) !important;
+  opacity: 1 !important;
+  border-radius: 6px;
 }
 
-.browse-result-list-scroll :deep(.el-table__body-wrapper) {
-  overflow-x: visible !important;
+/* Native fallback when EP uses body-wrapper scroll instead of el-scrollbar */
+.browse-result-list-scroll :deep(.el-table__body-wrapper),
+.sql-result-list-scroll :deep(.el-table__body-wrapper) {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  scrollbar-width: thin;
+  scrollbar-color: var(--el-border-color-darker) transparent;
+}
+
+.browse-result-list-scroll :deep(.el-table__body-wrapper::-webkit-scrollbar),
+.sql-result-list-scroll :deep(.el-table__body-wrapper::-webkit-scrollbar) {
+  width: 12px;
+}
+
+.browse-result-list-scroll :deep(.el-table__body-wrapper::-webkit-scrollbar-thumb),
+.sql-result-list-scroll :deep(.el-table__body-wrapper::-webkit-scrollbar-thumb) {
+  border-radius: 6px;
+  background: var(--el-border-color-darker);
+}
+
+.browse-result-list-scroll :deep(.el-scrollbar__wrap),
+.sql-result-list-scroll :deep(.el-scrollbar__wrap) {
+  overflow-x: hidden !important;
+  scrollbar-width: thin;
+  scrollbar-color: var(--el-border-color-darker) transparent;
+}
+
+.browse-result-list-scroll :deep(.el-scrollbar__wrap::-webkit-scrollbar),
+.sql-result-list-scroll :deep(.el-scrollbar__wrap::-webkit-scrollbar) {
+  width: 12px;
+  height: 0;
+}
+
+.browse-result-list-scroll :deep(.el-scrollbar__wrap::-webkit-scrollbar-thumb),
+.sql-result-list-scroll :deep(.el-scrollbar__wrap::-webkit-scrollbar-thumb) {
+  border-radius: 6px;
+  background: var(--el-border-color-darker);
 }
 
 .result-table-area .table-h-scroll-inner {
