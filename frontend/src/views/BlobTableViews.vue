@@ -67,22 +67,23 @@ const tableRef = ref(null)
 const tableWrapRef = ref(null)
 const browseHBarRef = ref(null)
 const browseVBarRef = ref(null)
+const loadSentinelRef = ref(null)
 const rowPreviewPanelRef = ref(null)
-const tableHeight = ref(420)
 const browseVBarInnerHeight = ref(1)
 const sqlVBarInnerHeight = ref(1)
 let resizeObserver = null
-let tableScrollEl = null
 let sqlScrollLock = false
 let browseScrollLock = false
 
 const PAGE_SIZE = 100
-const SCROLL_LOAD_DISTANCE = 280
-const PREFETCH_DISTANCE = 800
-const MAX_AUTOFILL_PAGES = 2
-/** Keep a sliding window so el-table does not re-render thousands of rows (Navicat-like). */
-const MAX_KEEP_ROWS = 400
+const SCROLL_LOAD_DISTANCE = 400
+const PREFETCH_DISTANCE = 1000
+const MAX_AUTOFILL_PAGES = 3
+/** Sliding window so DOM stays bounded while scrolling. */
+const MAX_KEEP_ROWS = 500
 const EST_ROW_HEIGHT = 37
+const pkColumn = ref('')
+let loadSentinelObserver = null
 
 const browseReady = ref(false)
 let rowsLoadSeq = 0
@@ -1398,20 +1399,15 @@ function syncScrollTop(from, to) {
 }
 
 function syncBrowseTableHeight() {
-  const wrap = tableWrapRef.value
-  if (!wrap) return
-  const available = wrap.clientHeight || wrap.parentElement?.clientHeight || 0
-  if (available > 160) {
-    tableHeight.value = Math.max(160, Math.floor(available))
-  }
+  // no-op: browse table grows with rows; outer wrap scrolls (sentinel loads more)
 }
 
 function syncBrowseDedicatedBars() {
-  const body = getTableScrollElement() || tableWrapRef.value
-  if (!body) return
-  browseVBarInnerHeight.value = Math.max(1, body.scrollHeight)
-  syncScrollTop(body, browseVBarRef.value)
-  syncScrollLeft(tableWrapRef.value, browseHBarRef.value)
+  const wrap = tableWrapRef.value
+  if (!wrap) return
+  browseVBarInnerHeight.value = Math.max(1, wrap.scrollHeight)
+  syncScrollTop(wrap, browseVBarRef.value)
+  syncScrollLeft(wrap, browseHBarRef.value)
 }
 
 function syncSqlDedicatedBars() {
@@ -1422,77 +1418,64 @@ function syncSqlDedicatedBars() {
   syncScrollLeft(wrap, sqlHBarRef.value)
 }
 
-function getTableScrollElement() {
-  const table = tableRef.value
-  if (!table?.$refs?.bodyWrapper) return null
-  return (
-    table.$refs.bodyWrapper.querySelector('.el-scrollbar__wrap')
-    || table.$refs.bodyWrapper
-  )
+function resolveRowPk(row) {
+  if (!row) return ''
+  const pk = pkColumn.value || activeView.value?.source_pk_column || ''
+  if (pk && row[pk] != null && row[pk] !== '') return String(row[pk])
+  return rowIdentityKey(row)
 }
 
 function freezePageRows(rows) {
   return (rows || []).map((row) => (row && typeof row === 'object' ? Object.freeze(row) : row))
 }
 
-function onTableBodyScroll(event) {
-  const el = event.target
-  maybeLoadMoreFromScroll(el)
-  // Throttle dedicated V-bar sync — syncing every wheel event is a major jank source.
-  if (browseScrollLock) return
-  browseScrollLock = true
-  requestAnimationFrame(() => {
-    browseScrollLock = false
-    if (browseVBarRef.value && el) {
-      browseVBarRef.value.scrollTop = el.scrollTop
-    }
-  })
+function bindLoadSentinel() {
+  unbindLoadSentinel()
+  const root = tableWrapRef.value
+  const sentinel = loadSentinelRef.value
+  if (!root || !sentinel) return
+  loadSentinelObserver = new IntersectionObserver(
+    (entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return
+      if (hasMore.value && !loadingMore.value && !loadingRows.value) {
+        void loadMore()
+      }
+      if (hasMore.value && !loadingMore.value && !loadingRows.value) {
+        void prefetchNextRows()
+      }
+    },
+    { root, rootMargin: '240px 0px', threshold: 0 },
+  )
+  loadSentinelObserver.observe(sentinel)
 }
 
-function bindTableScroll() {
-  const el = getTableScrollElement()
-  if (!el) {
-    nextTick(() => {
-      const retry = getTableScrollElement()
-      if (!retry || tableScrollEl === retry) return
-      unbindTableScroll()
-      tableScrollEl = retry
-      retry.addEventListener('scroll', onTableBodyScroll, { passive: true })
-    })
-    return
-  }
-  if (tableScrollEl === el) return
-  unbindTableScroll()
-  tableScrollEl = el
-  el.addEventListener('scroll', onTableBodyScroll, { passive: true })
-}
-
-function unbindTableScroll() {
-  if (tableScrollEl) {
-    tableScrollEl.removeEventListener('scroll', onTableBodyScroll)
-    tableScrollEl = null
+function unbindLoadSentinel() {
+  if (loadSentinelObserver) {
+    loadSentinelObserver.disconnect()
+    loadSentinelObserver = null
   }
 }
 
 function onBrowseTableScroll(event) {
-  // Outer wrap only handles horizontal pan; vertical is el-table body.
-  if (browseScrollLock) return
-  browseScrollLock = true
-  syncScrollLeft(event.target, browseHBarRef.value)
-  requestAnimationFrame(() => {
-    browseScrollLock = false
-  })
+  const el = event.target
+  if (!browseScrollLock) {
+    browseScrollLock = true
+    syncScrollLeft(el, browseHBarRef.value)
+    requestAnimationFrame(() => {
+      browseScrollLock = false
+      if (browseVBarRef.value) browseVBarRef.value.scrollTop = el.scrollTop
+    })
+  }
+  maybeLoadMoreFromScroll(el)
 }
 
 function maybeLoadMoreFromScroll(el) {
-  if (!el || loadingRows.value) return
+  if (!el || loadingRows.value || loadingMore.value) return
+  const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
+  if (!canContinue) return
   const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-  if (distance <= PREFETCH_DISTANCE && hasMore.value && !loadingMore.value) {
-    void prefetchNextRows()
-  }
-  if (distance <= SCROLL_LOAD_DISTANCE && hasMore.value && !loadingMore.value) {
-    void loadMore()
-  }
+  if (distance <= PREFETCH_DISTANCE) void prefetchNextRows()
+  if (distance <= SCROLL_LOAD_DISTANCE) void loadMore()
 }
 
 function onBrowseHBarScroll(event) {
@@ -1507,9 +1490,9 @@ function onBrowseHBarScroll(event) {
 function onBrowseVBarScroll(event) {
   if (browseScrollLock) return
   browseScrollLock = true
-  const body = getTableScrollElement()
-  syncScrollTop(event.target, body)
-  maybeLoadMoreFromScroll(body)
+  const wrap = tableWrapRef.value
+  syncScrollTop(event.target, wrap)
+  maybeLoadMoreFromScroll(wrap)
   requestAnimationFrame(() => {
     browseScrollLock = false
   })
@@ -1556,13 +1539,9 @@ function layoutTableRefs() {
   if (layoutRaf) cancelAnimationFrame(layoutRaf)
   layoutRaf = requestAnimationFrame(() => {
     layoutRaf = 0
-    syncBrowseTableHeight()
-    // Avoid doLayout on every tick — it rebuilds column widths and freezes scroll.
-    bindTableScroll()
-    const body = getTableScrollElement()
-    if (body) {
-      browseVBarInnerHeight.value = Math.max(1, body.scrollHeight)
-    }
+    syncBrowseDedicatedBars()
+    syncSqlDedicatedBars()
+    bindLoadSentinel()
   })
 }
 
@@ -1572,7 +1551,6 @@ function setupSqlTableViewport() {
 
 function setupTableViewport() {
   nextTick(() => {
-    syncBrowseTableHeight()
     if (tableWrapRef.value || sqlTableWrapRef.value) {
       if (!resizeObserver) {
         let resizeTimer = 0
@@ -1671,7 +1649,8 @@ async function loadRows({ append = false } = {}) {
   }
 
   if (append) {
-    if (!hasMore.value || loadingMore.value || loadingRows.value) return
+    const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
+    if (!canContinue || loadingMore.value || loadingRows.value) return
     // Instant path: consume prefetch buffer when it matches current cursor.
     if (
       prefetchedPage
@@ -1694,26 +1673,50 @@ async function loadRows({ append = false } = {}) {
     const seq = rowsLoadSeq
     const cursor = nextAfterPk.value
     if (cursor == null || cursor === '') {
-      // No cursor yet — cannot keyset; avoid re-fetching page 1 as "append".
-      hasMore.value = false
-      return
+      // Recover cursor from last visible row before giving up.
+      const last = tableRows.value[tableRows.value.length - 1]
+      const recovered = resolveRowPk(last)
+      if (!recovered) {
+        hasMore.value = false
+        return
+      }
+      nextAfterPk.value = recovered
     }
+    const afterPk = nextAfterPk.value
     loadingMore.value = true
     try {
-      // No callWithRetry on append — retries make scroll feel stuck.
       const res = await fetchBlobTableViewRowsApi(activeViewId.value, {
         limit: PAGE_SIZE,
         includeTotal: false,
         skipBlobPresence: true,
-        afterPk: cursor,
+        afterPk,
       })
       if (seq !== rowsLoadSeq) return
       const data = res.data || {}
-      applyAppendedRows(
-        data.rows || [],
-        Boolean(data.has_more),
-        data.next_after_pk != null ? String(data.next_after_pk) : null,
-      )
+      if (data.pk_column) pkColumn.value = String(data.pk_column)
+      const pageRows = data.rows || []
+      // If keyset returned nothing but total says more, fall back to offset paging once.
+      if (!pageRows.length && total.value > loadedCount.value) {
+        const res2 = await fetchBlobTableViewRowsApi(activeViewId.value, {
+          offset: loadedCount.value,
+          limit: PAGE_SIZE,
+          includeTotal: false,
+          skipBlobPresence: true,
+        })
+        if (seq !== rowsLoadSeq) return
+        const data2 = res2.data || {}
+        applyAppendedRows(
+          data2.rows || [],
+          Boolean(data2.has_more) || loadedCount.value + (data2.rows || []).length < total.value,
+          data2.next_after_pk != null ? String(data2.next_after_pk) : null,
+        )
+      } else {
+        applyAppendedRows(
+          pageRows,
+          Boolean(data.has_more) || (total.value >= 0 && loadedCount.value + pageRows.length < total.value),
+          data.next_after_pk != null ? String(data.next_after_pk) : null,
+        )
+      }
       void prefetchNextRows()
     } catch (err) {
       if (seq !== rowsLoadSeq) return
@@ -1746,15 +1749,16 @@ async function loadRows({ append = false } = {}) {
 
     const data = res.data || {}
     columns.value = data.columns || []
+    if (data.pk_column) pkColumn.value = String(data.pk_column)
     const rows = freezePageRows(data.rows || [])
     tableRows.value = rows
     offset.value = rows.length
     loadedCount.value = rows.length
-    nextAfterPk.value = data.next_after_pk != null ? String(data.next_after_pk) : (
-      rows.length ? rowIdentityKey(rows[rows.length - 1]) || null : null
-    )
+    nextAfterPk.value = data.next_after_pk != null
+      ? String(data.next_after_pk)
+      : (rows.length ? resolveRowPk(rows[rows.length - 1]) || null : null)
     total.value = -1
-    hasMore.value = Boolean(data.has_more)
+    hasMore.value = Boolean(data.has_more) || rows.length >= PAGE_SIZE
     if (restorePk) {
       const found = tableRows.value.find((row) => rowIdentityKey(row) === restorePk)
       selectPreviewRow(found ?? tableRows.value[0] ?? null)
@@ -1779,10 +1783,12 @@ async function loadRows({ append = false } = {}) {
 
 function applyAppendedRows(rows, more, cursor) {
   if (!rows.length) {
-    hasMore.value = false
+    if (!(total.value >= 0 && loadedCount.value < total.value)) {
+      hasMore.value = false
+    }
     return
   }
-  const body = getTableScrollElement()
+  const wrap = tableWrapRef.value
   const frozen = freezePageRows(rows)
   let next = tableRows.value.concat(frozen)
   let removed = 0
@@ -1793,40 +1799,39 @@ function applyAppendedRows(rows, more, cursor) {
   tableRows.value = next
   loadedCount.value += frozen.length
   offset.value = loadedCount.value
-  hasMore.value = Boolean(more)
+  hasMore.value = Boolean(more) || (total.value >= 0 && loadedCount.value < total.value)
   if (cursor != null && cursor !== '') {
     nextAfterPk.value = String(cursor)
   } else if (frozen.length) {
-    nextAfterPk.value = rowIdentityKey(frozen[frozen.length - 1]) || nextAfterPk.value
+    nextAfterPk.value = resolveRowPk(frozen[frozen.length - 1]) || nextAfterPk.value
   }
-  // Keep selection if it was dropped from the sliding window.
   if (selectedRow.value && !next.includes(selectedRow.value)) {
-    selectedRow.value = next[0] ?? null
+    selectedRow.value = next[Math.max(0, next.length - frozen.length)] ?? next[0] ?? null
   }
   nextTick(() => {
-    if (!body) return
-    if (removed > 0) {
-      body.scrollTop = Math.max(0, body.scrollTop - removed * EST_ROW_HEIGHT)
+    if (wrap && removed > 0) {
+      wrap.scrollTop = Math.max(0, wrap.scrollTop - removed * EST_ROW_HEIGHT)
     }
-    browseVBarInnerHeight.value = Math.max(1, body.scrollHeight)
-    if (browseVBarRef.value) browseVBarRef.value.scrollTop = body.scrollTop
+    syncBrowseDedicatedBars()
+    bindLoadSentinel()
   })
 }
 
-/** If first page does not fill the table body, load a bit more so scroll can start. */
 async function ensureBrowseViewportFilled() {
   if (autofillInFlight || loadingRows.value) return
   autofillInFlight = true
   try {
     for (let i = 0; i < MAX_AUTOFILL_PAGES; i += 1) {
       await nextTick()
-      bindTableScroll()
-      const body = getTableScrollElement()
-      if (!body || !hasMore.value || loadingRows.value) break
-      if (body.scrollHeight > body.clientHeight + SCROLL_LOAD_DISTANCE) break
-      const before = tableRows.value.length
+      syncBrowseDedicatedBars()
+      bindLoadSentinel()
+      const wrap = tableWrapRef.value
+      const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
+      if (!wrap || !canContinue || loadingRows.value) break
+      if (wrap.scrollHeight > wrap.clientHeight + 40) break
+      const before = loadedCount.value
       await loadRows({ append: true })
-      if (tableRows.value.length <= before) break
+      if (loadedCount.value <= before) break
     }
   } finally {
     autofillInFlight = false
@@ -1834,9 +1839,10 @@ async function ensureBrowseViewportFilled() {
 }
 
 async function prefetchNextRows() {
+  const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
   if (
     !activeViewId.value
-    || !hasMore.value
+    || !canContinue
     || loadingRows.value
     || loadingMore.value
     || prefetchInFlight
@@ -1882,7 +1888,13 @@ async function loadRowTotal(expectedSeq) {
     const nextTotal = Number(res.data?.total)
     if (!Number.isNaN(nextTotal) && nextTotal >= 0) {
       total.value = nextTotal
-      // Do not override keyset has_more from total — buffer may be capped.
+      if (loadedCount.value < nextTotal) {
+        hasMore.value = true
+        nextTick(() => {
+          bindLoadSentinel()
+          void ensureBrowseViewportFilled()
+        })
+      }
     }
   } catch {
     // total is optional; ignore background count failures
@@ -2107,7 +2119,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  unbindTableScroll()
+  unbindLoadSentinel()
   resizeObserver?.disconnect()
   window.removeEventListener('resize', layoutTableRefs)
 })
@@ -2261,7 +2273,6 @@ onUnmounted(() => {
                               <el-table
                                 ref="tableRef"
                                 :data="tableRows"
-                                :height="tableHeight"
                                 :fit="false"
                                 size="small"
                                 border
@@ -2294,6 +2305,7 @@ onUnmounted(() => {
                           </el-table-column>
                               </el-table>
                             </div>
+                            <div ref="loadSentinelRef" class="browse-load-sentinel" aria-hidden="true" />
                           </template>
                           <el-empty v-else-if="!loadingRows" description="无数据" />
                         </div>
@@ -3045,13 +3057,12 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* Browse: horizontal on wrap; vertical inside el-table (:height). SQL: wrap scrolls both. */
+/* Browse: outer wrap scrolls both axes (sentinel triggers next page). */
 .browse-result-list-scroll {
   flex: 1;
   min-width: 0;
   min-height: 180px;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: auto;
   overscroll-behavior: contain;
   outline: none;
   scrollbar-width: none;
@@ -3155,13 +3166,22 @@ onUnmounted(() => {
   width: 100% !important;
 }
 
-/* Browse table: keep body scrollable (Navicat-style continuous scroll); hide EP bars */
+/* Browse table grows with rows; panel scrolls (Navicat-style continuous load) */
+.browse-result-list-scroll :deep(.el-table__inner-wrapper),
+.browse-result-list-scroll :deep(.el-table__body-wrapper),
+.browse-result-list-scroll :deep(.el-table__header-wrapper),
+.browse-result-list-scroll :deep(.el-scrollbar__wrap) {
+  overflow: visible !important;
+}
+
 .browse-result-list-scroll :deep(.el-scrollbar__bar) {
   display: none !important;
 }
 
-.browse-result-list-scroll :deep(.el-table__body-wrapper) {
-  overflow-y: auto !important;
+.browse-load-sentinel {
+  width: 100%;
+  height: 1px;
+  pointer-events: none;
 }
 
 /* SQL table grows with rows; outer panel scrolls */
