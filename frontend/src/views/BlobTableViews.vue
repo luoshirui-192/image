@@ -1622,6 +1622,7 @@ async function loadRows({ append = false } = {}) {
         loadingMore.value = false
         void prefetchNextRows()
       }
+      void ensureBrowseViewportFilled()
       return
     }
 
