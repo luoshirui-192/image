@@ -2854,38 +2854,27 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.browse-result-list-scroll {
-  flex: 1;
-  min-width: 0;
-  min-height: 180px;
-  overflow: auto;
-  overscroll-behavior: contain;
-  outline: none;
-  /* Show vertical bar; horizontal uses the dedicated bar below */
-  scrollbar-width: thin;
-  scrollbar-color: var(--el-border-color-darker) transparent;
-}
-
+.browse-result-list-scroll,
 .sql-result-list-scroll {
   flex: 1;
   min-width: 0;
   min-height: 180px;
-  overflow: auto;
+  /* Vertical only here; horizontal is the single bar below (.result-h-scrollbar) */
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   outline: none;
   scrollbar-width: thin;
   scrollbar-color: var(--el-border-color-darker) transparent;
 }
 
-/* Keep vertical scrollbar; hide only native horizontal (custom .result-h-scrollbar) */
-.sql-result-list-scroll::-webkit-scrollbar,
-.browse-result-list-scroll::-webkit-scrollbar {
+.browse-result-list-scroll::-webkit-scrollbar,
+.sql-result-list-scroll::-webkit-scrollbar {
   width: 10px;
-  height: 0;
 }
 
-.sql-result-list-scroll::-webkit-scrollbar-thumb,
-.browse-result-list-scroll::-webkit-scrollbar-thumb {
+.browse-result-list-scroll::-webkit-scrollbar-thumb,
+.sql-result-list-scroll::-webkit-scrollbar-thumb {
   border-radius: 6px;
   background: var(--el-border-color-darker);
 }
