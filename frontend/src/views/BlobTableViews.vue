@@ -65,31 +65,21 @@ const loadingMore = ref(false)
 
 const tableRef = ref(null)
 const tableWrapRef = ref(null)
-const browseHBarRef = ref(null)
-const loadSentinelRef = ref(null)
 const rowPreviewPanelRef = ref(null)
 const sqlVBarInnerHeight = ref(1)
 let resizeObserver = null
 let sqlScrollLock = false
-let browseScrollLock = false
 
+/** Stable browse: fixed page size + offset append; one scroll owner. */
 const PAGE_SIZE = 100
-const SCROLL_LOAD_DISTANCE = 400
-const PREFETCH_DISTANCE = 1000
-const MAX_AUTOFILL_PAGES = 3
-/** Sliding window so DOM stays bounded while scrolling. */
-const MAX_KEEP_ROWS = 500
-const EST_ROW_HEIGHT = 37
+const MAX_DOM_ROWS = 800
+const LOAD_MORE_PX = 240
 const pkColumn = ref('')
-let loadSentinelObserver = null
 
 const browseReady = ref(false)
 let rowsLoadSeq = 0
-/** @type {{ viewId: number, afterPk: string|null, rows: any[], hasMore: boolean, nextAfterPk: string|null } | null} */
-let prefetchedPage = null
-let prefetchInFlight = false
-let autofillInFlight = false
-/** Cursor for keyset pagination (last loaded PK). */
+let browseLoadScheduled = false
+/** Keyset cursor (best-effort); offset remains the source of truth for append. */
 const nextAfterPk = ref(null)
 
 const selectedRow = ref(null)
@@ -1272,8 +1262,8 @@ async function goNextPreviewRow() {
     selectPreviewRow(rows[idx + 1])
     return
   }
-  const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
-  if (!canContinue || loadingMore.value) return
+  const canContinue = canLoadMoreBrowse()
+  if (!canContinue) return
   const prevLen = rows.length
   await loadRows({ append: true })
   const nextRows = tableRows.value
@@ -1398,13 +1388,11 @@ function syncScrollTop(from, to) {
 }
 
 function syncBrowseTableHeight() {
-  // no-op: browse table grows with rows; outer wrap scrolls (sentinel loads more)
+  // no-op: native browse table grows with rows; outer wrap scrolls
 }
 
 function syncBrowseDedicatedBars() {
-  const wrap = tableWrapRef.value
-  if (!wrap) return
-  syncScrollLeft(wrap, browseHBarRef.value)
+  // Browse uses a single native overflow:auto viewport (no dual bars).
 }
 
 function syncSqlDedicatedBars() {
@@ -1426,59 +1414,27 @@ function freezePageRows(rows) {
   return (rows || []).map((row) => (row && typeof row === 'object' ? Object.freeze(row) : row))
 }
 
-function bindLoadSentinel() {
-  unbindLoadSentinel()
-  const root = tableWrapRef.value
-  const sentinel = loadSentinelRef.value
-  if (!root || !sentinel) return
-  loadSentinelObserver = new IntersectionObserver(
-    (entries) => {
-      if (!entries.some((e) => e.isIntersecting)) return
-      const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
-      if (!canContinue || loadingMore.value || loadingRows.value) return
-      void loadMore()
-      void prefetchNextRows()
-    },
-    { root, rootMargin: '240px 0px', threshold: 0 },
-  )
-  loadSentinelObserver.observe(sentinel)
-}
-
-function unbindLoadSentinel() {
-  if (loadSentinelObserver) {
-    loadSentinelObserver.disconnect()
-    loadSentinelObserver = null
-  }
+function canLoadMoreBrowse() {
+  if (!activeViewId.value || loadingRows.value || loadingMore.value) return false
+  if (hasMore.value) return true
+  return total.value >= 0 && loadedCount.value < total.value
 }
 
 function onBrowseTableScroll(event) {
   const el = event.target
   if (el !== tableWrapRef.value) return
-  if (!browseScrollLock) {
-    browseScrollLock = true
-    syncScrollLeft(el, browseHBarRef.value)
-    requestAnimationFrame(() => {
-      browseScrollLock = false
-    })
-  }
-  maybeLoadMoreFromScroll(el)
+  scheduleBrowseLoadMore(el)
 }
 
-function maybeLoadMoreFromScroll(el) {
-  if (!el || loadingRows.value || loadingMore.value) return
-  const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
-  if (!canContinue) return
-  const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-  if (distance <= PREFETCH_DISTANCE) void prefetchNextRows()
-  if (distance <= SCROLL_LOAD_DISTANCE) void loadMore()
-}
-
-function onBrowseHBarScroll(event) {
-  if (browseScrollLock) return
-  browseScrollLock = true
-  syncScrollLeft(event.target, tableWrapRef.value)
+function scheduleBrowseLoadMore(el) {
+  if (!el || browseLoadScheduled || !canLoadMoreBrowse()) return
+  const remain = el.scrollHeight - el.scrollTop - el.clientHeight
+  if (remain > LOAD_MORE_PX) return
+  browseLoadScheduled = true
   requestAnimationFrame(() => {
-    browseScrollLock = false
+    browseLoadScheduled = false
+    if (!canLoadMoreBrowse()) return
+    void loadMore()
   })
 }
 
@@ -1523,9 +1479,7 @@ function layoutTableRefs() {
   if (layoutRaf) cancelAnimationFrame(layoutRaf)
   layoutRaf = requestAnimationFrame(() => {
     layoutRaf = 0
-    syncBrowseDedicatedBars()
     syncSqlDedicatedBars()
-    bindLoadSentinel()
   })
 }
 
@@ -1543,15 +1497,15 @@ function setupTableViewport() {
           resizeTimer = window.setTimeout(() => {
             resizeTimer = 0
             layoutTableRefs()
+            const wrap = tableWrapRef.value
+            if (wrap && canLoadMoreBrowse() && wrap.scrollHeight <= wrap.clientHeight + 8) {
+              void loadMore()
+            }
           }, 80)
         })
       }
       resizeObserver.disconnect()
-      if (tableWrapRef.value) {
-        resizeObserver.observe(tableWrapRef.value)
-        const browseInner = tableWrapRef.value.querySelector('.table-h-scroll-inner')
-        if (browseInner) resizeObserver.observe(browseInner)
-      }
+      if (tableWrapRef.value) resizeObserver.observe(tableWrapRef.value)
       if (sqlTableWrapRef.value) {
         resizeObserver.observe(sqlTableWrapRef.value)
         const sqlInner = sqlTableWrapRef.value.querySelector('.table-h-scroll-inner')
@@ -1625,102 +1579,55 @@ async function loadRows({ append = false } = {}) {
     hasMore.value = false
     nextAfterPk.value = null
     loadedCount.value = 0
+    offset.value = 0
     selectedRow.value = null
     loadingRows.value = false
     loadingMore.value = false
-    prefetchedPage = null
     return
   }
 
   if (append) {
-    const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
-    if (!canContinue || loadingMore.value || loadingRows.value) return
-    // Instant path: consume prefetch buffer when it matches current cursor.
-    if (
-      prefetchedPage
-      && prefetchedPage.viewId === activeViewId.value
-      && String(prefetchedPage.afterPk ?? '') === String(nextAfterPk.value ?? '')
-    ) {
-      const buffered = prefetchedPage
-      prefetchedPage = null
-      loadingMore.value = true
-      try {
-        applyAppendedRows(buffered.rows, buffered.hasMore, buffered.nextAfterPk)
-      } finally {
-        loadingMore.value = false
-        void prefetchNextRows()
-      }
-      void ensureBrowseViewportFilled()
-      return
-    }
-
+    if (!canLoadMoreBrowse()) return
     const seq = rowsLoadSeq
-    const cursor = nextAfterPk.value
-    if (cursor == null || cursor === '') {
-      // Recover cursor from last visible row before giving up.
-      const last = tableRows.value[tableRows.value.length - 1]
-      const recovered = resolveRowPk(last)
-      if (!recovered) {
-        hasMore.value = false
-        return
-      }
-      nextAfterPk.value = recovered
-    }
-    const afterPk = nextAfterPk.value
+    const requestOffset = loadedCount.value
     loadingMore.value = true
     try {
+      // Offset-only append: most reliable across PK types / JOIN views / string PKs.
       const res = await fetchBlobTableViewRowsApi(activeViewId.value, {
+        offset: requestOffset,
         limit: PAGE_SIZE,
         includeTotal: false,
         skipBlobPresence: true,
-        afterPk,
       })
       if (seq !== rowsLoadSeq) return
       const data = res.data || {}
       if (data.pk_column) pkColumn.value = String(data.pk_column)
       const pageRows = data.rows || []
-      // If keyset returned nothing but we still expect more, fall back to offset paging.
-      const expectMore = Boolean(data.has_more)
-        || (total.value >= 0 && loadedCount.value < total.value)
-        || hasMore.value
-      if (!pageRows.length && expectMore) {
-        const res2 = await fetchBlobTableViewRowsApi(activeViewId.value, {
-          offset: loadedCount.value,
-          limit: PAGE_SIZE,
-          includeTotal: false,
-          skipBlobPresence: true,
-        })
-        if (seq !== rowsLoadSeq) return
-        const data2 = res2.data || {}
-        applyAppendedRows(
-          data2.rows || [],
-          Boolean(data2.has_more) || (total.value >= 0 && loadedCount.value + (data2.rows || []).length < total.value),
-          data2.next_after_pk != null ? String(data2.next_after_pk) : null,
-        )
-      } else {
-        applyAppendedRows(
-          pageRows,
-          Boolean(data.has_more) || (total.value >= 0 && loadedCount.value + pageRows.length < total.value),
-          data.next_after_pk != null ? String(data.next_after_pk) : null,
-        )
-      }
-      void prefetchNextRows()
+      const more = Boolean(data.has_more)
+        || (total.value >= 0 && loadedCount.value + pageRows.length < total.value)
+      const cursor = data.next_after_pk != null
+        ? String(data.next_after_pk)
+        : (pageRows.length ? resolveRowPk(pageRows[pageRows.length - 1]) || null : null)
+      applyAppendedRows(pageRows, more, cursor)
     } catch (err) {
       if (seq !== rowsLoadSeq) return
       ElMessage.error(err.message || '加载数据失败')
     } finally {
       if (seq === rowsLoadSeq) loadingMore.value = false
     }
-    void ensureBrowseViewportFilled()
+    nextTick(() => {
+      const wrap = tableWrapRef.value
+      if (wrap && canLoadMoreBrowse() && wrap.scrollHeight <= wrap.clientHeight + 8) {
+        void loadMore()
+      }
+    })
     return
   }
 
   const seq = ++rowsLoadSeq
-  prefetchedPage = null
   const restorePk = pendingRestorePk.value || rowIdentityKey(selectedRow.value)
   pendingRestorePk.value = ''
   loadingRows.value = true
-  // Do NOT clear tableRows here — clearing causes a visible first-page "refresh flash".
   offset.value = 0
   loadedCount.value = 0
   nextAfterPk.value = null
@@ -1762,25 +1669,28 @@ async function loadRows({ append = false } = {}) {
     if (seq === rowsLoadSeq) {
       loadingRows.value = false
       setupTableViewport()
-      void prefetchNextRows()
-      void ensureBrowseViewportFilled()
+      nextTick(() => {
+        const wrap = tableWrapRef.value
+        if (wrap && canLoadMoreBrowse() && wrap.scrollHeight <= wrap.clientHeight + 8) {
+          void loadMore()
+        }
+      })
     }
   }
 }
 
 function applyAppendedRows(rows, more, cursor) {
   if (!rows.length) {
-    if (!(total.value >= 0 && loadedCount.value < total.value)) {
-      hasMore.value = false
-    }
+    hasMore.value = Boolean(more) || (total.value >= 0 && loadedCount.value < total.value)
     return
   }
   const wrap = tableWrapRef.value
+  const prevTop = wrap?.scrollTop || 0
   const frozen = freezePageRows(rows)
   let next = tableRows.value.concat(frozen)
   let removed = 0
-  if (next.length > MAX_KEEP_ROWS) {
-    removed = next.length - MAX_KEEP_ROWS
+  if (next.length > MAX_DOM_ROWS) {
+    removed = next.length - MAX_DOM_ROWS
     next = next.slice(removed)
   }
   tableRows.value = next
@@ -1797,90 +1707,29 @@ function applyAppendedRows(rows, more, cursor) {
   }
   nextTick(() => {
     if (wrap && removed > 0) {
-      wrap.scrollTop = Math.max(0, wrap.scrollTop - removed * EST_ROW_HEIGHT)
+      wrap.scrollTop = Math.max(0, prevTop - removed * 28)
     }
-    syncBrowseDedicatedBars()
-    bindLoadSentinel()
   })
 }
 
-async function ensureBrowseViewportFilled() {
-  if (autofillInFlight || loadingRows.value) return
-  autofillInFlight = true
-  try {
-    for (let i = 0; i < MAX_AUTOFILL_PAGES; i += 1) {
-      await nextTick()
-      syncBrowseDedicatedBars()
-      bindLoadSentinel()
-      const wrap = tableWrapRef.value
-      const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
-      if (!wrap || !canContinue || loadingRows.value) break
-      if (wrap.scrollHeight > wrap.clientHeight + 40) break
-      const before = loadedCount.value
-      await loadRows({ append: true })
-      if (loadedCount.value <= before) break
-    }
-  } finally {
-    autofillInFlight = false
-  }
-}
-
-async function prefetchNextRows() {
-  const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
-  if (
-    !activeViewId.value
-    || !canContinue
-    || loadingRows.value
-    || loadingMore.value
-    || prefetchInFlight
-    || prefetchedPage
-  ) {
-    return
-  }
-  const viewId = activeViewId.value
-  const cursor = nextAfterPk.value
-  if (cursor == null || cursor === '') return
-  const seq = rowsLoadSeq
-  prefetchInFlight = true
-  try {
-    const res = await fetchBlobTableViewRowsApi(viewId, {
-      limit: PAGE_SIZE,
-      includeTotal: false,
-      skipBlobPresence: true,
-      afterPk: cursor,
-    })
-    if (seq !== rowsLoadSeq || viewId !== activeViewId.value || String(cursor) !== String(nextAfterPk.value ?? '')) {
-      return
-    }
-    const data = res.data || {}
-    prefetchedPage = {
-      viewId,
-      afterPk: cursor,
-      rows: freezePageRows(data.rows || []),
-      hasMore: Boolean(data.has_more),
-      nextAfterPk: data.next_after_pk != null ? String(data.next_after_pk) : null,
-    }
-  } catch {
-    // Prefetch is best-effort
-  } finally {
-    prefetchInFlight = false
-  }
-}
-
 async function loadRowTotal(expectedSeq) {
-  if (!activeViewId.value || expectedSeq !== rowsLoadSeq) return
+  if (!activeViewId.value) return
   try {
     const res = await fetchBlobTableViewRowCountApi(activeViewId.value)
-    if (expectedSeq !== rowsLoadSeq) return
+    if (expectedSeq != null && expectedSeq !== rowsLoadSeq) return
     const nextTotal = Number(res.data?.total)
     if (!Number.isNaN(nextTotal) && nextTotal >= 0) {
       total.value = nextTotal
       if (loadedCount.value < nextTotal) {
         hasMore.value = true
         nextTick(() => {
-          bindLoadSentinel()
-          void ensureBrowseViewportFilled()
+          const wrap = tableWrapRef.value
+          if (wrap && canLoadMoreBrowse() && wrap.scrollHeight <= wrap.clientHeight + 8) {
+            void loadMore()
+          }
         })
+      } else if (loadedCount.value >= nextTotal) {
+        hasMore.value = false
       }
     }
   } catch {
@@ -1947,11 +1796,18 @@ function getRowImageInfoId(row) {
 }
 
 function syncTableCurrentRow(row) {
-  highlightAndScrollTableRow(
-    tableRef,
-    row,
-    (a, b) => a === b,
-  )
+  nextTick(() => {
+    const wrap = tableWrapRef.value
+    if (!wrap || !row) return
+    const key = String(getRowKey(row))
+    const safe = typeof CSS !== 'undefined' && CSS.escape
+      ? CSS.escape(key)
+      : key.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    const el = wrap.querySelector(`[data-row-key="${safe}"]`)
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'nearest' })
+    }
+  })
 }
 
 function syncSqlTableCurrentRow(row) {
@@ -2106,7 +1962,6 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  unbindLoadSentinel()
   resizeObserver?.disconnect()
   window.removeEventListener('resize', layoutTableRefs)
 })
@@ -2246,69 +2101,60 @@ onUnmounted(() => {
                 <div class="table-panel">
                   <div class="browse-result-list-wrap">
                     <div class="result-table-area">
-                      <div class="result-table-body">
-                        <div
-                          ref="tableWrapRef"
-                          v-loading="loadingRows && !tableRows.length"
-                          class="browse-result-list-scroll"
-                          tabindex="0"
-                          @scroll="onBrowseTableScroll"
-                          @keydown="onPreviewKeydown"
-                        >
-                          <template v-if="columns.length">
-                            <div class="table-h-scroll-inner" :style="browseTableInnerStyle">
-                              <el-table
-                                ref="tableRef"
-                                :data="tableRows"
-                                :fit="false"
-                                size="small"
-                                border
-                                stripe
-                                highlight-current-row
-                                :row-key="getRowKey"
-                                class="data-table data-table--wide compact-table"
-                                empty-text="无数据"
-                                @row-click="onTableRowClick"
+                      <div
+                        ref="tableWrapRef"
+                        v-loading="loadingRows && !tableRows.length"
+                        class="browse-result-list-scroll"
+                        tabindex="0"
+                        @scroll="onBrowseTableScroll"
+                        @keydown="onPreviewKeydown"
+                      >
+                        <template v-if="columns.length">
+                          <table class="browse-native-table" :style="browseTableInnerStyle">
+                            <thead>
+                              <tr>
+                                <th
+                                  v-for="col in columns"
+                                  :key="col.name"
+                                  :style="{ width: (col.is_path_substitute ? 200 : 100) + 'px', minWidth: (col.is_path_substitute ? 200 : 100) + 'px' }"
+                                >
+                                  {{ col.name }}
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr
+                                v-for="row in tableRows"
+                                :key="getRowKey(row)"
+                                :data-row-key="getRowKey(row)"
+                                :class="{ 'is-current': row === selectedRow }"
+                                @click="onTableRowClick(row)"
                               >
-                          <el-table-column
-                            v-for="col in columns"
-                            :key="col.name"
-                            :prop="col.name"
-                            :label="col.name"
-                            :width="col.is_path_substitute ? 200 : 100"
-                            show-overflow-tooltip
-                          >
-                            <template #default="{ row }">
-                              <template v-if="col.is_path_substitute">
-                                <span
-                                  class="path-text path-text--plain"
-                                  :data-status="row[col.name]?.status || ''"
-                                >{{ row[col.name]?.display || '—' }}</span>
-                              </template>
-                              <template v-else>
-                                {{ formatCell(row, col.name) }}
-                              </template>
-                            </template>
-                          </el-table-column>
-                              </el-table>
-                            </div>
-                            <div ref="loadSentinelRef" class="browse-load-sentinel" aria-hidden="true" />
-                          </template>
-                          <el-empty v-else-if="!loadingRows" description="无数据" />
-                        </div>
-                      </div>
-                      <div v-if="columns.length" class="result-h-scrollbar-row">
-                        <div
-                          ref="browseHBarRef"
-                          class="result-h-scrollbar"
-                          @scroll="onBrowseHBarScroll"
-                        >
-                          <div class="result-h-scrollbar-inner" :style="browseTableInnerStyle" />
-                        </div>
+                                <td
+                                  v-for="col in columns"
+                                  :key="col.name"
+                                  :title="col.is_path_substitute ? (row[col.name]?.display || '') : String(formatCell(row, col.name) ?? '')"
+                                >
+                                  <template v-if="col.is_path_substitute">
+                                    <span
+                                      class="path-text path-text--plain"
+                                      :data-status="row[col.name]?.status || ''"
+                                    >{{ row[col.name]?.display || '—' }}</span>
+                                  </template>
+                                  <template v-else>
+                                    {{ formatCell(row, col.name) }}
+                                  </template>
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                          <div v-if="loadingMore" class="browse-load-hint">正在加载更多…</div>
+                          <div v-else-if="tableRows.length && !hasMore" class="browse-load-hint muted">已全部加载</div>
+                          <div v-else class="browse-load-pad" aria-hidden="true" />
+                        </template>
+                        <el-empty v-else-if="!loadingRows" description="无数据" />
                       </div>
                     </div>
-                    <div v-if="loadingMore" class="load-more-hint muted">正在加载…</div>
-                    <div v-else-if="tableRows.length && !hasMore" class="load-more-hint muted">已全部加载</div>
                   </div>
 
                   <div
@@ -3023,6 +2869,11 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
+.result-table-area > .browse-result-list-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
 .result-table-body {
   flex: 1;
   min-width: 0;
@@ -3032,8 +2883,18 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* Browse/SQL: outer panel owns vertical scroll; native V bar visible. */
-.browse-result-list-scroll,
+/* Browse: ONE scroll owner for both axes (Navicat-like). */
+.browse-result-list-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 180px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  outline: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--el-border-color-darker) transparent;
+}
+
 .sql-result-list-scroll {
   flex: 1;
   min-width: 0;
@@ -3049,13 +2910,72 @@ onUnmounted(() => {
 .browse-result-list-scroll::-webkit-scrollbar,
 .sql-result-list-scroll::-webkit-scrollbar {
   width: 10px;
-  height: 0;
+  height: 10px;
 }
 
 .browse-result-list-scroll::-webkit-scrollbar-thumb,
 .sql-result-list-scroll::-webkit-scrollbar-thumb {
   border-radius: 6px;
   background: var(--el-border-color-darker);
+}
+
+.browse-native-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  width: max-content;
+  min-width: 100%;
+  font-size: 12px;
+}
+
+.browse-native-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--el-fill-color-light);
+  border-bottom: 1px solid var(--el-border-color);
+  border-right: 1px solid var(--el-border-color-lighter);
+  padding: 4px 8px;
+  text-align: left;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.browse-native-table tbody td {
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  border-right: 1px solid var(--el-border-color-extra-light);
+  padding: 2px 8px;
+  height: 28px;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.browse-native-table tbody tr:nth-child(even) td {
+  background: var(--el-fill-color-blank);
+}
+
+.browse-native-table tbody tr:hover td {
+  background: var(--el-fill-color-light);
+  cursor: pointer;
+}
+
+.browse-native-table tbody tr.is-current td {
+  background: var(--el-color-primary-light-9);
+}
+
+.browse-load-hint,
+.browse-load-pad {
+  padding: 10px 8px 16px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  text-align: center;
+}
+
+.browse-load-pad {
+  height: 24px;
 }
 
 .sql-result-list-scroll:focus,
