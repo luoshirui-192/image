@@ -67,17 +67,18 @@ const tableWrapRef = ref(null)
 const browseHBarRef = ref(null)
 const browseVBarRef = ref(null)
 const rowPreviewPanelRef = ref(null)
+const tableHeight = ref(420)
 const browseVBarInnerHeight = ref(1)
 const sqlVBarInnerHeight = ref(1)
 let resizeObserver = null
+let tableScrollEl = null
 let sqlScrollLock = false
 let browseScrollLock = false
 
-const PAGE_SIZE = 100
-const SCROLL_LOAD_DISTANCE = 120
-const PREFETCH_DISTANCE = 900
-const MAX_BUFFERED_ROWS = 800
-const MAX_AUTOFILL_PAGES = 15
+const PAGE_SIZE = 200
+const SCROLL_LOAD_DISTANCE = 240
+const PREFETCH_DISTANCE = 1200
+const MAX_AUTOFILL_PAGES = 8
 
 const browseReady = ref(false)
 let rowsLoadSeq = 0
@@ -1392,12 +1393,21 @@ function syncScrollTop(from, to) {
   }
 }
 
-function syncBrowseDedicatedBars() {
+function syncBrowseTableHeight() {
   const wrap = tableWrapRef.value
   if (!wrap) return
-  browseVBarInnerHeight.value = Math.max(1, wrap.scrollHeight)
-  syncScrollTop(wrap, browseVBarRef.value)
-  syncScrollLeft(wrap, browseHBarRef.value)
+  const available = wrap.clientHeight || wrap.parentElement?.clientHeight || 0
+  if (available > 160) {
+    tableHeight.value = Math.max(160, Math.floor(available))
+  }
+}
+
+function syncBrowseDedicatedBars() {
+  const body = getTableScrollElement() || tableWrapRef.value
+  if (!body) return
+  browseVBarInnerHeight.value = Math.max(1, body.scrollHeight)
+  syncScrollTop(body, browseVBarRef.value)
+  syncScrollLeft(tableWrapRef.value, browseHBarRef.value)
 }
 
 function syncSqlDedicatedBars() {
@@ -1406,6 +1416,86 @@ function syncSqlDedicatedBars() {
   sqlVBarInnerHeight.value = Math.max(1, wrap.scrollHeight)
   syncScrollTop(wrap, sqlVBarRef.value)
   syncScrollLeft(wrap, sqlHBarRef.value)
+}
+
+function getTableScrollElement() {
+  const table = tableRef.value
+  if (!table?.$refs?.bodyWrapper) return null
+  return (
+    table.$refs.bodyWrapper.querySelector('.el-scrollbar__wrap')
+    || table.$refs.bodyWrapper
+  )
+}
+
+function onTableBodyScroll(event) {
+  const el = event.target
+  if (!browseScrollLock) {
+    browseScrollLock = true
+    syncScrollTop(el, browseVBarRef.value)
+    requestAnimationFrame(() => {
+      browseScrollLock = false
+    })
+  }
+  maybeLoadMoreFromScroll(el)
+}
+
+function bindTableScroll() {
+  unbindTableScroll()
+  nextTick(() => {
+    const el = getTableScrollElement()
+    if (!el) return
+    tableScrollEl = el
+    el.addEventListener('scroll', onTableBodyScroll, { passive: true })
+    syncBrowseDedicatedBars()
+  })
+}
+
+function unbindTableScroll() {
+  if (tableScrollEl) {
+    tableScrollEl.removeEventListener('scroll', onTableBodyScroll)
+    tableScrollEl = null
+  }
+}
+
+function onBrowseTableScroll(event) {
+  // Outer wrap only handles horizontal pan; vertical is el-table body.
+  if (browseScrollLock) return
+  browseScrollLock = true
+  syncScrollLeft(event.target, browseHBarRef.value)
+  requestAnimationFrame(() => {
+    browseScrollLock = false
+  })
+}
+
+function maybeLoadMoreFromScroll(el) {
+  if (!el || loadingRows.value) return
+  const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+  if (distance <= PREFETCH_DISTANCE && hasMore.value && !loadingMore.value) {
+    void prefetchNextRows()
+  }
+  if (distance <= SCROLL_LOAD_DISTANCE && hasMore.value && !loadingMore.value) {
+    void loadMore()
+  }
+}
+
+function onBrowseHBarScroll(event) {
+  if (browseScrollLock) return
+  browseScrollLock = true
+  syncScrollLeft(event.target, tableWrapRef.value)
+  requestAnimationFrame(() => {
+    browseScrollLock = false
+  })
+}
+
+function onBrowseVBarScroll(event) {
+  if (browseScrollLock) return
+  browseScrollLock = true
+  const body = getTableScrollElement()
+  syncScrollTop(event.target, body)
+  maybeLoadMoreFromScroll(body)
+  requestAnimationFrame(() => {
+    browseScrollLock = false
+  })
 }
 
 function onSqlTableScroll(event) {
@@ -1437,53 +1527,6 @@ function onSqlVBarScroll(event) {
   })
 }
 
-function onBrowseTableScroll(event) {
-  if (!browseScrollLock) {
-    browseScrollLock = true
-    const el = event.target
-    syncScrollLeft(el, browseHBarRef.value)
-    syncScrollTop(el, browseVBarRef.value)
-    maybeLoadMoreFromScroll(el)
-    requestAnimationFrame(() => {
-      browseScrollLock = false
-    })
-  } else {
-    // Sync lock held (e.g. from V-bar) — still allow infinite-scroll check.
-    maybeLoadMoreFromScroll(event.target)
-  }
-}
-
-function maybeLoadMoreFromScroll(el) {
-  if (!el || loadingRows.value) return
-  const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-  if (distance <= PREFETCH_DISTANCE && hasMore.value && !loadingMore.value) {
-    void prefetchNextRows()
-  }
-  if (distance <= SCROLL_LOAD_DISTANCE && hasMore.value && !loadingMore.value) {
-    loadMore()
-  }
-}
-
-function onBrowseHBarScroll(event) {
-  if (browseScrollLock) return
-  browseScrollLock = true
-  syncScrollLeft(event.target, tableWrapRef.value)
-  requestAnimationFrame(() => {
-    browseScrollLock = false
-  })
-}
-
-function onBrowseVBarScroll(event) {
-  if (browseScrollLock) return
-  browseScrollLock = true
-  const wrap = tableWrapRef.value
-  syncScrollTop(event.target, wrap)
-  maybeLoadMoreFromScroll(wrap)
-  requestAnimationFrame(() => {
-    browseScrollLock = false
-  })
-}
-
 function resetSqlHorizontalScroll() {
   if (sqlTableWrapRef.value) sqlTableWrapRef.value.scrollLeft = 0
   if (sqlHBarRef.value) sqlHBarRef.value.scrollLeft = 0
@@ -1496,10 +1539,12 @@ function layoutTableRefs() {
   if (layoutRaf) cancelAnimationFrame(layoutRaf)
   layoutRaf = requestAnimationFrame(() => {
     layoutRaf = 0
+    syncBrowseTableHeight()
     tableRef.value?.doLayout?.()
     sqlTableRef.value?.doLayout?.()
     syncBrowseDedicatedBars()
     syncSqlDedicatedBars()
+    bindTableScroll()
   })
 }
 
@@ -1509,6 +1554,7 @@ function setupSqlTableViewport() {
 
 function setupTableViewport() {
   nextTick(() => {
+    syncBrowseTableHeight()
     if (tableWrapRef.value || sqlTableWrapRef.value) {
       if (!resizeObserver) {
         let resizeTimer = 0
@@ -1715,32 +1761,33 @@ function applyAppendedRows(rows, more, cursor) {
     hasMore.value = false
     return
   }
-  let next = tableRows.value.concat(rows)
-  // Cap DOM size so infinite scroll stays usable; keep the newest window.
-  if (next.length > MAX_BUFFERED_ROWS) {
-    next = next.slice(next.length - MAX_BUFFERED_ROWS)
-  }
-  tableRows.value = next
-  offset.value = next.length
+  // Keep appending like Navicat — no DOM window chopping.
+  tableRows.value = tableRows.value.concat(rows)
+  offset.value = tableRows.value.length
   hasMore.value = Boolean(more)
   if (cursor != null && cursor !== '') {
     nextAfterPk.value = String(cursor)
   } else if (rows.length) {
     nextAfterPk.value = rowIdentityKey(rows[rows.length - 1]) || nextAfterPk.value
   }
+  nextTick(() => {
+    bindTableScroll()
+    syncBrowseDedicatedBars()
+  })
 }
 
-/** If first pages don't fill the viewport, scroll never fires — keep loading until it can. */
+/** If first pages don't fill the table body, scroll never fires — keep loading until it can. */
 async function ensureBrowseViewportFilled() {
   if (autofillInFlight || loadingRows.value) return
   autofillInFlight = true
   try {
     for (let i = 0; i < MAX_AUTOFILL_PAGES; i += 1) {
       await nextTick()
+      bindTableScroll()
       syncBrowseDedicatedBars()
-      const wrap = tableWrapRef.value
-      if (!wrap || !hasMore.value || loadingRows.value) break
-      if (wrap.scrollHeight > wrap.clientHeight + SCROLL_LOAD_DISTANCE) break
+      const body = getTableScrollElement()
+      if (!body || !hasMore.value || loadingRows.value) break
+      if (body.scrollHeight > body.clientHeight + SCROLL_LOAD_DISTANCE) break
       const before = tableRows.value.length
       await loadRows({ append: true })
       if (tableRows.value.length <= before) break
@@ -2025,6 +2072,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  unbindTableScroll()
   resizeObserver?.disconnect()
   window.removeEventListener('resize', layoutTableRefs)
 })
@@ -2178,6 +2226,7 @@ onUnmounted(() => {
                               <el-table
                                 ref="tableRef"
                                 :data="tableRows"
+                                :height="tableHeight"
                                 :fit="false"
                                 size="small"
                                 border
@@ -2249,12 +2298,7 @@ onUnmounted(() => {
                         <div class="result-scrollbar-corner" />
                       </div>
                     </div>
-                    <div v-if="loadingMore" class="load-more-hint">加载更多…</div>
-                    <div v-else-if="tableRows.length && hasMore" class="load-more-hint">
-                      <el-button size="small" type="primary" plain @click="loadMore">
-                        加载更多（已加载 {{ tableRows.length }}<template v-if="total >= 0"> / {{ total }}</template>）
-                      </el-button>
-                    </div>
+                    <div v-if="loadingMore" class="load-more-hint muted">正在加载…</div>
                     <div v-else-if="tableRows.length && !hasMore" class="load-more-hint muted">已全部加载</div>
                   </div>
 
@@ -2979,8 +3023,19 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* Viewport: wheel scrolls here; native bars hidden so only dedicated bars show */
-.browse-result-list-scroll,
+/* Browse: horizontal on wrap; vertical inside el-table (:height). SQL: wrap scrolls both. */
+.browse-result-list-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 180px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior: contain;
+  outline: none;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
 .sql-result-list-scroll {
   flex: 1;
   min-width: 0;
@@ -3078,15 +3133,24 @@ onUnmounted(() => {
   width: 100% !important;
 }
 
-/* Table itself must not create nested scrollbars */
-.result-table-area :deep(.el-table__inner-wrapper),
-.result-table-area :deep(.el-table__body-wrapper),
-.result-table-area :deep(.el-table__header-wrapper),
-.result-table-area :deep(.el-scrollbar__wrap) {
+/* Browse table: keep body scrollable (Navicat-style continuous scroll); hide EP bars */
+.browse-result-list-scroll :deep(.el-scrollbar__bar) {
+  display: none !important;
+}
+
+.browse-result-list-scroll :deep(.el-table__body-wrapper) {
+  overflow-y: auto !important;
+}
+
+/* SQL table grows with rows; outer panel scrolls */
+.sql-result-list-scroll :deep(.el-table__inner-wrapper),
+.sql-result-list-scroll :deep(.el-table__body-wrapper),
+.sql-result-list-scroll :deep(.el-table__header-wrapper),
+.sql-result-list-scroll :deep(.el-scrollbar__wrap) {
   overflow: visible !important;
 }
 
-.result-table-area :deep(.el-scrollbar__bar) {
+.sql-result-list-scroll :deep(.el-scrollbar__bar) {
   display: none !important;
 }
 
