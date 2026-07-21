@@ -970,11 +970,15 @@ async function openTargetBrowseView(result) {
   if (!viewId) return
   catalogTreeKey.value += 1
   await loadViews()
-  activeViewId.value = viewId
   rightTab.value = 'browse'
-  await router.replace({ query: { ...route.query, viewId: String(viewId) } }).catch(() => {})
   browseReady.value = true
-  await loadRows({ append: false })
+  // Only set id — watch(activeViewId) loads rows once (avoid double fetch flash).
+  if (activeViewId.value === viewId) {
+    await loadRows({ append: false })
+  } else {
+    activeViewId.value = viewId
+  }
+  await router.replace({ query: { ...route.query, viewId: String(viewId) } }).catch(() => {})
 }
 
 async function submitExportToConnection() {
@@ -1432,15 +1436,19 @@ function onSqlVBarScroll(event) {
 }
 
 function onBrowseTableScroll(event) {
-  if (browseScrollLock) return
-  browseScrollLock = true
-  const el = event.target
-  syncScrollLeft(el, browseHBarRef.value)
-  syncScrollTop(el, browseVBarRef.value)
-  maybeLoadMoreFromScroll(el)
-  requestAnimationFrame(() => {
-    browseScrollLock = false
-  })
+  if (!browseScrollLock) {
+    browseScrollLock = true
+    const el = event.target
+    syncScrollLeft(el, browseHBarRef.value)
+    syncScrollTop(el, browseVBarRef.value)
+    maybeLoadMoreFromScroll(el)
+    requestAnimationFrame(() => {
+      browseScrollLock = false
+    })
+  } else {
+    // Sync lock held (e.g. from V-bar) — still allow infinite-scroll check.
+    maybeLoadMoreFromScroll(event.target)
+  }
 }
 
 function maybeLoadMoreFromScroll(el) {
@@ -1466,7 +1474,9 @@ function onBrowseHBarScroll(event) {
 function onBrowseVBarScroll(event) {
   if (browseScrollLock) return
   browseScrollLock = true
-  syncScrollTop(event.target, tableWrapRef.value)
+  const wrap = tableWrapRef.value
+  syncScrollTop(event.target, wrap)
+  maybeLoadMoreFromScroll(wrap)
   requestAnimationFrame(() => {
     browseScrollLock = false
   })
@@ -1579,7 +1589,7 @@ async function loadViews() {
   }
 }
 
-async function loadRows({ append = false, includeTotal = false } = {}) {
+async function loadRows({ append = false } = {}) {
   if (!activeViewId.value) {
     columns.value = []
     tableRows.value = []
@@ -1599,7 +1609,7 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
     if (
       prefetchedPage
       && prefetchedPage.viewId === activeViewId.value
-      && prefetchedPage.afterPk === nextAfterPk.value
+      && String(prefetchedPage.afterPk ?? '') === String(nextAfterPk.value ?? '')
     ) {
       const buffered = prefetchedPage
       prefetchedPage = null
@@ -1615,6 +1625,11 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
 
     const seq = rowsLoadSeq
     const cursor = nextAfterPk.value
+    if (cursor == null || cursor === '') {
+      // No cursor yet — cannot keyset; avoid re-fetching page 1 as "append".
+      hasMore.value = false
+      return
+    }
     loadingMore.value = true
     try {
       const res = await callWithRetry(() => fetchBlobTableViewRowsApi(activeViewId.value, {
@@ -1645,9 +1660,9 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
   const restorePk = pendingRestorePk.value || rowIdentityKey(selectedRow.value)
   pendingRestorePk.value = ''
   loadingRows.value = true
+  // Do NOT clear tableRows here — clearing causes a visible first-page "refresh flash".
   offset.value = 0
   nextAfterPk.value = null
-  tableRows.value = []
 
   try {
     const res = await callWithRetry(() => fetchBlobTableViewRowsApi(activeViewId.value, {
@@ -1674,10 +1689,7 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
     } else {
       autoSelectFirstRow()
     }
-    // Lightweight COUNT(*) only — never re-fetch page 1 via rows API.
     void loadRowTotal(seq)
-    setupTableViewport()
-    void prefetchNextRows()
   } catch (err) {
     if (seq !== rowsLoadSeq) return
     columns.value = []
@@ -1687,6 +1699,8 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
     if (seq === rowsLoadSeq) {
       loadingRows.value = false
       setupTableViewport()
+      // Prefetch only after loadingRows is false (guard inside prefetch).
+      void prefetchNextRows()
     }
   }
 }
@@ -1955,6 +1969,7 @@ async function bootstrapBrowsePage() {
     activeViewId.value = routeViewId
   }
 
+  // Enable watch after id is settled, then load once explicitly (watch skips same-id).
   browseReady.value = true
   if (activeViewId.value) {
     await loadRows({ append: false })
