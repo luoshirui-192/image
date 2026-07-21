@@ -1,6 +1,8 @@
 """Migrate image BLOB columns from legacy tables into upload/ + image_info."""
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import re
 import time
@@ -40,6 +42,7 @@ FORBIDDEN_WHERE_RE = re.compile(
     r";|--|/\*|\*/|\b(DROP|DELETE|UPDATE|INSERT|TRUNCATE|ALTER|CREATE|GRANT|REVOKE)\b",
     re.IGNORECASE,
 )
+_BASE64_IMAGE_RE = re.compile(r"^[A-Za-z0-9+/=\r\n]+$")
 
 BLOB_TYPES_MYSQL = frozenset({"blob", "tinyblob", "mediumblob", "longblob", "binary", "varbinary"})
 
@@ -488,6 +491,52 @@ def _quote_ident(name: str) -> str:
     return f"`{validate_identifier(name)}`"
 
 
+def _sql_blob_select(conn, col_name: str) -> str:
+    """Select a BLOB column without charset decoding corrupting binary bytes."""
+    quoted = _quote_ident(col_name)
+    vendor = (getattr(conn, "vendor", "") or "").lower()
+    if vendor == "mysql":
+        # Connection charset (utf8) can turn BINARY/BLOB into str/garbage; CAST forces bytes.
+        return f"CAST({quoted} AS BINARY) AS {quoted}"
+    if vendor == "sqlite":
+        return f"CAST({quoted} AS BLOB) AS {quoted}"
+    return quoted
+
+
+def _try_decode_base64_image(text: str) -> bytes | None:
+    raw_text = (text or "").strip()
+    if not raw_text or len(raw_text) < 64:
+        return None
+    if raw_text.startswith("data:image") and "," in raw_text:
+        raw_text = raw_text.split(",", 1)[1].strip()
+    if not _BASE64_IMAGE_RE.match(raw_text):
+        return None
+    try:
+        decoded = base64.b64decode(raw_text, validate=False)
+    except (binascii.Error, ValueError):
+        return None
+    if detect_image_type(decoded[:32]):
+        return decoded
+    return None
+
+
+def _recover_image_bytes(content: bytes) -> bytes:
+    """Best-effort repair when drivers return charset-decoded or base64 image payloads."""
+    if not content:
+        return content
+    if detect_image_type(content[:32]):
+        return content
+    for encoding in ("ascii", "latin-1", "utf-8"):
+        try:
+            text = content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        decoded = _try_decode_base64_image(text)
+        if decoded:
+            return decoded
+    return content
+
+
 def _load_source(source_id: int) -> BlobMigrationSource:
     try:
         return BlobMigrationSource.objects.get(pk=source_id)
@@ -631,23 +680,34 @@ def _fetch_blob_from_lookup_table(
         return None
 
     table = _quote_ident(lookup_table)
-    blob = _quote_ident(blob_col)
     id_col = _quote_ident(lookup_id_col)
-    sql = f"SELECT {blob} FROM {table} WHERE {id_col} = %s LIMIT 1"
 
     def _read(conn) -> bytes | None:
+        blob_expr = _sql_blob_select(conn, blob_col)
+        sql = f"SELECT {blob_expr} FROM {table} WHERE {id_col} = %s LIMIT 1"
         with conn.cursor() as cursor:
             cursor.execute(sql, [lookup_id_val])
             raw = cursor.fetchone()
         if not raw:
             return None
-        return _coerce_blob(raw[0]) or None
+        return _recover_image_bytes(_coerce_blob(raw[0])) or None
 
-    if conn_alias:
-        return _read(_remote_connection(conn_alias))
-
-    with _source_db_session(source) as alias:
-        return _read(_remote_connection(alias))
+    try:
+        if conn_alias:
+            return _read(_remote_connection(conn_alias))
+        with _source_db_session(source) as alias:
+            return _read(_remote_connection(alias))
+    except BlobMigrationError:
+        raise
+    except Exception:
+        logger.warning(
+            "lookup blob fetch failed source=%s table=%s column=%s",
+            getattr(source, "id", None),
+            lookup_table,
+            blob_col,
+            exc_info=True,
+        )
+        return None
 
 
 def _blob_bytes_for_column(
@@ -660,24 +720,30 @@ def _blob_bytes_for_column(
     raw = row.get(blob_column)
     mapping = _mapping_for_column(source, blob_column)
 
-    # JOIN/view cells are often NULL, '', or charset-decoded str — prefer base-table bytes.
-    if mapping and not isinstance(raw, (bytes, bytearray, memoryview)):
+    view_bytes = b""
+    try:
+        view_bytes = _recover_image_bytes(_coerce_blob(raw))
+    except BlobMigrationError:
+        view_bytes = b""
+
+    view_ok = bool(view_bytes) and detect_image_type(view_bytes[:32]) is not None
+
+    # Prefer mapped base-table bytes when the view cell is missing or not a real image
+    # (charset corruption / NULL / placeholder text). Soft-fail lookup and fall back.
+    if mapping and not view_ok:
         looked = _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
         if looked:
             return looked
 
-    try:
-        content = _coerce_blob(raw)
-    except BlobMigrationError:
-        if not mapping:
-            raise
-        return _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
+    if view_ok:
+        return view_bytes
 
-    if content:
-        return content
     if mapping:
-        return _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
-    return None
+        looked = _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
+        if looked:
+            return looked
+
+    return view_bytes or None
 
 
 def _validate_source_config(source: BlobMigrationSource) -> None:
@@ -724,7 +790,10 @@ def _infer_filename(
     if not detected and suffix in {"jpg", "jpeg", "png", "gif", "webp", "bmp"}:
         detected = suffix
     if not detected:
-        raise BlobMigrationError("无法识别图片格式（魔数校验失败）")
+        head = content[:12].hex() if content else ""
+        raise BlobMigrationError(
+            f"无法识别图片格式（魔数校验失败，len={len(content or b'')}, head={head})"
+        )
     return f"{source_table}_{source_id}.{detected}"
 
 
@@ -732,7 +801,7 @@ def _coerce_blob(value) -> bytes:
     """Normalize driver-specific BLOB cell values to bytes.
 
     MySQL clients under some charset settings decode BINARY/BLOB as ``str``.
-    latin-1 encode round-trips byte values 0–255 without corruption.
+    Prefer base64 image payloads when present; otherwise latin-1 round-trips 0–255.
     """
     if value is None:
         return b""
@@ -743,6 +812,9 @@ def _coerce_blob(value) -> bytes:
     if isinstance(value, str):
         if not value:
             return b""
+        decoded = _try_decode_base64_image(value)
+        if decoded is not None:
+            return decoded
         try:
             return value.encode("latin-1")
         except UnicodeEncodeError:
@@ -909,21 +981,33 @@ def _fetch_source_rows_by_pks(
 
     table = _quote_ident(source.source_table)
     pk = _quote_ident(source.source_pk_column)
-    select_cols = [pk] + [_quote_ident(col) for col in _source_blob_columns(source)]
-    for col in _extra_select_columns(source):
-        select_cols.append(_quote_ident(col))
+    blob_cols = _source_blob_columns(source)
+    extra_cols = _extra_select_columns(source)
     placeholders = ", ".join(["%s"] * len(unique_pks))
-    sql = (
-        f"SELECT {', '.join(select_cols)} FROM {table} "
-        f"WHERE {pk} IN ({placeholders}) ORDER BY {pk}"
-    )
 
     def _read(alias: str) -> list[dict]:
         conn = _remote_connection(alias)
+        select_cols = [pk] + [_sql_blob_select(conn, col) for col in blob_cols]
+        for col in extra_cols:
+            select_cols.append(_quote_ident(col))
+        sql = (
+            f"SELECT {', '.join(select_cols)} FROM {table} "
+            f"WHERE {pk} IN ({placeholders}) ORDER BY {pk}"
+        )
         with conn.cursor() as cursor:
             cursor.execute(sql, unique_pks)
             columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, raw)) for raw in cursor.fetchall()]
+            rows = []
+            for raw in cursor.fetchall():
+                item = dict(zip(columns, raw))
+                for col in blob_cols:
+                    if col in item:
+                        try:
+                            item[col] = _recover_image_bytes(_coerce_blob(item[col]))
+                        except BlobMigrationError:
+                            item[col] = b""
+                rows.append(item)
+            return rows
 
     if conn_alias:
         return _read(conn_alias)
@@ -1155,6 +1239,8 @@ def _migrate_single_column(
     try:
         if content is None:
             content = _blob_bytes_for_column(source, row, blob_column, conn_alias=conn_alias)
+        if content:
+            content = _recover_image_bytes(content)
         if not content:
             return MigrationItemResult(
                 source_id=row_pk,

@@ -1,6 +1,7 @@
 """Tests for BLOB migration service and API."""
 from __future__ import annotations
 
+import base64
 import io
 import tempfile
 from pathlib import Path
@@ -18,6 +19,8 @@ from images.blob_migration_service import (
     _blob_bytes_for_column,
     _coerce_blob,
     _prepare_migration_batch,
+    _recover_image_bytes,
+    _try_decode_base64_image,
     count_migration_candidates,
     create_migration_source,
     find_migration_source_match,
@@ -572,6 +575,10 @@ class BlobMigrationTestCase(TestCase):
         self.assertEqual(_coerce_blob(memoryview(png)), png)
         self.assertEqual(_coerce_blob(png.decode("latin-1")), png)
         self.assertEqual(_coerce_blob(""), b"")
+        b64 = base64.b64encode(png).decode("ascii")
+        self.assertEqual(_coerce_blob(b64), png)
+        self.assertEqual(_try_decode_base64_image(b64), png)
+        self.assertEqual(_recover_image_bytes(b64.encode("ascii")), png)
         with self.assertRaises(BlobMigrationError):
             _coerce_blob(object())
 
