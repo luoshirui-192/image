@@ -641,7 +641,7 @@ def _fetch_blob_from_lookup_table(
             raw = cursor.fetchone()
         if not raw:
             return None
-        return _coerce_blob(raw[0])
+        return _coerce_blob(raw[0]) or None
 
     if conn_alias:
         return _read(_remote_connection(conn_alias))
@@ -657,13 +657,27 @@ def _blob_bytes_for_column(
     *,
     conn_alias: str | None = None,
 ) -> bytes | None:
-    content = _coerce_blob(row.get(blob_column))
+    raw = row.get(blob_column)
+    mapping = _mapping_for_column(source, blob_column)
+
+    # JOIN/view cells are often NULL, '', or charset-decoded str — prefer base-table bytes.
+    if mapping and not isinstance(raw, (bytes, bytearray, memoryview)):
+        looked = _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
+        if looked:
+            return looked
+
+    try:
+        content = _coerce_blob(raw)
+    except BlobMigrationError:
+        if not mapping:
+            raise
+        return _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
+
     if content:
         return content
-    mapping = _mapping_for_column(source, blob_column)
-    if not mapping:
-        return None
-    return _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
+    if mapping:
+        return _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
+    return None
 
 
 def _validate_source_config(source: BlobMigrationSource) -> None:
@@ -715,13 +729,30 @@ def _infer_filename(
 
 
 def _coerce_blob(value) -> bytes:
+    """Normalize driver-specific BLOB cell values to bytes.
+
+    MySQL clients under some charset settings decode BINARY/BLOB as ``str``.
+    latin-1 encode round-trips byte values 0–255 without corruption.
+    """
     if value is None:
         return b""
     if isinstance(value, memoryview):
         return value.tobytes()
     if isinstance(value, (bytes, bytearray)):
         return bytes(value)
-    raise BlobMigrationError("BLOB 列返回值类型无效")
+    if isinstance(value, str):
+        if not value:
+            return b""
+        try:
+            return value.encode("latin-1")
+        except UnicodeEncodeError:
+            # Rare: non-latin-1 code points from utf-8 mis-decode; keep raw utf-8 bytes.
+            return value.encode("utf-8", errors="surrogatepass")
+    try:
+        return bytes(value)
+    except (TypeError, ValueError):
+        pass
+    raise BlobMigrationError(f"BLOB 列返回值类型无效: {type(value).__name__}")
 
 
 @dataclass

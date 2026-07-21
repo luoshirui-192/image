@@ -14,6 +14,9 @@ from rest_framework.test import APIClient
 
 from images.blob_migration_job_service import create_migration_job, execute_migration_job, serialize_migration_job
 from images.blob_migration_service import (
+    BlobMigrationError,
+    _blob_bytes_for_column,
+    _coerce_blob,
     _prepare_migration_batch,
     count_migration_candidates,
     create_migration_source,
@@ -560,6 +563,82 @@ class BlobMigrationTestCase(TestCase):
             second = run_blob_migration(source.id, batch_size=10, dry_run=False, skip_existing=True)
             self.assertEqual(second.skipped, 2)
             self.assertEqual(second.succeeded, 0)
+
+    def test_coerce_blob_accepts_str_and_buffer_types(self):
+        png = make_png_bytes()
+        self.assertEqual(_coerce_blob(None), b"")
+        self.assertEqual(_coerce_blob(png), png)
+        self.assertEqual(_coerce_blob(bytearray(png)), png)
+        self.assertEqual(_coerce_blob(memoryview(png)), png)
+        self.assertEqual(_coerce_blob(png.decode("latin-1")), png)
+        self.assertEqual(_coerce_blob(""), b"")
+        with self.assertRaises(BlobMigrationError):
+            _coerce_blob(object())
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_blob_bytes_falls_back_when_view_cell_is_non_binary(self):
+        """Charset/driver may return str for view BLOB cells; use mapped base table."""
+        upload_root = str(self.upload_root)
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM join_faces")
+            cursor.execute("DELETE FROM join_images")
+            cursor.execute("DELETE FROM join_main")
+            cursor.execute(
+                "INSERT INTO join_images (fname, image_data) VALUES (?, ?)",
+                ["ara-str", make_png_bytes()],
+            )
+            cursor.execute(
+                "INSERT INTO join_faces (file_name, image_content) VALUES (?, ?)",
+                ["match-str", make_png_bytes((11, 22, 33))],
+            )
+            cursor.execute(
+                "INSERT INTO join_main (ara_name, match_name) VALUES (?, ?)",
+                ["ara-str", "match-str"],
+            )
+
+        source = create_migration_source(
+            name="join view str cell",
+            source_table="join_view",
+            source_pk_column="id",
+            blob_columns=["image_data", "image_content"],
+            source_object_type="view",
+            path_lookup_table="join_images",
+            blob_column_path_mappings=[
+                {
+                    "view_column": "image_data",
+                    "lookup_table": "join_images",
+                    "source_id_column": "ara_name",
+                    "source_column": "image_data",
+                    "lookup_id_column": "fname",
+                },
+                {
+                    "view_column": "image_content",
+                    "lookup_table": "join_faces",
+                    "source_id_column": "match_name",
+                    "source_column": "image_content",
+                    "lookup_id_column": "file_name",
+                },
+            ],
+            category_id=1,
+            db_alias="default",
+        )
+        row = {
+            "id": 1,
+            "ara_name": "ara-str",
+            "match_name": "match-str",
+            # Simulate driver/charset decoding BLOB as str / empty text.
+            "image_data": "",
+            "image_content": "not-bytes",
+        }
+        with override_settings(UPLOAD_ROOT=upload_root):
+            data = _blob_bytes_for_column(source, row, "image_data")
+            content = _blob_bytes_for_column(source, row, "image_content")
+            self.assertTrue(data and data[:8] == b"\x89PNG\r\n\x1a\n")
+            self.assertTrue(content and content[:8] == b"\x89PNG\r\n\x1a\n")
+
+            result = run_blob_migration(source.id, batch_size=10, dry_run=False)
+            self.assertEqual(result.failed, 0)
+            self.assertGreaterEqual(result.succeeded, 2)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_skip_existing_on_rerun(self):
