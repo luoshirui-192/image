@@ -2861,8 +2861,9 @@ onUnmounted(() => {
   overflow: auto;
   overscroll-behavior: contain;
   outline: none;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  /* Show vertical bar; horizontal uses the dedicated bar below */
+  scrollbar-width: thin;
+  scrollbar-color: var(--el-border-color-darker) transparent;
 }
 
 .sql-result-list-scroll {
@@ -2872,15 +2873,21 @@ onUnmounted(() => {
   overflow: auto;
   overscroll-behavior: contain;
   outline: none;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--el-border-color-darker) transparent;
 }
 
+/* Keep vertical scrollbar; hide only native horizontal (custom .result-h-scrollbar) */
 .sql-result-list-scroll::-webkit-scrollbar,
 .browse-result-list-scroll::-webkit-scrollbar {
-  width: 0;
+  width: 10px;
   height: 0;
-  display: none;
+}
+
+.sql-result-list-scroll::-webkit-scrollbar-thumb,
+.browse-result-list-scroll::-webkit-scrollbar-thumb {
+  border-radius: 6px;
+  background: var(--el-border-color-darker);
 }
 
 .result-h-scrollbar {
