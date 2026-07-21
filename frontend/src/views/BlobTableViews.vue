@@ -12,6 +12,7 @@ import {
   createBlobTableViewApi,
   deleteBlobTableViewApi,
   exportBlobTableViewToConnectionApi,
+  fetchBlobTableViewRowCountApi,
   fetchBlobTableViewRowsApi,
   getBlobCatalogObjectApi,
   listBlobCatalogConnectionsApi,
@@ -72,15 +73,18 @@ let resizeObserver = null
 let sqlScrollLock = false
 let browseScrollLock = false
 
-const PAGE_SIZE = 80
+const PAGE_SIZE = 50
 const SCROLL_LOAD_DISTANCE = 120
 const PREFETCH_DISTANCE = 900
+const MAX_BUFFERED_ROWS = 800
 
 const browseReady = ref(false)
 let rowsLoadSeq = 0
-/** @type {{ viewId: number, offset: number, rows: any[], hasMore: boolean } | null} */
+/** @type {{ viewId: number, afterPk: string|null, rows: any[], hasMore: boolean, nextAfterPk: string|null } | null} */
 let prefetchedPage = null
 let prefetchInFlight = false
+/** Cursor for keyset pagination (last loaded PK). */
+const nextAfterPk = ref(null)
 
 const selectedRow = ref(null)
 
@@ -1581,6 +1585,7 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
     tableRows.value = []
     total.value = -1
     hasMore.value = false
+    nextAfterPk.value = null
     selectedRow.value = null
     loadingRows.value = false
     loadingMore.value = false
@@ -1590,19 +1595,17 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
 
   if (append) {
     if (!hasMore.value || loadingMore.value || loadingRows.value) return
-    // Instant path: consume prefetch buffer when it matches current offset.
+    // Instant path: consume prefetch buffer when it matches current cursor.
     if (
       prefetchedPage
       && prefetchedPage.viewId === activeViewId.value
-      && prefetchedPage.offset === offset.value
+      && prefetchedPage.afterPk === nextAfterPk.value
     ) {
       const buffered = prefetchedPage
       prefetchedPage = null
       loadingMore.value = true
       try {
-        tableRows.value = tableRows.value.concat(buffered.rows)
-        offset.value += buffered.rows.length
-        hasMore.value = buffered.hasMore
+        applyAppendedRows(buffered.rows, buffered.hasMore, buffered.nextAfterPk)
       } finally {
         loadingMore.value = false
         void prefetchNextRows()
@@ -1611,20 +1614,22 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
     }
 
     const seq = rowsLoadSeq
+    const cursor = nextAfterPk.value
     loadingMore.value = true
     try {
       const res = await callWithRetry(() => fetchBlobTableViewRowsApi(activeViewId.value, {
-        offset: offset.value,
         limit: PAGE_SIZE,
         includeTotal: false,
         skipBlobPresence: true,
+        afterPk: cursor,
       }))
       if (seq !== rowsLoadSeq) return
       const data = res.data || {}
-      const rows = data.rows || []
-      tableRows.value = tableRows.value.concat(rows)
-      offset.value += rows.length
-      hasMore.value = Boolean(data.has_more)
+      applyAppendedRows(
+        data.rows || [],
+        Boolean(data.has_more),
+        data.next_after_pk != null ? String(data.next_after_pk) : null,
+      )
       void prefetchNextRows()
     } catch (err) {
       if (seq !== rowsLoadSeq) return
@@ -1641,14 +1646,14 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
   pendingRestorePk.value = ''
   loadingRows.value = true
   offset.value = 0
+  nextAfterPk.value = null
   tableRows.value = []
 
   try {
     const res = await callWithRetry(() => fetchBlobTableViewRowsApi(activeViewId.value, {
       offset: 0,
       limit: PAGE_SIZE,
-      includeTotal,
-      // Presence LENGTH(blob) scans block the UI; status can refine later via refresh.
+      includeTotal: false,
       skipBlobPresence: true,
     }))
     if (seq !== rowsLoadSeq) return
@@ -1658,12 +1663,10 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
     const rows = data.rows || []
     tableRows.value = rows
     offset.value = rows.length
-    const nextTotal = Number(data.total)
-    if (!Number.isNaN(nextTotal) && nextTotal >= 0) {
-      total.value = nextTotal
-    } else {
-      total.value = -1
-    }
+    nextAfterPk.value = data.next_after_pk != null ? String(data.next_after_pk) : (
+      rows.length ? rowIdentityKey(rows[rows.length - 1]) || null : null
+    )
+    total.value = -1
     hasMore.value = Boolean(data.has_more)
     if (restorePk) {
       const found = tableRows.value.find((row) => rowIdentityKey(row) === restorePk)
@@ -1671,11 +1674,8 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
     } else {
       autoSelectFirstRow()
     }
-    if (!includeTotal && tableRows.value.length) {
-      void loadRowTotal(seq)
-    } else if (includeTotal && tableRows.value.length && total.value < 0) {
-      void loadRowTotal(seq)
-    }
+    // Lightweight COUNT(*) only — never re-fetch page 1 via rows API.
+    void loadRowTotal(seq)
     setupTableViewport()
     void prefetchNextRows()
   } catch (err) {
@@ -1691,6 +1691,26 @@ async function loadRows({ append = false, includeTotal = false } = {}) {
   }
 }
 
+function applyAppendedRows(rows, more, cursor) {
+  if (!rows.length) {
+    hasMore.value = false
+    return
+  }
+  let next = tableRows.value.concat(rows)
+  // Cap DOM size so infinite scroll stays usable; keep the newest window.
+  if (next.length > MAX_BUFFERED_ROWS) {
+    next = next.slice(next.length - MAX_BUFFERED_ROWS)
+  }
+  tableRows.value = next
+  offset.value = next.length
+  hasMore.value = Boolean(more)
+  if (cursor != null && cursor !== '') {
+    nextAfterPk.value = String(cursor)
+  } else if (rows.length) {
+    nextAfterPk.value = rowIdentityKey(rows[rows.length - 1]) || nextAfterPk.value
+  }
+}
+
 async function prefetchNextRows() {
   if (
     !activeViewId.value
@@ -1703,25 +1723,26 @@ async function prefetchNextRows() {
     return
   }
   const viewId = activeViewId.value
-  const atOffset = offset.value
+  const cursor = nextAfterPk.value
   const seq = rowsLoadSeq
   prefetchInFlight = true
   try {
     const res = await fetchBlobTableViewRowsApi(viewId, {
-      offset: atOffset,
       limit: PAGE_SIZE,
       includeTotal: false,
       skipBlobPresence: true,
+      afterPk: cursor,
     })
-    if (seq !== rowsLoadSeq || viewId !== activeViewId.value || atOffset !== offset.value) {
+    if (seq !== rowsLoadSeq || viewId !== activeViewId.value || cursor !== nextAfterPk.value) {
       return
     }
     const data = res.data || {}
     prefetchedPage = {
       viewId,
-      offset: atOffset,
+      afterPk: cursor,
       rows: data.rows || [],
       hasMore: Boolean(data.has_more),
+      nextAfterPk: data.next_after_pk != null ? String(data.next_after_pk) : null,
     }
   } catch {
     // Prefetch is best-effort
@@ -1733,16 +1754,12 @@ async function prefetchNextRows() {
 async function loadRowTotal(expectedSeq) {
   if (!activeViewId.value || expectedSeq !== rowsLoadSeq) return
   try {
-    const res = await fetchBlobTableViewRowsApi(activeViewId.value, {
-      offset: 0,
-      limit: 1,
-      includeTotal: true,
-    })
+    const res = await fetchBlobTableViewRowCountApi(activeViewId.value)
     if (expectedSeq !== rowsLoadSeq) return
     const nextTotal = Number(res.data?.total)
     if (!Number.isNaN(nextTotal) && nextTotal >= 0) {
       total.value = nextTotal
-      hasMore.value = tableRows.value.length < nextTotal
+      // Do not override keyset has_more from total — buffer may be capped.
     }
   } catch {
     // total is optional; ignore background count failures

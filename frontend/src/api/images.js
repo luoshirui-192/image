@@ -299,16 +299,27 @@ export function deleteBlobTableViewApi(id) {
 export function fetchBlobTableViewRowsApi(id, {
   offset = 0,
   limit = 100,
-  includeTotal = true,
-  skipBlobPresence = false,
+  includeTotal = false,
+  skipBlobPresence = true,
+  afterPk = null,
 } = {}) {
+  const params = {
+    offset,
+    limit,
+    include_total: includeTotal ? 1 : 0,
+    skip_blob_presence: skipBlobPresence ? 1 : 0,
+  }
+  if (afterPk != null && String(afterPk) !== '') {
+    params.after_pk = String(afterPk)
+  }
   return request.get(`/images/blob-migration/table-views/${id}/rows/`, {
-    params: {
-      offset,
-      limit,
-      include_total: includeTotal ? 1 : 0,
-      skip_blob_presence: skipBlobPresence ? 1 : 0,
-    },
+    params,
+    timeout: 120000,
+  })
+}
+
+export function fetchBlobTableViewRowCountApi(id) {
+  return request.get(`/images/blob-migration/table-views/${id}/row-count/`, {
     timeout: 120000,
   })
 }

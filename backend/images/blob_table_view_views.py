@@ -192,8 +192,9 @@ class BlobTableViewRowsView(APIView):
                 pk,
                 offset=data.get("offset", 0),
                 limit=data.get("limit", 100),
-                include_total=data.get("include_total", True),
-                skip_blob_presence=data.get("skip_blob_presence", False),
+                include_total=data.get("include_total", False),
+                skip_blob_presence=data.get("skip_blob_presence", True),
+                after_pk=(data.get("after_pk") or "").strip() or None,
             )
         except BlobTableViewError as exc:
             return error_response(str(exc), code=4001, status=400)
@@ -201,6 +202,23 @@ class BlobTableViewRowsView(APIView):
             logger.exception("fetch_view_rows failed view_id=%s", pk)
             return error_response("加载表视图数据失败", code=5001, status=500)
         return success_response(payload)
+
+
+@extend_schema(tags=["blob-table-view"])
+class BlobTableViewRowCountView(APIView):
+    """GET /api/images/blob-migration/table-views/{id}/row-count/ — COUNT(*) only."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request, pk: int):
+        try:
+            total = count_view_rows(pk)
+        except BlobTableViewError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        except Exception:
+            logger.exception("count_view_rows failed view_id=%s", pk)
+            return error_response("统计行数失败", code=5001, status=500)
+        return success_response({"total": total})
 
 
 @extend_schema(tags=["blob-table-view"], request=BlobTableViewPreviewSchemaSerializer)

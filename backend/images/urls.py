@@ -40,6 +40,7 @@ from images.blob_table_view_views import (
     BlobTableViewExportToConnectionView,
     BlobTableViewListCreateView,
     BlobTableViewPreviewSchemaView,
+    BlobTableViewRowCountView,
     BlobTableViewRowsView,
     BlobTableViewSchemaView,
 )
@@ -126,6 +127,12 @@ urlpatterns = [
     path("blob-migration/table-views/", BlobTableViewListCreateView.as_view(), name="blob-table-view-list"),
     path("blob-migration/table-views/<int:pk>/schema/", BlobTableViewSchemaView.as_view(), name="blob-table-view-schema"),
     path("blob-migration/table-views/<int:pk>/rows/", BlobTableViewRowsView.as_view(), name="blob-table-view-rows"),
+    path(
+        "blob-migration/table-views/<int:pk>/row-count/",
+        BlobTableViewRowCountView.as_view(),
+        name="blob-table-view-row-count",
+    ),
+    path("blob-browse/<int:pk>/row-count/", BlobTableViewRowCountView.as_view(), name="blob-browse-row-count"),
     path(
         "blob-migration/table-views/<int:pk>/export-to-connection/",
         BlobTableViewExportToConnectionView.as_view(),

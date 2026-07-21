@@ -361,8 +361,9 @@ class BlobSyncBackfillSerializer(serializers.Serializer):
 class BlobTableViewRowsSerializer(serializers.Serializer):
     offset = serializers.IntegerField(required=False, default=0, min_value=0)
     limit = serializers.IntegerField(required=False, default=100, min_value=1, max_value=500)
-    include_total = serializers.BooleanField(required=False, default=True)
-    skip_blob_presence = serializers.BooleanField(required=False, default=False)
+    include_total = serializers.BooleanField(required=False, default=False)
+    skip_blob_presence = serializers.BooleanField(required=False, default=True)
+    after_pk = serializers.CharField(required=False, allow_blank=True, default="", max_length=128)
 
 
 class BlobTableViewPreviewSchemaSerializer(serializers.Serializer):

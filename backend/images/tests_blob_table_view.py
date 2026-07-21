@@ -201,7 +201,7 @@ class BlobTableViewTestCase(TestCase):
         )
 
     def test_fetch_view_rows_substitutes_path(self):
-        payload = fetch_view_rows(self.view.id, offset=0, limit=10)
+        payload = fetch_view_rows(self.view.id, offset=0, limit=10, include_total=True)
         self.assertEqual(payload["total"], 3)
         self.assertFalse(payload["has_more"])
         self.assertEqual(len(payload["rows"]), 3)
@@ -219,8 +219,21 @@ class BlobTableViewTestCase(TestCase):
     def test_fetch_view_rows_can_skip_total_count(self):
         payload = fetch_view_rows(self.view.id, offset=0, limit=10, include_total=False)
         self.assertEqual(payload["total"], -1)
-        self.assertTrue(payload["has_more"])
+        self.assertFalse(payload["has_more"])
         self.assertEqual(len(payload["rows"]), 3)
+
+    def test_fetch_view_rows_keyset_after_pk(self):
+        first = fetch_view_rows(self.view.id, offset=0, limit=1, include_total=False)
+        self.assertEqual(len(first["rows"]), 1)
+        self.assertTrue(first["has_more"])
+        cursor = first["next_after_pk"]
+        self.assertTrue(cursor)
+        second = fetch_view_rows(
+            self.view.id, after_pk=cursor, limit=10, include_total=False
+        )
+        self.assertEqual(len(second["rows"]), 2)
+        self.assertFalse(second["has_more"])
+        self.assertNotEqual(first["rows"][0]["id"], second["rows"][0]["id"])
 
     def test_update_table_view_can_change_database_name(self):
         updated = update_table_view(self.view.id, database_name="catalog_db")
@@ -243,7 +256,7 @@ class BlobTableViewTestCase(TestCase):
             "images.blob_table_view_service._batch_ids_with_nonempty_blob",
             side_effect=_track_ids,
         ):
-            fetch_view_rows(self.view.id, offset=0, limit=10)
+            fetch_view_rows(self.view.id, offset=0, limit=10, skip_blob_presence=False)
 
         self.assertNotIn("1", checked_ids)
         self.assertIn("2", checked_ids)

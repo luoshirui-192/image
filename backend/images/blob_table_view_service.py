@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +29,10 @@ from images.external_db_service import db_alias_session, validate_db_alias_refer
 from images.models import BlobTableView, ImageInfo, ImageSourceMap
 
 logger = logging.getLogger(__name__)
+
+# Short-lived schema cache — information_schema on every page is expensive.
+_REMOTE_COLUMNS_CACHE: dict[tuple[Any, ...], tuple[float, list]] = {}
+_REMOTE_COLUMNS_TTL_SEC = 60.0
 
 PATH_STATUS_PENDING = "pending"
 PATH_STATUS_MIGRATED = "migrated"
@@ -106,6 +111,17 @@ def _load_view(view_id: int) -> BlobTableView:
 
 def _fetch_remote_columns(conn, table: str) -> list[VirtualColumn]:
     table = validate_identifier(table, label="源表名")
+    cache_key = (getattr(conn, "alias", None), conn.vendor, table)
+    cached = _REMOTE_COLUMNS_CACHE.get(cache_key)
+    now = time.monotonic()
+    if cached and (now - cached[0]) < _REMOTE_COLUMNS_TTL_SEC:
+        return list(cached[1])
+    cols = _fetch_remote_columns_uncached(conn, table)
+    _REMOTE_COLUMNS_CACHE[cache_key] = (now, list(cols))
+    return cols
+
+
+def _fetch_remote_columns_uncached(conn, table: str) -> list[VirtualColumn]:
     if conn.vendor == "mysql":
         with conn.cursor() as cursor:
             cursor.execute(
@@ -847,13 +863,19 @@ def fetch_simulated_table_rows(
     limit: int = DEFAULT_ROW_LIMIT,
     extra_where: str = "",
     touch_last_viewed: bool = True,
-    include_total: bool = True,
-    skip_blob_presence: bool = False,
+    include_total: bool = False,
+    skip_blob_presence: bool = True,
+    after_pk: str | None = None,
 ) -> dict:
-    """Fetch paginated rows with BLOB columns replaced by path cells (no BLOB bytes)."""
+    """Fetch paginated rows with BLOB columns replaced by path cells (no BLOB bytes).
+
+    Prefer ``after_pk`` (keyset) over deep ``OFFSET`` for infinite scroll.
+    """
     if offset < 0:
         raise BlobTableViewError("offset 不能为负数")
     limit = min(max(1, limit), MAX_ROW_LIMIT)
+    after_key = None if after_pk is None else str(after_pk).strip()
+    use_keyset = bool(after_key)
 
     validate_db_alias(view.db_alias)
     table = _quote_ident(view.source_table)
@@ -882,18 +904,39 @@ def fetch_simulated_table_rows(
                 select_names.append(col_name)
         select_sql = ", ".join(_quote_ident(name) for name in select_names)
         order_sql = _quote_ident(pk)
-        sql = (
-            f"SELECT {select_sql} FROM {table}{where_sql} "
-            f"ORDER BY {order_sql} LIMIT %s OFFSET %s"
-        )
-        params = [*where_params, limit, offset]
+        fetch_n = limit + 1
+        params: list[Any] = list(where_params)
+        page_where = where_sql
+        if use_keyset:
+            keyset_clause = f"{order_sql} > %s"
+            if page_where:
+                page_where = f"{page_where} AND ({keyset_clause})"
+            else:
+                page_where = f" WHERE {keyset_clause}"
+            params.append(after_key)
+            sql = (
+                f"SELECT {select_sql} FROM {table}{page_where} "
+                f"ORDER BY {order_sql} LIMIT %s"
+            )
+            params.append(fetch_n)
+            offset = 0
+        else:
+            sql = (
+                f"SELECT {select_sql} FROM {table}{page_where} "
+                f"ORDER BY {order_sql} LIMIT %s OFFSET %s"
+            )
+            params.extend([fetch_n, offset])
         with conn.cursor() as cursor:
             cursor.execute(sql, params)
-            raw_rows = cursor.fetchall()
+            raw_rows = list(cursor.fetchall())
             col_names = [col[0] for col in cursor.description]
 
+        has_more_by_fetch = len(raw_rows) > limit
+        if has_more_by_fetch:
+            raw_rows = raw_rows[:limit]
+
         row_total = -1
-        if offset == 0 and include_total:
+        if (not use_keyset) and offset == 0 and include_total:
             count_sql = f"SELECT COUNT(*) FROM {table}{where_sql}"
             with conn.cursor() as cursor:
                 cursor.execute(count_sql, where_params)
@@ -996,11 +1039,13 @@ def fetch_simulated_table_rows(
                     item[blob_col] = map_cell
         rows.append(item)
 
-    # COUNT only on the first page (offset=0) so UI can show "loaded / total" without
-    # scanning on every infinite-scroll append.
-    total = row_total if offset == 0 else -1
-    has_more = len(rows) >= limit if total < 0 else (offset + len(rows)) < total
-    if touch_last_viewed and view.pk and offset == 0:
+    total = row_total if (not use_keyset and offset == 0) else -1
+    if total >= 0:
+        has_more = (offset + len(rows)) < total
+    else:
+        has_more = has_more_by_fetch
+    next_after_pk = str(raw_rows[-1][pk_index]) if raw_rows else None
+    if touch_last_viewed and view.pk and offset == 0 and not use_keyset:
         BlobTableView.objects.filter(pk=view.id).update(last_viewed_at=timezone.now())
 
     return {
@@ -1019,6 +1064,8 @@ def fetch_simulated_table_rows(
         "limit": limit,
         "total": total,
         "has_more": has_more,
+        "next_after_pk": next_after_pk,
+        "pk_column": pk,
     }
 
 
@@ -1027,8 +1074,9 @@ def fetch_view_rows(
     *,
     offset: int = 0,
     limit: int = DEFAULT_ROW_LIMIT,
-    include_total: bool = True,
-    skip_blob_presence: bool = False,
+    include_total: bool = False,
+    skip_blob_presence: bool = True,
+    after_pk: str | None = None,
 ) -> dict:
     view = _load_view(view_id)
     return fetch_simulated_table_rows(
@@ -1037,7 +1085,8 @@ def fetch_view_rows(
         limit=limit,
         include_total=include_total,
         skip_blob_presence=skip_blob_presence,
-        touch_last_viewed=offset == 0,
+        after_pk=after_pk,
+        touch_last_viewed=offset == 0 and not after_pk,
     )
 
 
