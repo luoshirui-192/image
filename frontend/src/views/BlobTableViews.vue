@@ -66,10 +66,8 @@ const loadingMore = ref(false)
 const tableRef = ref(null)
 const tableWrapRef = ref(null)
 const browseHBarRef = ref(null)
-const browseVBarRef = ref(null)
 const loadSentinelRef = ref(null)
 const rowPreviewPanelRef = ref(null)
-const browseVBarInnerHeight = ref(1)
 const sqlVBarInnerHeight = ref(1)
 let resizeObserver = null
 let sqlScrollLock = false
@@ -1406,8 +1404,6 @@ function syncBrowseTableHeight() {
 function syncBrowseDedicatedBars() {
   const wrap = tableWrapRef.value
   if (!wrap) return
-  browseVBarInnerHeight.value = Math.max(1, wrap.scrollHeight)
-  syncScrollTop(wrap, browseVBarRef.value)
   syncScrollLeft(wrap, browseHBarRef.value)
 }
 
@@ -1457,12 +1453,12 @@ function unbindLoadSentinel() {
 
 function onBrowseTableScroll(event) {
   const el = event.target
+  if (el !== tableWrapRef.value) return
   if (!browseScrollLock) {
     browseScrollLock = true
     syncScrollLeft(el, browseHBarRef.value)
     requestAnimationFrame(() => {
       browseScrollLock = false
-      if (browseVBarRef.value) browseVBarRef.value.scrollTop = el.scrollTop
     })
   }
   maybeLoadMoreFromScroll(el)
@@ -1481,17 +1477,6 @@ function onBrowseHBarScroll(event) {
   if (browseScrollLock) return
   browseScrollLock = true
   syncScrollLeft(event.target, tableWrapRef.value)
-  requestAnimationFrame(() => {
-    browseScrollLock = false
-  })
-}
-
-function onBrowseVBarScroll(event) {
-  if (browseScrollLock) return
-  browseScrollLock = true
-  const wrap = tableWrapRef.value
-  syncScrollTop(event.target, wrap)
-  maybeLoadMoreFromScroll(wrap)
   requestAnimationFrame(() => {
     browseScrollLock = false
   })
@@ -1694,8 +1679,11 @@ async function loadRows({ append = false } = {}) {
       const data = res.data || {}
       if (data.pk_column) pkColumn.value = String(data.pk_column)
       const pageRows = data.rows || []
-      // If keyset returned nothing but total says more, fall back to offset paging once.
-      if (!pageRows.length && total.value > loadedCount.value) {
+      // If keyset returned nothing but we still expect more, fall back to offset paging.
+      const expectMore = Boolean(data.has_more)
+        || (total.value >= 0 && loadedCount.value < total.value)
+        || hasMore.value
+      if (!pageRows.length && expectMore) {
         const res2 = await fetchBlobTableViewRowsApi(activeViewId.value, {
           offset: loadedCount.value,
           limit: PAGE_SIZE,
@@ -1706,7 +1694,7 @@ async function loadRows({ append = false } = {}) {
         const data2 = res2.data || {}
         applyAppendedRows(
           data2.rows || [],
-          Boolean(data2.has_more) || loadedCount.value + (data2.rows || []).length < total.value,
+          Boolean(data2.has_more) || (total.value >= 0 && loadedCount.value + (data2.rows || []).length < total.value),
           data2.next_after_pk != null ? String(data2.next_after_pk) : null,
         )
       } else {
@@ -2308,17 +2296,6 @@ onUnmounted(() => {
                           </template>
                           <el-empty v-else-if="!loadingRows" description="无数据" />
                         </div>
-                        <div
-                          v-if="columns.length"
-                          ref="browseVBarRef"
-                          class="result-v-scrollbar"
-                          @scroll="onBrowseVBarScroll"
-                        >
-                          <div
-                            class="result-v-scrollbar-inner"
-                            :style="{ height: `${browseVBarInnerHeight}px` }"
-                          />
-                        </div>
                       </div>
                       <div v-if="columns.length" class="result-h-scrollbar-row">
                         <div
@@ -2328,7 +2305,6 @@ onUnmounted(() => {
                         >
                           <div class="result-h-scrollbar-inner" :style="browseTableInnerStyle" />
                         </div>
-                        <div class="result-scrollbar-corner" />
                       </div>
                     </div>
                     <div v-if="loadingMore" class="load-more-hint muted">正在加载…</div>
@@ -3056,34 +3032,30 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* Browse: outer wrap scrolls both axes (sentinel triggers next page). */
-.browse-result-list-scroll {
-  flex: 1;
-  min-width: 0;
-  min-height: 180px;
-  overflow: auto;
-  overscroll-behavior: contain;
-  outline: none;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
+/* Browse/SQL: outer panel owns vertical scroll; native V bar visible. */
+.browse-result-list-scroll,
 .sql-result-list-scroll {
   flex: 1;
   min-width: 0;
   min-height: 180px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   outline: none;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--el-border-color-darker) transparent;
 }
 
 .browse-result-list-scroll::-webkit-scrollbar,
 .sql-result-list-scroll::-webkit-scrollbar {
-  width: 0;
+  width: 10px;
   height: 0;
-  display: none;
+}
+
+.browse-result-list-scroll::-webkit-scrollbar-thumb,
+.sql-result-list-scroll::-webkit-scrollbar-thumb {
+  border-radius: 6px;
+  background: var(--el-border-color-darker);
 }
 
 .sql-result-list-scroll:focus,
@@ -3165,25 +3137,27 @@ onUnmounted(() => {
   width: 100% !important;
 }
 
-/* Browse table grows with rows; panel scrolls (Navicat-style continuous load) */
+/* Force EP table to grow with rows (no internal body scroll / fixed height). */
+.browse-result-list-scroll :deep(.el-table),
+.browse-result-list-scroll :deep(.el-table__inner-wrapper),
+.browse-result-list-scroll :deep(.el-table__body-wrapper),
+.browse-result-list-scroll :deep(.el-scrollbar),
+.browse-result-list-scroll :deep(.el-scrollbar__wrap),
+.browse-result-list-scroll :deep(.el-scrollbar__view),
+.sql-result-list-scroll :deep(.el-table),
+.sql-result-list-scroll :deep(.el-table__inner-wrapper),
+.sql-result-list-scroll :deep(.el-table__body-wrapper),
+.sql-result-list-scroll :deep(.el-scrollbar),
+.sql-result-list-scroll :deep(.el-scrollbar__wrap),
+.sql-result-list-scroll :deep(.el-scrollbar__view) {
+  height: auto !important;
+  max-height: none !important;
+}
+
 .browse-result-list-scroll :deep(.el-table__inner-wrapper),
 .browse-result-list-scroll :deep(.el-table__body-wrapper),
 .browse-result-list-scroll :deep(.el-table__header-wrapper),
-.browse-result-list-scroll :deep(.el-scrollbar__wrap) {
-  overflow: visible !important;
-}
-
-.browse-result-list-scroll :deep(.el-scrollbar__bar) {
-  display: none !important;
-}
-
-.browse-load-sentinel {
-  width: 100%;
-  height: 1px;
-  pointer-events: none;
-}
-
-/* SQL table grows with rows; outer panel scrolls */
+.browse-result-list-scroll :deep(.el-scrollbar__wrap),
 .sql-result-list-scroll :deep(.el-table__inner-wrapper),
 .sql-result-list-scroll :deep(.el-table__body-wrapper),
 .sql-result-list-scroll :deep(.el-table__header-wrapper),
@@ -3191,8 +3165,16 @@ onUnmounted(() => {
   overflow: visible !important;
 }
 
+.browse-result-list-scroll :deep(.el-scrollbar__bar),
 .sql-result-list-scroll :deep(.el-scrollbar__bar) {
   display: none !important;
+}
+
+.browse-load-sentinel {
+  width: 100%;
+  height: 48px;
+  flex-shrink: 0;
+  pointer-events: none;
 }
 
 .row-preview-panel {
@@ -3333,7 +3315,9 @@ onUnmounted(() => {
 .table-h-scroll-inner {
   width: max-content;
   min-width: 100%;
-  height: 100%;
+  /* Do NOT use height:100% — that locks the table to the viewport and
+     prevents the outer panel from scrolling (stuck after first page). */
+  height: auto;
 }
 
 .table-viewport--native-scroll-x :deep(.el-scrollbar__bar.is-horizontal),
