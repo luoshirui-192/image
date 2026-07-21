@@ -1274,7 +1274,8 @@ async function goNextPreviewRow() {
     selectPreviewRow(rows[idx + 1])
     return
   }
-  if (!hasMore.value || loadingMore.value) return
+  const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
+  if (!canContinue || loadingMore.value) return
   const prevLen = rows.length
   await loadRows({ append: true })
   const nextRows = tableRows.value
@@ -1437,12 +1438,10 @@ function bindLoadSentinel() {
   loadSentinelObserver = new IntersectionObserver(
     (entries) => {
       if (!entries.some((e) => e.isIntersecting)) return
-      if (hasMore.value && !loadingMore.value && !loadingRows.value) {
-        void loadMore()
-      }
-      if (hasMore.value && !loadingMore.value && !loadingRows.value) {
-        void prefetchNextRows()
-      }
+      const canContinue = hasMore.value || (total.value >= 0 && loadedCount.value < total.value)
+      if (!canContinue || loadingMore.value || loadingRows.value) return
+      void loadMore()
+      void prefetchNextRows()
     },
     { root, rootMargin: '240px 0px', threshold: 0 },
   )
