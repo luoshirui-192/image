@@ -16,6 +16,7 @@ from rest_framework.test import APIClient
 from images.blob_migration_job_service import create_migration_job, execute_migration_job, serialize_migration_job
 from images.blob_migration_service import (
     BlobMigrationError,
+    _as_storage_path_text,
     _blob_bytes_for_column,
     _coerce_blob,
     _prepare_migration_batch,
@@ -581,6 +582,54 @@ class BlobMigrationTestCase(TestCase):
         self.assertEqual(_recover_image_bytes(b64.encode("ascii")), png)
         with self.assertRaises(BlobMigrationError):
             _coerce_blob(object())
+
+    def test_as_storage_path_text_detects_upload_paths(self):
+        path = "upload/20260630/1/550e8400-e29b-41d4-a716-446655440001.jpg"
+        self.assertEqual(_as_storage_path_text(path), path)
+        self.assertEqual(_as_storage_path_text(path.encode("utf-8")), path)
+        self.assertIsNone(_as_storage_path_text(make_png_bytes()))
+        self.assertIsNone(_as_storage_path_text(b"\xff\xd8\xff\xe0not-a-path"))
+
+    @override_settings(UPLOAD_ROOT=None)
+    def test_migrate_path_export_column_links_existing_image(self):
+        """Path-export tables store upload/... strings; link map instead of re-upload."""
+        upload_root = str(self.upload_root)
+        path = "upload/20260630/1/550e8400-e29b-41d4-a716-446655440001.jpg"
+        with override_settings(UPLOAD_ROOT=upload_root):
+            existing = ImageInfo.objects.create(
+                image_name="already.png",
+                image_path=path,
+                image_width=1,
+                image_height=1,
+                file_size=10,
+                file_suffix="jpg",
+                file_hash="abc",
+                upload_time=timezone.now(),
+                update_time=timezone.now(),
+                upload_user="tester",
+                is_delete=0,
+                category_id=1,
+            )
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM legacy_photos")
+                cursor.execute(
+                    "INSERT INTO legacy_photos (id, title, photo) VALUES (?, ?, ?)",
+                    [42, "path-row", path.encode("utf-8")],
+                )
+            source = create_migration_source(
+                name="path export migrate",
+                source_table="legacy_photos",
+                source_pk_column="id",
+                blob_column="photo",
+                category_id=1,
+                db_alias="default",
+            )
+            result = run_blob_migration(source.id, batch_size=10, dry_run=False)
+            self.assertEqual(result.failed, 0)
+            self.assertGreaterEqual(result.skipped + result.succeeded, 1)
+            mapping = ImageSourceMap.objects.get(source_table="legacy_photos", source_id="42")
+            self.assertEqual(mapping.image_info_id, existing.id)
+            self.assertEqual(ImageInfo.objects.filter(is_delete=0).count(), 1)
 
     @override_settings(UPLOAD_ROOT=None)
     def test_blob_bytes_falls_back_when_view_cell_is_non_binary(self):

@@ -537,6 +537,77 @@ def _recover_image_bytes(content: bytes) -> bytes:
     return content
 
 
+def _as_storage_path_text(value: Any) -> str | None:
+    """Detect path-export style values such as ``upload/20260630/1/uuid.jpg``."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        if not raw or detect_image_type(raw[:32]):
+            return None
+        if len(raw) > 500 or b"\x00" in raw[:64]:
+            return None
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("latin-1")
+            except UnicodeDecodeError:
+                return None
+    else:
+        text = str(value)
+    text = text.strip().replace("\\", "/")
+    if not text or len(text) > 500:
+        return None
+    if text.startswith(("upload/", "templates/")):
+        return text
+    for marker in ("/upload/", "/templates/"):
+        idx = text.find(marker)
+        if idx >= 0:
+            return text[idx + 1 :]
+    return None
+
+
+@dataclass
+class _ResolvedPathPayload:
+    path: str
+    image: ImageInfo | None = None
+    content: bytes | None = None
+
+
+def _resolve_storage_path_payload(path: str) -> _ResolvedPathPayload:
+    """Bind a stored path to existing image_info, or load bytes from storage."""
+    from images.file_service import image_exists, read_image_bytes
+
+    safe = (path or "").strip().replace("\\", "/")
+    if not safe:
+        return _ResolvedPathPayload(path="")
+    image = (
+        ImageInfo.objects.filter(image_path=safe, is_delete=0)
+        .order_by("-id")
+        .first()
+    )
+    if image is not None:
+        return _ResolvedPathPayload(path=safe, image=image)
+    # Some older rows store path without the upload/ prefix.
+    if not safe.startswith(("upload/", "templates/")):
+        alt = f"upload/{safe.lstrip('/')}"
+        image = (
+            ImageInfo.objects.filter(image_path=alt, is_delete=0)
+            .order_by("-id")
+            .first()
+        )
+        if image is not None:
+            return _ResolvedPathPayload(path=alt, image=image)
+        safe = alt
+    if image_exists(safe):
+        try:
+            return _ResolvedPathPayload(path=safe, content=read_image_bytes(safe))
+        except Exception:
+            logger.warning("failed reading storage path %s", safe, exc_info=True)
+    return _ResolvedPathPayload(path=safe)
+
+
 def _load_source(source_id: int) -> BlobMigrationSource:
     try:
         return BlobMigrationSource.objects.get(pk=source_id)
@@ -1248,6 +1319,44 @@ def _migrate_single_column(
                 success=True,
                 skipped=True,
             )
+
+        # Path-export tables store ``upload/...`` strings instead of BLOB bytes.
+        path_text = _as_storage_path_text(content)
+        if path_text:
+            payload = _resolve_storage_path_payload(path_text)
+            if payload.image is not None:
+                filename = Path(payload.path).name or payload.path
+                if dry_run:
+                    return MigrationItemResult(
+                        source_id=row_pk,
+                        source_column=blob_column,
+                        success=True,
+                        skipped=True,
+                        image_info_id=payload.image.id,
+                        filename=filename,
+                    )
+                _upsert_source_map(
+                    source=source,
+                    lookup_table=lookup_table,
+                    map_source_id=map_source_id,
+                    map_column=map_column,
+                    image_info_id=payload.image.id,
+                )
+                return MigrationItemResult(
+                    source_id=row_pk,
+                    source_column=blob_column,
+                    success=True,
+                    skipped=True,
+                    image_info_id=payload.image.id,
+                    filename=filename,
+                    error="源列已是路径，已关联现有图片",
+                )
+            if payload.content:
+                content = payload.content
+            else:
+                raise BlobMigrationError(
+                    f"源列存的是路径而非图片二进制，且文件不存在: {payload.path or path_text}"
+                )
 
         name_value = row.get(source.name_column) if source.name_column else None
         suffix_value = row.get(source.suffix_column) if source.suffix_column else None
