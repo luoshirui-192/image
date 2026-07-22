@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from django.db import connections
+from django.db import close_old_connections, connections
 from django.utils import timezone
 
 from images.blob_migration_service import BlobMigrationError, validate_identifier
@@ -32,7 +33,11 @@ DEFAULT_DATASET_CODE = "PK_5W"
 CAP_TABLE = "T_CAP_FP_DATA"
 FEATURE_TABLE = "T_FEATURE_RECORD"
 
+# Serialize writeback I/O: import workers are parallel and must not
+# register/unregister the same external Django DB alias concurrently.
+_WRITEBACK_LOCK = threading.Lock()
 _SCHEMA_ENSURED: set[str] = set()
+_SCHEMA_FAILED: dict[str, str] = {}
 
 
 class PathWritebackError(Exception):
@@ -158,65 +163,77 @@ def ensure_feature_path_columns(config: dict) -> None:
     cache_key = f"{alias}|{database or '_'}|{FEATURE_TABLE}"
     if cache_key in _SCHEMA_ENSURED:
         return
+    if cache_key in _SCHEMA_FAILED:
+        raise PathWritebackError(_SCHEMA_FAILED[cache_key])
 
-    with db_alias_session(alias, database=database or None) as session_alias:
-        conn = connections[session_alias]
-        if conn.vendor != "mysql":
-            # Unit tests (sqlite): assume columns already varchar/compatible.
-            _SCHEMA_ENSURED.add(cache_key)
-            return
-        schema = database or str(conn.settings_dict.get("NAME") or "")
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
-                FROM information_schema.COLUMNS
-                WHERE TABLE_SCHEMA = %s
-                  AND TABLE_NAME = %s
-                  AND COLUMN_NAME IN ('feature_ara_data', 'feature_neuro_data')
-                """,
-                [schema, FEATURE_TABLE],
-            )
-            rows = {r[0]: (str(r[1] or "").lower(), r[2]) for r in cursor.fetchall()}
-            if not rows:
-                raise PathWritebackError(
-                    f"未找到 {schema}.{FEATURE_TABLE}.feature_ara_data / feature_neuro_data"
-                )
-
-            need_alter = False
-            for col in ("feature_ara_data", "feature_neuro_data"):
-                dtype, maxlen = rows.get(col, ("", None))
-                if dtype in {"int", "integer", "bigint", "smallint", "tinyint", "mediumint"}:
-                    need_alter = True
-                elif dtype in {"varchar", "char"} and (maxlen is None or int(maxlen) < 500):
-                    need_alter = True
-                elif dtype not in {
-                    "varchar",
-                    "char",
-                    "text",
-                    "mediumtext",
-                    "longtext",
-                    "blob",
-                    "longblob",
-                }:
-                    need_alter = True
-
-            if need_alter:
-                logger.warning(
-                    "Altering %s.%s feature_ara_data/feature_neuro_data to VARCHAR(500) for path storage",
-                    schema,
-                    FEATURE_TABLE,
-                )
+    try:
+        with db_alias_session(alias, database=database or None) as session_alias:
+            conn = connections[session_alias]
+            if conn.vendor != "mysql":
+                _SCHEMA_ENSURED.add(cache_key)
+                return
+            schema = database or str(conn.settings_dict.get("NAME") or "")
+            with conn.cursor() as cursor:
                 cursor.execute(
-                    f"""
-                    ALTER TABLE `{FEATURE_TABLE}`
-                      MODIFY COLUMN `feature_ara_data` varchar(500) NULL
-                        COMMENT 'ara/Bidiso feature storage path',
-                      MODIFY COLUMN `feature_neuro_data` varchar(500) NULL
-                        COMMENT 'NEURO/Neuiso feature storage path'
                     """
+                    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = %s
+                      AND TABLE_NAME = %s
+                      AND COLUMN_NAME IN ('feature_ara_data', 'feature_neuro_data')
+                    """,
+                    [schema, FEATURE_TABLE],
                 )
-    _SCHEMA_ENSURED.add(cache_key)
+                rows = {r[0]: (str(r[1] or "").lower(), r[2]) for r in cursor.fetchall()}
+                if not rows:
+                    raise PathWritebackError(
+                        f"未找到 {schema}.{FEATURE_TABLE}.feature_ara_data / feature_neuro_data"
+                    )
+
+                need_alter = False
+                for col in ("feature_ara_data", "feature_neuro_data"):
+                    dtype, maxlen = rows.get(col, ("", None))
+                    if dtype in {"int", "integer", "bigint", "smallint", "tinyint", "mediumint"}:
+                        need_alter = True
+                    elif dtype in {"varchar", "char"} and (maxlen is None or int(maxlen) < 500):
+                        need_alter = True
+                    elif dtype not in {
+                        "varchar",
+                        "char",
+                        "text",
+                        "mediumtext",
+                        "longtext",
+                        "blob",
+                        "longblob",
+                    }:
+                        need_alter = True
+
+                if need_alter:
+                    logger.warning(
+                        "Altering %s.%s feature_*_data to VARCHAR(500) for path storage",
+                        schema,
+                        FEATURE_TABLE,
+                    )
+                    cursor.execute(
+                        f"""
+                        ALTER TABLE `{FEATURE_TABLE}`
+                          MODIFY COLUMN `feature_ara_data` varchar(500) NULL
+                            COMMENT 'ara/Bidiso feature storage path',
+                          MODIFY COLUMN `feature_neuro_data` varchar(500) NULL
+                            COMMENT 'NEURO/Neuiso feature storage path'
+                        """
+                    )
+        _SCHEMA_ENSURED.add(cache_key)
+    except PathWritebackError as exc:
+        _SCHEMA_FAILED[cache_key] = str(exc)
+        raise
+    except Exception as exc:
+        msg = (
+            f"无法调整 {FEATURE_TABLE} 路径列（需 ALTER 权限，"
+            f"或手工执行 sql/alter_t_feature_record_path_columns.sql）: {exc}"
+        )
+        _SCHEMA_FAILED[cache_key] = msg
+        raise PathWritebackError(msg) from exc
 
 
 def writeback_cap_and_feature(
@@ -232,9 +249,9 @@ def writeback_cap_and_feature(
     Insert/update one capture row + linked feature row.
 
     - T_CAP_FP_DATA.fingerprint_image := utf8 bytes of upload/... path
+    - T_CAP_FP_DATA.fingerprint_url := same path string (varchar, easier to query)
     - T_FEATURE_RECORD.fp_image_id := cap_image_id
-    - feature_ara_data := templates/... Bidiso path (optional)
-    - feature_neuro_data := templates/... Neuiso path (optional)
+    - feature_ara_data / feature_neuro_data := templates/... paths
     """
     counters = WritebackCounters()
     cap_image_id = str(cap_image_id or "").strip()
@@ -258,75 +275,84 @@ def writeback_cap_and_feature(
 
     alias = _resolve_alias(config)
     database = str(config.get("database") or "").strip() or None
+    url_path = image_path[:256]
+    blob_path = _as_blob_path(image_path)
 
     try:
-        ensure_feature_path_columns(config)
-        with db_alias_session(alias, database=database) as session_alias:
-            conn = connections[session_alias]
-            with conn.cursor() as cursor:
-                # Capture row
-                cursor.execute(
-                    f"SELECT `cap_image_id` FROM `{CAP_TABLE}` WHERE `cap_image_id`=%s LIMIT 1",
-                    [cap_image_id],
-                )
-                exists_cap = cursor.fetchone() is not None
-                blob_path = _as_blob_path(image_path)
-                if exists_cap:
+        close_old_connections()
+        with _WRITEBACK_LOCK:
+            ensure_feature_path_columns(config)
+            with db_alias_session(alias, database=database) as session_alias:
+                conn = connections[session_alias]
+                with conn.cursor() as cursor:
                     cursor.execute(
-                        f"""
-                        UPDATE `{CAP_TABLE}`
-                        SET `fingerprint_image`=%s,
-                            `dataset_code`=%s
-                        WHERE `cap_image_id`=%s
-                        """,
-                        [blob_path, dataset_code, cap_image_id],
+                        f"SELECT `cap_image_id` FROM `{CAP_TABLE}` WHERE `cap_image_id`=%s LIMIT 1",
+                        [cap_image_id],
                     )
-                else:
-                    cursor.execute(
-                        f"""
-                        INSERT INTO `{CAP_TABLE}`
-                          (`cap_image_id`, `dataset_code`, `fingerprint_image`,
-                           `created_by`, `created_time`)
-                        VALUES (%s, %s, %s, %s, %s)
-                        """,
-                        [cap_image_id, dataset_code, blob_path, created_by or None, created_time],
-                    )
+                    exists_cap = cursor.fetchone() is not None
+                    if exists_cap:
+                        cursor.execute(
+                            f"""
+                            UPDATE `{CAP_TABLE}`
+                            SET `fingerprint_image`=%s,
+                                `fingerprint_url`=%s,
+                                `dataset_code`=%s
+                            WHERE `cap_image_id`=%s
+                            """,
+                            [blob_path, url_path, dataset_code, cap_image_id],
+                        )
+                    else:
+                        cursor.execute(
+                            f"""
+                            INSERT INTO `{CAP_TABLE}`
+                              (`cap_image_id`, `dataset_code`, `fingerprint_image`,
+                               `fingerprint_url`, `created_by`, `created_time`)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            """,
+                            [
+                                cap_image_id,
+                                dataset_code,
+                                blob_path,
+                                url_path,
+                                created_by or None,
+                                created_time,
+                            ],
+                        )
 
-                # Feature row (FK requires cap row first)
-                cursor.execute(
-                    f"SELECT `fp_feature_id` FROM `{FEATURE_TABLE}` WHERE `fp_image_id`=%s LIMIT 1",
-                    [cap_image_id],
-                )
-                feat_row = cursor.fetchone()
-                if feat_row:
                     cursor.execute(
-                        f"""
-                        UPDATE `{FEATURE_TABLE}`
-                        SET `feature_ara_data`=%s,
-                            `feature_neuro_data`=%s,
-                            `created_by`=COALESCE(`created_by`, %s)
-                        WHERE `fp_image_id`=%s
-                        """,
-                        [bidiso_path, neuiso_path, created_by or None, cap_image_id],
+                        f"SELECT `fp_feature_id` FROM `{FEATURE_TABLE}` WHERE `fp_image_id`=%s LIMIT 1",
+                        [cap_image_id],
                     )
-                else:
-                    cursor.execute(
-                        f"""
-                        INSERT INTO `{FEATURE_TABLE}`
-                          (`fp_feature_id`, `fp_image_id`,
-                           `feature_ara_data`, `feature_neuro_data`,
-                           `created_by`, `created_time`)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        """,
-                        [
-                            _new_feature_id(),
-                            cap_image_id,
-                            bidiso_path,
-                            neuiso_path,
-                            created_by or None,
-                            created_time,
-                        ],
-                    )
+                    feat_row = cursor.fetchone()
+                    if feat_row:
+                        cursor.execute(
+                            f"""
+                            UPDATE `{FEATURE_TABLE}`
+                            SET `feature_ara_data`=%s,
+                                `feature_neuro_data`=%s,
+                                `created_by`=COALESCE(`created_by`, %s)
+                            WHERE `fp_image_id`=%s
+                            """,
+                            [bidiso_path, neuiso_path, created_by or None, cap_image_id],
+                        )
+                    else:
+                        cursor.execute(
+                            f"""
+                            INSERT INTO `{FEATURE_TABLE}`
+                              (`fp_feature_id`, `fp_image_id`,
+                               `feature_ara_data`, `feature_neuro_data`,
+                               `created_by`, `created_time`)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            """,
+                            [
+                                _new_feature_id(),
+                                cap_image_id,
+                                bidiso_path,
+                                neuiso_path,
+                                created_by or None,
+                                created_time,
+                            ],
+                        )
             counters.updated += 1
     except (PathWritebackError, ExternalDbError) as exc:
         counters.failed += 1
@@ -336,8 +362,9 @@ def writeback_cap_and_feature(
         counters.failed += 1
         counters.errors.append(f"{cap_image_id}: {exc}"[:240])
         logger.warning("path writeback failed id=%s: %s", cap_image_id, exc, exc_info=True)
+    finally:
+        close_old_connections()
     return counters
-
 
 def writeback_import_sides(
     config: dict | None,

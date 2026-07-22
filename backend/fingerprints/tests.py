@@ -382,6 +382,7 @@ class FingerprintAPITestCase(TestCase):
                     cap_image_id VARCHAR(256) NOT NULL PRIMARY KEY,
                     dataset_code VARCHAR(32) NOT NULL,
                     fingerprint_image BLOB NULL,
+                    fingerprint_url VARCHAR(256) NULL,
                     created_by VARCHAR(20) NULL,
                     created_time DATETIME NULL
                 )
@@ -417,6 +418,7 @@ class FingerprintAPITestCase(TestCase):
         right = ImageInfo.objects.get(pk=pair.right_image_id)
 
         pwb._SCHEMA_ENSURED.clear()
+        pwb._SCHEMA_FAILED.clear()
         try:
             cfg = {
                 "enabled": True,
@@ -520,6 +522,7 @@ class PathWritebackUnitTestCase(TestCase):
                     cap_image_id VARCHAR(256) NOT NULL PRIMARY KEY,
                     dataset_code VARCHAR(32) NOT NULL,
                     fingerprint_image BLOB NULL,
+                    fingerprint_url VARCHAR(256) NULL,
                     created_by VARCHAR(20) NULL,
                     created_time DATETIME NULL
                 )
@@ -543,6 +546,7 @@ class PathWritebackUnitTestCase(TestCase):
         from fingerprints import path_writeback as pwb
 
         pwb._SCHEMA_ENSURED.clear()
+        pwb._SCHEMA_FAILED.clear()
         try:
             cfg = parse_path_writeback_config(
                 {"enabled": True, "db_alias": "default", "database": ""}

@@ -87,7 +87,7 @@ MinIO 下同样是相对路径对象键，前缀不变。
 
 | 目标 | 写入 |
 |------|------|
-| `ara_fp_analyst.T_CAP_FP_DATA` | `cap_image_id`=bmp stem；`dataset_code`=**`PK_5W`**；`fingerprint_image`=相对路径 `upload/...`（以 utf8 字节写入 longblob） |
+| `ara_fp_analyst.T_CAP_FP_DATA` | `cap_image_id`=bmp stem；`dataset_code`=**`PK_5W`**；`fingerprint_image`=相对路径 `upload/...`（utf8 写入 longblob）；同时写入 `fingerprint_url`（同路径字符串，便于查询） |
 | `ara_fp_analyst.T_FEATURE_RECORD` | `fp_image_id`=`cap_image_id`；`fp_feature_id`=32 位 hex；Bidiso→`feature_ara_data`；Neuiso→`feature_neuro_data`（`templates/...`） |
 
 说明：

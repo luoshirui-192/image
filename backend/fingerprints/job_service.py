@@ -55,52 +55,78 @@ def _dump_result_json(data: dict) -> str:
 
 
 def serialize_import_job(job: FingerprintImportJob) -> dict:
-    total = int(job.total_estimate or 0)
-    done = int(job.processed or 0)
-    if job.status == FingerprintImportJob.STATUS_COMPLETED:
-        percent = 100.0
-    elif total > 0:
-        percent = min(99.0, round(100.0 * done / total, 2))
-    else:
-        percent = 0.0
-    result = _parse_result_json(getattr(job, "result_json", None))
-    options = result.get("options") if isinstance(result.get("options"), dict) else {}
-    duplicate_report = result.get("duplicate_report")
-    return {
-        "id": job.id,
-        "zip_name": job.zip_name,
-        "status": job.status,
-        "algo_version": job.algo_version,
-        "skip_existing": bool(job.skip_existing),
-        "fail_on_duplicates": bool(options.get("fail_on_duplicates")),
-        "total_estimate": total,
-        "processed": done,
-        "succeeded": int(job.succeeded or 0),
-        "failed": int(job.failed or 0),
-        "skipped": int(job.skipped or 0),
-        "percent": percent,
-        "cancel_requested": bool(job.cancel_requested),
-        "message": job.message,
-        "last_error": job.last_error,
-        "duplicate_report": duplicate_report,
-        "library_bmp_reused": int(result.get("library_bmp_reused") or 0),
-        "writeback_updated": int(result.get("writeback_updated") or 0),
-        "writeback_inserted": int(
-            result.get("writeback_inserted") or result.get("writeback_updated") or 0
-        ),
-        "writeback_skipped": int(result.get("writeback_skipped") or 0),
-        "writeback_failed": int(result.get("writeback_failed") or 0),
-        "writeback_errors": result.get("writeback_errors") or [],
-        "path_writeback_enabled": bool(
-            isinstance(options.get("path_writeback"), dict)
-            and options["path_writeback"].get("enabled")
-        ),
-        "created_by": job.created_by,
-        "create_time": job.create_time.isoformat(sep=" ") if job.create_time else None,
-        "started_at": job.started_at.isoformat(sep=" ") if job.started_at else None,
-        "finished_at": job.finished_at.isoformat(sep=" ") if job.finished_at else None,
-        "updated_at": job.updated_at.isoformat(sep=" ") if job.updated_at else None,
-    }
+    def _fmt(dt) -> str | None:
+        if not dt:
+            return None
+        try:
+            return dt.isoformat(sep=" ")
+        except Exception:
+            return str(dt)
+
+    try:
+        total = int(job.total_estimate or 0)
+        done = int(job.processed or 0)
+        if job.status == FingerprintImportJob.STATUS_COMPLETED:
+            percent = 100.0
+        elif total > 0:
+            percent = min(99.0, round(100.0 * done / total, 2))
+        else:
+            percent = 0.0
+        result = _parse_result_json(getattr(job, "result_json", None))
+        options = result.get("options") if isinstance(result.get("options"), dict) else {}
+        wb_opt = options.get("path_writeback")
+        path_writeback_enabled = isinstance(wb_opt, dict) and bool(wb_opt.get("enabled"))
+        errors = result.get("writeback_errors") or []
+        if not isinstance(errors, list):
+            errors = [str(errors)]
+        return {
+            "id": job.id,
+            "zip_name": job.zip_name,
+            "status": job.status,
+            "algo_version": job.algo_version,
+            "skip_existing": bool(job.skip_existing),
+            "fail_on_duplicates": bool(options.get("fail_on_duplicates")),
+            "total_estimate": total,
+            "processed": done,
+            "succeeded": int(job.succeeded or 0),
+            "failed": int(job.failed or 0),
+            "skipped": int(job.skipped or 0),
+            "percent": percent,
+            "cancel_requested": bool(job.cancel_requested),
+            "message": job.message or "",
+            "last_error": job.last_error or "",
+            "duplicate_report": result.get("duplicate_report"),
+            "library_bmp_reused": int(result.get("library_bmp_reused") or 0),
+            "writeback_updated": int(result.get("writeback_updated") or 0),
+            "writeback_inserted": int(
+                result.get("writeback_inserted") or result.get("writeback_updated") or 0
+            ),
+            "writeback_skipped": int(result.get("writeback_skipped") or 0),
+            "writeback_failed": int(result.get("writeback_failed") or 0),
+            "writeback_errors": [str(x) for x in errors][:20],
+            "path_writeback_enabled": path_writeback_enabled,
+            "created_by": job.created_by or "",
+            "create_time": _fmt(job.create_time),
+            "started_at": _fmt(job.started_at),
+            "finished_at": _fmt(job.finished_at),
+            "updated_at": _fmt(job.updated_at),
+        }
+    except Exception as exc:
+        logger.exception("serialize_import_job failed job_id=%s", getattr(job, "id", None))
+        return {
+            "id": getattr(job, "id", None),
+            "status": getattr(job, "status", "failed"),
+            "message": f"任务序列化异常: {exc}",
+            "last_error": str(exc)[:500],
+            "percent": 0,
+            "processed": int(getattr(job, "processed", 0) or 0),
+            "total_estimate": int(getattr(job, "total_estimate", 0) or 0),
+            "succeeded": int(getattr(job, "succeeded", 0) or 0),
+            "failed": int(getattr(job, "failed", 0) or 0),
+            "skipped": int(getattr(job, "skipped", 0) or 0),
+            "path_writeback_enabled": False,
+            "writeback_errors": [str(exc)],
+        }
 
 
 def _staging_dir() -> Path:
@@ -280,7 +306,14 @@ def execute_import_job(job_id: int) -> None:
         try:
             path_writeback = parse_path_writeback_config(options.get("path_writeback"))
         except Exception as exc:
-            raise FingerprintImportError(f"路径写回配置无效: {exc}") from exc
+            _update_progress(
+                job_id,
+                status=FingerprintImportJob.STATUS_FAILED,
+                finished_at=timezone.now(),
+                message=f"路径写回配置无效: {exc}"[:500],
+                last_error=str(exc)[:500],
+            )
+            return
         base_result = _parse_result_json(job.result_json)
 
         work_dir = Path(tempfile.mkdtemp(prefix=f"fp_job_{job_id}_", dir=str(_staging_dir())))

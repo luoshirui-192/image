@@ -300,23 +300,43 @@ function stopPoll() {
     clearInterval(pollTimer.value)
     pollTimer.value = null
   }
+  pollInFlight.value = false
+  pollFailStreak.value = 0
+}
+
+const pollInFlight = ref(false)
+const pollFailStreak = ref(0)
+
+function normalizeImportJobPayload(payload) {
+  // request interceptor returns { code, message, data }
+  const data = payload?.data ?? payload
+  if (!data || typeof data !== 'object') return null
+  if (data.job && typeof data.job === 'object') return data.job
+  if (data.id != null || data.status != null) return data
+  return null
 }
 
 async function pollImportJob(jobId) {
-  if (jobId == null) {
+  if (jobId == null || jobId === '') {
     stopPoll()
     importing.value = false
     return
   }
+  if (pollInFlight.value) return
+  pollInFlight.value = true
   try {
     const res = await fetchFingerprintImportJobApi(jobId)
-    const job = res?.data
-    if (!job || typeof job !== 'object') {
-      stopPoll()
-      importing.value = false
-      ElMessage.error('导入进度接口返回异常')
+    const job = normalizeImportJobPayload(res)
+    if (!job) {
+      pollFailStreak.value += 1
+      if (pollFailStreak.value >= 3) {
+        stopPoll()
+        importing.value = false
+        ElMessage.error('导入进度接口连续返回异常，已停止轮询')
+      }
       return
     }
+    pollFailStreak.value = 0
     importJob.value = job
     const status = job.status
     if (status === 'completed' || status === 'failed' || status === 'cancelled') {
@@ -325,8 +345,16 @@ async function pollImportJob(jobId) {
       const dupTotal = Number(job.duplicate_report?.total || 0)
       if (dupTotal > 0) dupReportExpanded.value = true
       if (status === 'completed') {
-        if (dupTotal > 0) ElMessage.warning(job.message || `导入完成，发现 ${dupTotal} 项重复`)
-        else ElMessage.success(job.message || '导入完成')
+        const wbFail = Number(job.writeback_failed || 0)
+        if (wbFail > 0) {
+          ElMessage.warning(
+            job.message || `导入完成，但路径写回失败 ${wbFail} 条（见进度区）`,
+          )
+        } else if (dupTotal > 0) {
+          ElMessage.warning(job.message || `导入完成，发现 ${dupTotal} 项重复`)
+        } else {
+          ElMessage.success(job.message || '导入完成')
+        }
       } else if (status === 'failed') ElMessage.error(job.message || job.last_error || '导入失败')
       else ElMessage.warning(job.message || '已取消')
       await loadMeta()
@@ -334,9 +362,14 @@ async function pollImportJob(jobId) {
       if (selectedPairId.value) await loadCompare(selectedPairId.value)
     }
   } catch (err) {
-    stopPoll()
-    importing.value = false
-    ElMessage.error(err.message || '查询导入进度失败')
+    pollFailStreak.value += 1
+    if (pollFailStreak.value >= 3) {
+      stopPoll()
+      importing.value = false
+      ElMessage.error(err.message || '查询导入进度失败')
+    }
+  } finally {
+    pollInFlight.value = false
   }
 }
 
@@ -403,6 +436,7 @@ async function submitImport() {
     }
     importJob.value = job
     dupReportExpanded.value = false
+    pollFailStreak.value = 0
     ElMessage.success(
       pathWriteback
         ? `已启动导入（版本 ${ver}，含路径写回）`
@@ -410,7 +444,9 @@ async function submitImport() {
     )
     await pollImportJob(job.id)
     if (importing.value) {
-      pollTimer.value = setInterval(() => pollImportJob(job.id), 1500)
+      pollTimer.value = setInterval(() => {
+        pollImportJob(job.id)
+      }, 1500)
     }
   } catch (err) {
     importing.value = false
