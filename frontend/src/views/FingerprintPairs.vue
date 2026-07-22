@@ -329,10 +329,11 @@ async function pollImportJob(jobId) {
     const job = normalizeImportJobPayload(res)
     if (!job) {
       pollFailStreak.value += 1
-      if (pollFailStreak.value >= 3) {
+      // Keep last known progress visible; only stop after repeated bad payloads
+      if (pollFailStreak.value >= 5) {
         stopPoll()
         importing.value = false
-        ElMessage.error('导入进度接口连续返回异常，已停止轮询')
+        ElMessage.error('导入进度接口连续返回异常格式，已停止轮询（导入可能仍在后台进行）')
       }
       return
     }
@@ -346,9 +347,10 @@ async function pollImportJob(jobId) {
       if (dupTotal > 0) dupReportExpanded.value = true
       if (status === 'completed') {
         const wbFail = Number(job.writeback_failed || 0)
-        if (wbFail > 0) {
+        const wbOk = Number(job.writeback_inserted || job.writeback_updated || 0)
+        if (job.path_writeback_enabled && wbFail > 0) {
           ElMessage.warning(
-            job.message || `导入完成，但路径写回失败 ${wbFail} 条（见进度区）`,
+            job.message || `导入完成，路径写回成功 ${wbOk} / 失败 ${wbFail}（见进度区）`,
           )
         } else if (dupTotal > 0) {
           ElMessage.warning(job.message || `导入完成，发现 ${dupTotal} 项重复`)
@@ -363,10 +365,10 @@ async function pollImportJob(jobId) {
     }
   } catch (err) {
     pollFailStreak.value += 1
-    if (pollFailStreak.value >= 3) {
+    if (pollFailStreak.value >= 5) {
       stopPoll()
       importing.value = false
-      ElMessage.error(err.message || '查询导入进度失败')
+      ElMessage.error(err.message || '查询导入进度失败（导入可能仍在后台进行）')
     }
   } finally {
     pollInFlight.value = false

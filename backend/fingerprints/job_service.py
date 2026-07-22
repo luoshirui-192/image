@@ -76,6 +76,18 @@ def serialize_import_job(job: FingerprintImportJob) -> dict:
         options = result.get("options") if isinstance(result.get("options"), dict) else {}
         wb_opt = options.get("path_writeback")
         path_writeback_enabled = isinstance(wb_opt, dict) and bool(wb_opt.get("enabled"))
+        # Also treat as enabled when counters were written (options may be missing mid-job)
+        if not path_writeback_enabled and any(
+            result.get(k) not in (None, 0, [], "")
+            for k in (
+                "writeback_updated",
+                "writeback_inserted",
+                "writeback_failed",
+                "writeback_skipped",
+                "writeback_errors",
+            )
+        ):
+            path_writeback_enabled = True
         errors = result.get("writeback_errors") or []
         if not isinstance(errors, list):
             errors = [str(errors)]

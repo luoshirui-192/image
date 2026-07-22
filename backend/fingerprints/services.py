@@ -153,22 +153,28 @@ def _collect_writeback_sides(
         path = row.get("template_path") or ""
         if path:
             templates_by_side[side][info.layer_key] = path
-    # Fill from DB for skipped/reused template layers
+    # Fill from DB for skipped/reused template layers (newest first → setdefault keeps latest)
     for side_name in side_names:
-        for layer in FingerprintFeatureLayer.objects.filter(
-            pair_id=pair.id, side=side_name
-        ).only("layer_type", "template_path"):
+        layers = (
+            FingerprintFeatureLayer.objects.filter(pair_id=pair.id, side=side_name)
+            .only("layer_type", "template_path", "create_time", "id")
+            .order_by("-create_time", "-id")
+        )
+        for layer in layers:
             if layer.template_path:
                 templates_by_side[side_name].setdefault(layer.layer_type, layer.template_path)
 
     for idx, side_name in enumerate(side_names):
+        if idx >= len(samples):
+            break
         _person_id, stem, _files = samples[idx]
         image = ImageInfo.objects.filter(pk=image_ids[idx]).only("image_path").first()
+        image_path = (image.image_path if image else "") or ""
         tpl = templates_by_side.get(side_name) or {}
         sides_out.append(
             {
                 "cap_image_id": stem,
-                "image_path": image.image_path if image else "",
+                "image_path": image_path,
                 "bidiso_path": tpl.get("bidiso") or None,
                 "neuiso_path": tpl.get("neuiso") or None,
             }

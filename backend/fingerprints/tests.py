@@ -562,7 +562,7 @@ class PathWritebackUnitTestCase(TestCase):
             self.assertEqual(ok.updated, 1, ok.errors)
             self.assertEqual(ok.failed, 0)
 
-            # idempotent update
+            # idempotent update: missing neuiso must NOT wipe existing path
             ok2 = writeback_cap_and_feature(
                 cfg,
                 cap_image_id="9_right_thumb",
@@ -593,4 +593,13 @@ class PathWritebackUnitTestCase(TestCase):
             blob = blob.decode("utf-8")
         self.assertEqual(blob, "upload/20260101/1/a2.bmp")
         self.assertEqual(ara, "templates/20260101/a2.bidiso")
-        self.assertIsNone(neuro)
+        self.assertEqual(neuro, "templates/20260101/a.neuiso")
+
+    def test_normalize_relative_path(self):
+        from fingerprints.path_writeback import normalize_relative_path
+
+        self.assertEqual(
+            normalize_relative_path("data/image_db/upload/2026/a.bmp"),
+            "upload/2026/a.bmp",
+        )
+        self.assertEqual(normalize_relative_path(""), "")

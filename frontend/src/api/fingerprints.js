@@ -61,7 +61,8 @@ export function importFingerprintZipApi(
 }
 
 export function fetchFingerprintImportJobApi(id) {
-  return request.get(`/fingerprints/import-jobs/${id}/`)
+  // Polling handles its own errors; avoid duplicate global toasts.
+  return request.get(`/fingerprints/import-jobs/${id}/`, { skipGlobalError: true })
 }
 
 export function fetchFingerprintImportJobsApi(params = {}) {
