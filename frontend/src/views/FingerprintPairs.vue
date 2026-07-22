@@ -2,7 +2,13 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchImageBlob } from '@/api/images'
+import {
+  fetchImageBlob,
+  getBlobCatalogObjectApi,
+  listBlobCatalogConnectionsApi,
+  listBlobCatalogDatabasesApi,
+  listBlobCatalogObjectsApi,
+} from '@/api/images'
 import { useAuthStore } from '@/stores/auth'
 import {
   cancelFingerprintImportJobApi,
@@ -36,11 +42,171 @@ const importVersion = ref('1.0')
 const importFailOnDuplicates = ref(false)
 const dupReportExpanded = ref(false)
 
+const wbEnabled = ref(false)
+const wbLoading = ref(false)
+const wbConnections = ref([])
+const wbDatabases = ref([])
+const wbTables = ref([])
+const wbColumns = ref([])
+const wbConnectionKey = ref('')
+const wbDatabase = ref('')
+const wbTable = ref('')
+const wbPersonColumn = ref('')
+const wbFingerColumn = ref('')
+const wbImageColumn = ref('')
+const wbTemplateColumns = reactive({})
+
+const selectedWbConnection = computed(() =>
+  wbConnections.value.find((c) => connectionKey(c) === wbConnectionKey.value) || null,
+)
+
+const enabledLayerTypes = computed(() =>
+  (meta.layer_types || []).filter((t) => t.enabled !== false && t.enabled !== 0),
+)
+
 const dupReport = computed(() => importJob.value?.duplicate_report || null)
 const dupWarningRows = computed(() => {
   const list = dupReport.value?.warnings || []
   return list.slice(0, 50)
 })
+
+function connectionKey(conn) {
+  if (!conn) return ''
+  if (conn.connection_id != null) return `ext:${conn.connection_id}`
+  return `alias:${conn.alias || 'default'}`
+}
+
+function catalogParams() {
+  const conn = selectedWbConnection.value
+  if (!conn) return {}
+  if (conn.connection_id != null) return { connectionId: conn.connection_id }
+  return { dbAlias: conn.alias || 'default' }
+}
+
+function resetWritebackForm() {
+  wbEnabled.value = false
+  wbDatabases.value = []
+  wbTables.value = []
+  wbColumns.value = []
+  wbConnectionKey.value = ''
+  wbDatabase.value = ''
+  wbTable.value = ''
+  wbPersonColumn.value = ''
+  wbFingerColumn.value = ''
+  wbImageColumn.value = ''
+  Object.keys(wbTemplateColumns).forEach((k) => delete wbTemplateColumns[k])
+}
+
+async function ensureWbConnections() {
+  if (wbConnections.value.length) return
+  wbLoading.value = true
+  try {
+    const res = await listBlobCatalogConnectionsApi()
+    wbConnections.value = res.data || []
+    if (!wbConnectionKey.value && wbConnections.value.length) {
+      wbConnectionKey.value = connectionKey(wbConnections.value[0])
+    }
+  } catch (err) {
+    ElMessage.error(err.message || '加载数据库连接失败')
+  } finally {
+    wbLoading.value = false
+  }
+}
+
+async function loadWbDatabases() {
+  wbDatabases.value = []
+  wbTables.value = []
+  wbColumns.value = []
+  wbDatabase.value = ''
+  wbTable.value = ''
+  if (!selectedWbConnection.value) return
+  wbLoading.value = true
+  try {
+    const res = await listBlobCatalogDatabasesApi(catalogParams())
+    wbDatabases.value = res.data?.databases || []
+  } catch (err) {
+    ElMessage.error(err.message || '加载数据库失败')
+  } finally {
+    wbLoading.value = false
+  }
+}
+
+async function loadWbTables() {
+  wbTables.value = []
+  wbColumns.value = []
+  wbTable.value = ''
+  if (!wbDatabase.value) return
+  wbLoading.value = true
+  try {
+    const res = await listBlobCatalogObjectsApi({
+      ...catalogParams(),
+      database: wbDatabase.value,
+      objectType: 'table',
+    })
+    wbTables.value = res.data?.objects || []
+  } catch (err) {
+    ElMessage.error(err.message || '加载表失败')
+  } finally {
+    wbLoading.value = false
+  }
+}
+
+async function loadWbColumns() {
+  wbColumns.value = []
+  wbPersonColumn.value = ''
+  wbFingerColumn.value = ''
+  wbImageColumn.value = ''
+  Object.keys(wbTemplateColumns).forEach((k) => delete wbTemplateColumns[k])
+  if (!wbDatabase.value || !wbTable.value) return
+  wbLoading.value = true
+  try {
+    const res = await getBlobCatalogObjectApi(wbTable.value, {
+      ...catalogParams(),
+      database: wbDatabase.value,
+    })
+    wbColumns.value = res.data?.columns || []
+  } catch (err) {
+    ElMessage.error(err.message || '加载列失败')
+  } finally {
+    wbLoading.value = false
+  }
+}
+
+function buildPathWritebackPayload() {
+  if (!wbEnabled.value) return null
+  if (!wbDatabase.value || !wbTable.value || !wbPersonColumn.value || !wbFingerColumn.value) {
+    throw new Error('启用路径写回时请选择库、表、人员号列与指位列')
+  }
+  const templates = {}
+  for (const lt of enabledLayerTypes.value) {
+    const col = (wbTemplateColumns[lt.layer_key] || '').trim()
+    if (col) templates[lt.layer_key] = col
+  }
+  const imageCol = (wbImageColumn.value || '').trim()
+  if (!imageCol && !Object.keys(templates).length) {
+    throw new Error('请至少指定图像路径列或一个模板路径列')
+  }
+  const conn = selectedWbConnection.value
+  const payload = {
+    enabled: true,
+    database: wbDatabase.value,
+    table: wbTable.value,
+    match: {
+      person_id_column: wbPersonColumn.value,
+      finger_column: wbFingerColumn.value,
+    },
+    paths: {
+      image_column: imageCol || undefined,
+      templates,
+    },
+  }
+  if (conn?.connection_id != null) {
+    payload.connection_id = conn.connection_id
+  } else {
+    payload.db_alias = conn?.alias || 'default'
+  }
+  return payload
+}
 
 const typeDialogVisible = ref(false)
 const typeLoading = ref(false)
@@ -281,8 +447,28 @@ function openImportDialog() {
   importFile.value = null
   importVersion.value = '1.0'
   importFailOnDuplicates.value = false
+  resetWritebackForm()
   importDialogVisible.value = true
+  ensureWbConnections()
 }
+
+watch(wbEnabled, (on) => {
+  if (on) ensureWbConnections().then(() => {
+    if (wbConnectionKey.value && !wbDatabases.value.length) loadWbDatabases()
+  })
+})
+
+watch(wbConnectionKey, () => {
+  if (wbEnabled.value) loadWbDatabases()
+})
+
+watch(wbDatabase, () => {
+  if (wbEnabled.value) loadWbTables()
+})
+
+watch(wbTable, () => {
+  if (wbEnabled.value) loadWbColumns()
+})
 
 function dupTypeLabel(type) {
   const map = {
@@ -308,6 +494,13 @@ async function submitImport() {
     ElMessage.warning('请填写算法版本')
     return
   }
+  let pathWriteback = null
+  try {
+    pathWriteback = buildPathWritebackPayload()
+  } catch (err) {
+    ElMessage.warning(err.message || '路径写回配置不完整')
+    return
+  }
   importing.value = true
   importJob.value = null
   importDialogVisible.value = false
@@ -317,6 +510,7 @@ async function submitImport() {
       algo_version: ver,
       skip_existing: true,
       fail_on_duplicates: importFailOnDuplicates.value,
+      path_writeback: pathWriteback,
     })
     const job = res?.data?.job
     if (!job?.id) {
@@ -326,7 +520,11 @@ async function submitImport() {
     }
     importJob.value = job
     dupReportExpanded.value = false
-    ElMessage.success(`已启动导入（版本 ${ver}）：已有配对会合并新版本特征层`)
+    ElMessage.success(
+      pathWriteback
+        ? `已启动导入（版本 ${ver}，含路径写回）`
+        : `已启动导入（版本 ${ver}）：已有配对会合并新版本特征层`,
+    )
     await pollImportJob(job.id)
     if (importing.value) {
       pollTimer.value = setInterval(() => pollImportJob(job.id), 1500)
@@ -588,6 +786,20 @@ onBeforeUnmount(() => {
         <template v-if="importJob.library_bmp_reused">
           · 图库复用 bmp {{ importJob.library_bmp_reused }}
         </template>
+        <template v-if="importJob.path_writeback_enabled">
+          · 路径写回 更新 {{ importJob.writeback_updated || 0 }}
+          / 跳过 {{ importJob.writeback_skipped || 0 }}
+          / 失败 {{ importJob.writeback_failed || 0 }}
+        </template>
+      </div>
+      <div
+        v-if="importJob.path_writeback_enabled && (importJob.writeback_errors || []).length"
+        class="dup-report"
+      >
+        <div class="muted">写回错误样例：</div>
+        <ul class="wb-errors">
+          <li v-for="(err, idx) in (importJob.writeback_errors || []).slice(0, 8)" :key="idx">{{ err }}</li>
+        </ul>
       </div>
       <div v-if="dupReport && dupReport.total > 0" class="dup-report">
         <div class="dup-report-head">
@@ -765,12 +977,12 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Import dialog -->
-    <el-dialog v-model="importDialogVisible" title="导入 batmatch zip" width="480px">
+    <el-dialog v-model="importDialogVisible" title="导入 batmatch zip" width="640px">
       <p class="dialog-tip">
         同一配对再次导入时，若填写<strong>新的算法版本</strong>，会把该版本特征层合并进已有配对，用于版本对比；
         相同版本已存在的层会跳过。
       </p>
-      <el-form label-width="100px">
+      <el-form label-width="110px" v-loading="wbLoading">
         <el-form-item label="算法版本" required>
           <el-input v-model="importVersion" placeholder="例如 1.0 / 2.0 / bidiso-2024" />
         </el-form-item>
@@ -784,6 +996,71 @@ onBeforeUnmount(() => {
             发现左右同图 / 同名覆盖时中止导入
           </el-checkbox>
         </el-form-item>
+
+        <el-divider content-position="left">路径写回（可选）</el-divider>
+        <p class="dialog-tip">
+          导入成功后，把 MinIO 相对路径 UPDATE 到业务表；按文件名中的人员号 + 指位匹配行。
+        </p>
+        <el-form-item label="启用写回">
+          <el-switch v-model="wbEnabled" />
+        </el-form-item>
+        <template v-if="wbEnabled">
+          <el-form-item label="数据库连接" required>
+            <el-select v-model="wbConnectionKey" filterable placeholder="选择连接" style="width: 100%">
+              <el-option
+                v-for="conn in wbConnections"
+                :key="connectionKey(conn)"
+                :label="conn.label || conn.alias"
+                :value="connectionKey(conn)"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="数据库" required>
+            <el-select v-model="wbDatabase" filterable placeholder="选择库" style="width: 100%">
+              <el-option v-for="db in wbDatabases" :key="db.name" :label="db.name" :value="db.name" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="目标表" required>
+            <el-select v-model="wbTable" filterable placeholder="选择表" style="width: 100%">
+              <el-option
+                v-for="obj in wbTables"
+                :key="obj.name"
+                :label="obj.name"
+                :value="obj.name"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="人员号列" required>
+            <el-select v-model="wbPersonColumn" filterable clearable placeholder="匹配 personId" style="width: 100%">
+              <el-option v-for="col in wbColumns" :key="`p-${col.name}`" :label="col.name" :value="col.name" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="指位列" required>
+            <el-select v-model="wbFingerColumn" filterable clearable placeholder="匹配 right_index 等" style="width: 100%">
+              <el-option v-for="col in wbColumns" :key="`f-${col.name}`" :label="col.name" :value="col.name" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="图像路径列">
+            <el-select v-model="wbImageColumn" filterable clearable placeholder="写入 bmp 相对路径" style="width: 100%">
+              <el-option v-for="col in wbColumns" :key="`i-${col.name}`" :label="col.name" :value="col.name" />
+            </el-select>
+          </el-form-item>
+          <el-form-item
+            v-for="lt in enabledLayerTypes"
+            :key="`tpl-${lt.layer_key}`"
+            :label="`${lt.label || lt.layer_key} 路径`"
+          >
+            <el-select
+              v-model="wbTemplateColumns[lt.layer_key]"
+              filterable
+              clearable
+              :placeholder="`写入 ${lt.layer_key} 模板路径`"
+              style="width: 100%"
+            >
+              <el-option v-for="col in wbColumns" :key="`${lt.layer_key}-${col.name}`" :label="col.name" :value="col.name" />
+            </el-select>
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="importDialogVisible = false">取消</el-button>
@@ -942,6 +1219,12 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--el-border-color-lighter);
 }
 .muted { color: var(--el-text-color-secondary); font-size: 12px; }
+.wb-errors {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
 .filter-box {
   display: flex;
   flex-direction: column;

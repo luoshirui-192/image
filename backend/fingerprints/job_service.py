@@ -23,6 +23,7 @@ from fingerprints.duplicate_scan import (
     scan_zip_name_collisions,
 )
 from fingerprints.models import FingerprintImportJob
+from fingerprints.path_writeback import WritebackCounters, parse_path_writeback_config
 from fingerprints.services import FingerprintImportError, discover_pair_dirs, import_pair_directory
 from utils.db_time import fetch_db_now
 
@@ -83,6 +84,14 @@ def serialize_import_job(job: FingerprintImportJob) -> dict:
         "last_error": job.last_error,
         "duplicate_report": duplicate_report,
         "library_bmp_reused": int(result.get("library_bmp_reused") or 0),
+        "writeback_updated": int(result.get("writeback_updated") or 0),
+        "writeback_skipped": int(result.get("writeback_skipped") or 0),
+        "writeback_failed": int(result.get("writeback_failed") or 0),
+        "writeback_errors": result.get("writeback_errors") or [],
+        "path_writeback_enabled": bool(
+            isinstance(options.get("path_writeback"), dict)
+            and options["path_writeback"].get("enabled")
+        ),
         "created_by": job.created_by,
         "create_time": job.create_time.isoformat(sep=" ") if job.create_time else None,
         "started_at": job.started_at.isoformat(sep=" ") if job.started_at else None,
@@ -120,8 +129,12 @@ def create_import_job(
     skip_existing: bool = True,
     category_id: int | None = None,
     fail_on_duplicates: bool = False,
+    path_writeback: dict | None = None,
 ) -> FingerprintImportJob:
     now = fetch_db_now()
+    options: dict = {"fail_on_duplicates": bool(fail_on_duplicates)}
+    if path_writeback:
+        options["path_writeback"] = path_writeback
     job = FingerprintImportJob(
         zip_path=zip_path,
         zip_name=zip_name[:255],
@@ -132,9 +145,7 @@ def create_import_job(
         category_id=category_id,
         created_by=(created_by or "")[:100],
         message="排队中…",
-        result_json=_dump_result_json(
-            {"options": {"fail_on_duplicates": bool(fail_on_duplicates)}}
-        ),
+        result_json=_dump_result_json({"options": options}),
         create_time=now,
         updated_at=now,
     )
@@ -176,10 +187,13 @@ def _job_options(job: FingerprintImportJob) -> dict:
     return _parse_result_json(job.result_json).get("options") or {}
 
 
-def _import_one_pair(pair_dir: Path, job: FingerprintImportJob) -> tuple[str, str, list[dict], int]:
-    """Return (outcome, detail, warnings, library_bmp_reused)."""
+def _import_one_pair(
+    pair_dir: Path, job: FingerprintImportJob, path_writeback: dict | None
+) -> tuple[str, str, list[dict], int, WritebackCounters]:
+    """Return (outcome, detail, warnings, library_bmp_reused, writeback)."""
     close_old_connections()
     fail_on_pair = bool(_job_options(job).get("fail_on_duplicates"))
+    writeback = WritebackCounters()
     try:
         result = import_pair_directory(
             pair_dir,
@@ -189,13 +203,27 @@ def _import_one_pair(pair_dir: Path, job: FingerprintImportJob) -> tuple[str, st
             category_id=job.category_id,
             skip_existing=bool(job.skip_existing),
             fail_on_pair_same_bmp=fail_on_pair,
+            path_writeback=path_writeback,
         )
+        writeback = result.writeback or WritebackCounters()
         if result.skipped:
-            return "skipped", result.batch_name, list(result.warnings or []), int(result.library_bmp_reused or 0)
-        return "succeeded", result.batch_name, list(result.warnings or []), int(result.library_bmp_reused or 0)
+            return (
+                "skipped",
+                result.batch_name,
+                list(result.warnings or []),
+                int(result.library_bmp_reused or 0),
+                writeback,
+            )
+        return (
+            "succeeded",
+            result.batch_name,
+            list(result.warnings or []),
+            int(result.library_bmp_reused or 0),
+            writeback,
+        )
     except Exception as exc:
         logger.warning("fingerprint pair import failed dir=%s: %s", pair_dir, exc)
-        return "failed", f"{pair_dir.name}: {exc}"[:480], [], 0
+        return "failed", f"{pair_dir.name}: {exc}"[:480], [], 0, writeback
     finally:
         close_old_connections()
 
@@ -246,6 +274,10 @@ def execute_import_job(job_id: int) -> None:
 
         options = _job_options(job)
         fail_on_duplicates = bool(options.get("fail_on_duplicates"))
+        try:
+            path_writeback = parse_path_writeback_config(options.get("path_writeback"))
+        except Exception as exc:
+            raise FingerprintImportError(f"路径写回配置无效: {exc}") from exc
         base_result = _parse_result_json(job.result_json)
 
         work_dir = Path(tempfile.mkdtemp(prefix=f"fp_job_{job_id}_", dir=str(_staging_dir())))
@@ -289,12 +321,23 @@ def execute_import_job(job_id: int) -> None:
 
             succeeded = skipped = failed = processed = 0
             library_bmp_reused = 0
+            writeback_totals = WritebackCounters()
             workers = _import_workers()
             last_error = ""
             runtime_warnings: list[dict] = []
 
+            def _persist_writeback_stats() -> None:
+                base_result["writeback_updated"] = writeback_totals.updated
+                base_result["writeback_skipped"] = writeback_totals.skipped
+                base_result["writeback_failed"] = writeback_totals.failed
+                base_result["writeback_errors"] = list(writeback_totals.errors)
+
             def _handle_outcome(
-                outcome: str, detail: str, warnings: list[dict], reused: int
+                outcome: str,
+                detail: str,
+                warnings: list[dict],
+                reused: int,
+                wb: WritebackCounters,
             ) -> bool:
                 """Apply one pair result; return False if cancelled."""
                 nonlocal succeeded, skipped, failed, processed, last_error, library_bmp_reused
@@ -304,9 +347,7 @@ def execute_import_job(job_id: int) -> None:
                 if refreshed and refreshed.cancel_requested:
                     base_result["duplicate_report"] = dup_report.to_dict()
                     base_result["library_bmp_reused"] = library_bmp_reused
-                    if runtime_warnings:
-                        # append pair-level extras not already in pre-scan
-                        pass
+                    _persist_writeback_stats()
                     _update_progress(
                         job_id,
                         status=FingerprintImportJob.STATUS_CANCELLED,
@@ -322,6 +363,7 @@ def execute_import_job(job_id: int) -> None:
 
                 processed += 1
                 library_bmp_reused += reused
+                writeback_totals.merge(wb or WritebackCounters())
                 if warnings:
                     runtime_warnings.extend(warnings)
                 if outcome == "succeeded":
@@ -334,6 +376,7 @@ def execute_import_job(job_id: int) -> None:
 
                 if processed % 2 == 0 or processed == len(pair_dirs):
                     base_result["library_bmp_reused"] = library_bmp_reused
+                    _persist_writeback_stats()
                     _update_progress(
                         job_id,
                         processed=processed,
@@ -351,15 +394,20 @@ def execute_import_job(job_id: int) -> None:
 
             if workers <= 1:
                 for pair_dir in pair_dirs:
-                    outcome, detail, warnings, reused = _import_one_pair(pair_dir, job)
-                    if not _handle_outcome(outcome, detail, warnings, reused):
+                    outcome, detail, warnings, reused, wb = _import_one_pair(
+                        pair_dir, job, path_writeback
+                    )
+                    if not _handle_outcome(outcome, detail, warnings, reused, wb):
                         return
             else:
                 with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = {pool.submit(_import_one_pair, d, job): d for d in pair_dirs}
+                    futures = {
+                        pool.submit(_import_one_pair, d, job, path_writeback): d
+                        for d in pair_dirs
+                    }
                     for fut in as_completed(futures):
-                        outcome, detail, warnings, reused = fut.result()
-                        if not _handle_outcome(outcome, detail, warnings, reused):
+                        outcome, detail, warnings, reused, wb = fut.result()
+                        if not _handle_outcome(outcome, detail, warnings, reused, wb):
                             for pending in futures:
                                 pending.cancel()
                             return
@@ -371,11 +419,18 @@ def execute_import_job(job_id: int) -> None:
             # Keep pre-scan report as source of truth; note library reuse count
             base_result["duplicate_report"] = dup_report.to_dict()
             base_result["library_bmp_reused"] = library_bmp_reused
+            _persist_writeback_stats()
             msg = f"导入完成（成功 {succeeded} · 跳过 {skipped} · 失败 {failed}）"
             if dup_report.total:
                 msg += f"；{dup_report.summary_text()}"
             if library_bmp_reused:
                 msg += f"；图库复用 bmp {library_bmp_reused}"
+            if path_writeback:
+                msg += (
+                    f"；路径写回 更新 {writeback_totals.updated}"
+                    f" · 跳过 {writeback_totals.skipped}"
+                    f" · 失败 {writeback_totals.failed}"
+                )
 
             _update_progress(
                 job_id,

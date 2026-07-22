@@ -13,6 +13,7 @@ from fingerprints.job_service import (
 )
 from fingerprints.layer_config import list_layer_types, seed_default_layer_types
 from fingerprints.models import FingerprintFeatureLayer, FingerprintImportJob, FingerprintLayerType, FingerprintPair
+from fingerprints.path_writeback import PathWritebackError, parse_path_writeback_config
 from fingerprints.services import (
     FingerprintImportError,
     build_compare_payload,
@@ -192,6 +193,12 @@ class FingerprintPairImportZipView(APIView):
             category_id = None
 
         try:
+            path_writeback = parse_path_writeback_config(request.data.get("path_writeback"))
+        except (PathWritebackError, Exception) as exc:
+            # BlobMigrationError from validate_identifier also surfaces here
+            return error_response(f"路径写回配置无效: {exc}", code=4002, status=400)
+
+        try:
             zip_path = save_upload_to_staging(upload, filename=getattr(upload, "name", "upload.zip"))
             job = create_import_job(
                 zip_path=str(zip_path),
@@ -202,6 +209,7 @@ class FingerprintPairImportZipView(APIView):
                 skip_existing=skip_existing,
                 category_id=category_id,
                 fail_on_duplicates=fail_on_duplicates,
+                path_writeback=path_writeback,
             )
             kick_import_job_async(job.id)
         except Exception as exc:

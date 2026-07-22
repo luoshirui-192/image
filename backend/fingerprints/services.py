@@ -31,6 +31,7 @@ from fingerprints.layer_config import (
     version_color,
 )
 from fingerprints.models import FingerprintFeatureLayer, FingerprintPair
+from fingerprints.path_writeback import WritebackCounters, writeback_pair_paths
 from images.models import ImageInfo
 from images.services import DuplicateImageError, save_image_bytes
 from utils.db_time import fetch_db_now
@@ -63,6 +64,7 @@ class PairImportResult:
     pair_created: bool = False
     warnings: list[dict] = field(default_factory=list)
     library_bmp_reused: int = 0
+    writeback: WritebackCounters = field(default_factory=WritebackCounters)
 
 
 def compute_hash(content: bytes) -> str:
@@ -127,6 +129,42 @@ def _decode_and_cache(content: bytes, *, setlen: int, setang: int) -> tuple[int,
     return result.count, json.dumps(result.to_dict(), ensure_ascii=False, separators=(",", ":"))
 
 
+def _build_writeback_sides(
+    pair: FingerprintPair,
+    *,
+    samples: list[tuple[str, str, dict[str, Path]]],
+    layer_rows: list[dict],
+) -> list[dict]:
+    """Build left/right path payloads for optional business-table write-back."""
+    sides_out: list[dict] = []
+    side_names = ("left", "right")
+    image_ids = (pair.left_image_id, pair.right_image_id)
+    for idx, side_name in enumerate(side_names):
+        person_id = samples[idx][0]
+        image = ImageInfo.objects.filter(pk=image_ids[idx]).only("image_path").first()
+        template_paths: dict[str, str] = {}
+        for row in layer_rows:
+            if row.get("side") != side_name:
+                continue
+            info: LayerTypeInfo = row["layer_info"]
+            path = row.get("template_path") or ""
+            if path:
+                template_paths[info.layer_key] = path
+        for layer in FingerprintFeatureLayer.objects.filter(
+            pair_id=pair.id, side=side_name
+        ).only("layer_type", "template_path"):
+            if layer.template_path:
+                template_paths.setdefault(layer.layer_type, layer.template_path)
+        sides_out.append(
+            {
+                "person_id": person_id,
+                "image_path": image.image_path if image else None,
+                "template_paths": template_paths,
+            }
+        )
+    return sides_out
+
+
 def import_pair_directory(
     pair_dir: Path,
     *,
@@ -136,6 +174,7 @@ def import_pair_directory(
     category_id: int | None = None,
     skip_existing: bool = True,
     fail_on_pair_same_bmp: bool = False,
+    path_writeback: dict | None = None,
 ) -> PairImportResult:
     """
     Import one batmatch_out-style pair folder.
@@ -331,6 +370,21 @@ def import_pair_directory(
 
     total_layers = FingerprintFeatureLayer.objects.filter(pair_id=pair.id).count()
     layers_added = len(layer_rows)
+
+    writeback = WritebackCounters()
+    if path_writeback:
+        try:
+            sides = _build_writeback_sides(pair, samples=samples, layer_rows=layer_rows)
+            writeback = writeback_pair_paths(
+                path_writeback,
+                finger_position=finger_position,
+                sides=sides,
+            )
+        except Exception as exc:
+            logger.warning("path writeback pair failed dir=%s: %s", pair_dir.name, exc)
+            writeback.failed += 1
+            writeback.errors.append(f"{pair_dir.name}: {exc}"[:240])
+
     if layers_added == 0 and not pair_created:
         msg = f"already has version {algo_version}"
         if unknown_suffixes:
@@ -346,6 +400,7 @@ def import_pair_directory(
             pair_created=False,
             warnings=pair_warnings,
             library_bmp_reused=library_bmp_reused,
+            writeback=writeback,
         )
 
     msg = "created pair" if pair_created else f"merged version {algo_version}"
@@ -355,6 +410,11 @@ def import_pair_directory(
         msg += f"; library bmp reused={library_bmp_reused}"
     if pair_warnings:
         msg += f"; warnings={len(pair_warnings)}"
+    if path_writeback:
+        msg += (
+            f"; writeback updated={writeback.updated}"
+            f" skipped={writeback.skipped} failed={writeback.failed}"
+        )
     return PairImportResult(
         pair_id=pair.id,
         batch_name=batch_name,
@@ -366,6 +426,7 @@ def import_pair_directory(
         pair_created=pair_created,
         warnings=pair_warnings,
         library_bmp_reused=library_bmp_reused,
+        writeback=writeback,
     )
 
 

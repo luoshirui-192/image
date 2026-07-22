@@ -373,3 +373,172 @@ class FingerprintAPITestCase(TestCase):
         detail = self.client.get(f"/api/fingerprints/import-jobs/{job_id}/")
         report = detail.data["data"]["duplicate_report"]
         self.assertGreaterEqual(report["blocking_count"], 1)
+
+    def test_path_writeback_updates_business_table(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS person_finger (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    person_id VARCHAR(64) NOT NULL,
+                    finger_code VARCHAR(40) NOT NULL,
+                    image_path VARCHAR(500) NOT NULL DEFAULT '',
+                    bidiso_path VARCHAR(500) NOT NULL DEFAULT '',
+                    neuiso_path VARCHAR(500) NOT NULL DEFAULT ''
+                )
+                """
+            )
+            cursor.execute(
+                "DELETE FROM person_finger"
+            )
+            cursor.execute(
+                "INSERT INTO person_finger (person_id, finger_code) VALUES ('100001', 'right_index')"
+            )
+            cursor.execute(
+                "INSERT INTO person_finger (person_id, finger_code) VALUES ('100002', 'right_index')"
+            )
+
+        writeback = {
+            "enabled": True,
+            "db_alias": "default",
+            "table": "person_finger",
+            "match": {
+                "person_id_column": "person_id",
+                "finger_column": "finger_code",
+            },
+            "paths": {
+                "image_column": "image_path",
+                "templates": {"bidiso": "bidiso_path", "neuiso": "neuiso_path"},
+            },
+        }
+        zip_bytes = make_pair_zip()
+        upload = SimpleUploadedFile("wb.zip", zip_bytes, content_type="application/zip")
+        res = self.client.post(
+            "/api/fingerprints/pairs/import-zip/",
+            {
+                "file": upload,
+                "algo_version": "1.0",
+                "path_writeback": __import__("json").dumps(writeback),
+            },
+            format="multipart",
+        )
+        self.assertIn(res.status_code, {200, 202}, res.data)
+        job = self._wait_job(res.data["data"]["job"]["id"])
+        self.assertEqual(job.status, "completed", job.message)
+
+        detail = self.client.get(f"/api/fingerprints/import-jobs/{job.id}/")
+        self.assertTrue(detail.data["data"]["path_writeback_enabled"])
+        self.assertGreaterEqual(detail.data["data"]["writeback_updated"], 2)
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT person_id, image_path, bidiso_path, neuiso_path FROM person_finger ORDER BY person_id"
+            )
+            rows = cursor.fetchall()
+        self.assertEqual(len(rows), 2)
+        for person_id, image_path, bidiso_path, neuiso_path in rows:
+            self.assertTrue(str(image_path).startswith("upload/"), image_path)
+            self.assertTrue(str(bidiso_path).startswith("templates/"), bidiso_path)
+            self.assertTrue(str(neuiso_path).startswith("templates/"), neuiso_path)
+            self.assertIn(person_id, {"100001", "100002"})
+
+    def test_path_writeback_invalid_config_rejected(self):
+        zip_bytes = make_pair_zip()
+        upload = SimpleUploadedFile("badwb.zip", zip_bytes, content_type="application/zip")
+        bad = {
+            "enabled": True,
+            "table": "person_finger;drop",
+            "match": {"person_id_column": "person_id", "finger_column": "finger"},
+            "paths": {"image_column": "image_path"},
+        }
+        res = self.client.post(
+            "/api/fingerprints/pairs/import-zip/",
+            {
+                "file": upload,
+                "algo_version": "1.0",
+                "path_writeback": __import__("json").dumps(bad),
+            },
+            format="multipart",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertNotEqual(res.data["code"], 0)
+
+
+class PathWritebackUnitTestCase(TestCase):
+    def test_parse_disabled(self):
+        from fingerprints.path_writeback import parse_path_writeback_config
+
+        self.assertIsNone(parse_path_writeback_config(None))
+        self.assertIsNone(parse_path_writeback_config({"enabled": False}))
+
+    def test_parse_enabled_normalized(self):
+        from fingerprints.path_writeback import parse_path_writeback_config
+
+        cfg = parse_path_writeback_config(
+            {
+                "enabled": True,
+                "db_alias": "default",
+                "table": "person_finger",
+                "match": {
+                    "person_id_column": "person_id",
+                    "finger_column": "finger_code",
+                },
+                "paths": {
+                    "image_column": "image_path",
+                    "templates": {"bidiso": "bidiso_path"},
+                },
+            }
+        )
+        self.assertEqual(cfg["table"], "person_finger")
+        self.assertEqual(cfg["paths"]["templates"]["bidiso"], "bidiso_path")
+
+    def test_writeback_side_updates_and_skips(self):
+        from fingerprints.path_writeback import parse_path_writeback_config, writeback_side_paths
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS wb_unit (
+                    person_id VARCHAR(64) NOT NULL,
+                    finger_code VARCHAR(40) NOT NULL,
+                    image_path VARCHAR(500) NOT NULL DEFAULT ''
+                )
+                """
+            )
+            cursor.execute("DELETE FROM wb_unit")
+            cursor.execute(
+                "INSERT INTO wb_unit (person_id, finger_code) VALUES ('9', 'right_thumb')"
+            )
+
+        cfg = parse_path_writeback_config(
+            {
+                "enabled": True,
+                "db_alias": "default",
+                "table": "wb_unit",
+                "match": {
+                    "person_id_column": "person_id",
+                    "finger_column": "finger_code",
+                },
+                "paths": {"image_column": "image_path"},
+            }
+        )
+        ok = writeback_side_paths(
+            cfg,
+            person_id="9",
+            finger_position="right_thumb",
+            image_path="upload/20260101/1/a.bmp",
+        )
+        self.assertEqual(ok.updated, 1)
+        self.assertEqual(ok.skipped, 0)
+
+        miss = writeback_side_paths(
+            cfg,
+            person_id="missing",
+            finger_position="right_thumb",
+            image_path="upload/x.bmp",
+        )
+        self.assertEqual(miss.skipped, 1)
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT image_path FROM wb_unit WHERE person_id='9'")
+            self.assertEqual(cursor.fetchone()[0], "upload/20260101/1/a.bmp")

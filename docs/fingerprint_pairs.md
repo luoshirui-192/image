@@ -76,10 +76,43 @@ MinIO 下同样是相对路径对象键，前缀不变。
 - `GET /api/fingerprints/layer-types/` — 动态勾选配置
 - `POST /api/fingerprints/layer-types/` — 管理员新增特征类型
 - `PATCH /api/fingerprints/layer-types/{id}/` — 管理员更新（启用/颜色/解码参数等）
-- `POST /api/fingerprints/pairs/import-zip/` — 导入 zip（`algo_version`；`fail_on_duplicates=1` 严格模式；同配对新版本合并层）
-- `GET /api/fingerprints/import-jobs/{id}/` — 任务进度，含 `duplicate_report`
+- `POST /api/fingerprints/pairs/import-zip/` — 导入 zip（`algo_version`；`fail_on_duplicates=1` 严格模式；同配对新版本合并层；可选 `path_writeback`）
+- `GET /api/fingerprints/import-jobs/{id}/` — 任务进度，含 `duplicate_report`；启用写回时含 `writeback_updated` / `writeback_skipped` / `writeback_failed`
 - `GET /api/fingerprints/pairs/` — 列表筛选
 - `GET /api/fingerprints/pairs/{id}/compare/` — 对比数据（含 `available_algo_versions` / 各层 `color`）
+
+## 路径写回（可选）
+
+导入 batmatch zip 时，可在界面开启「路径写回」，或在 `path_writeback` 字段传入 JSON。行为：
+
+1. 仍按原流程写入 MinIO + `image_info` / `fingerprint_*`
+2. 额外对业务表执行 `UPDATE`，只填**相对路径字符串**（`upload/...`、`templates/...`）
+3. 行匹配固定为：bmp 文件名中的 **personId + 指位**（如 `100001_right_index.bmp` → `person_id=100001` 且 `finger=right_index`）
+4. 匹配不到的行记为跳过，不中止整包导入
+
+示例：
+
+```json
+{
+  "enabled": true,
+  "connection_id": 3,
+  "database": "biz_db",
+  "table": "person_finger",
+  "match": {
+    "person_id_column": "person_id",
+    "finger_column": "finger_code"
+  },
+  "paths": {
+    "image_column": "image_path",
+    "templates": {
+      "bidiso": "bidiso_path",
+      "neuiso": "neuiso_path"
+    }
+  }
+}
+```
+
+也可用 `db_alias`（如 `default`）代替 `connection_id`。未映射的模板后缀不会写回。
 
 ## 扩展特征类型
 
@@ -101,4 +134,4 @@ POST /api/fingerprints/layer-types/
 
 ## 非目标（本期不做）
 
-bmp→模板提取引擎、Neurotec/ISOTemplateView 集成、嵌入式固件。
+bmp→模板提取引擎、Neurotec/ISOTemplateView 集成、嵌入式固件；通用批量上传到任意表；INSERT 新业务行；zip 清单映射。
