@@ -8,7 +8,7 @@ from pathlib import Path
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.contrib.auth.hashers import make_password
-from django.db import connection
+from django.db import connection, connections
 from django.test import TestCase, override_settings
 from PIL import Image
 from rest_framework.test import APIClient
@@ -378,55 +378,105 @@ class FingerprintAPITestCase(TestCase):
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                CREATE TABLE IF NOT EXISTS person_finger (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    image_path VARCHAR(500) NOT NULL DEFAULT '',
-                    remark VARCHAR(200) NOT NULL DEFAULT ''
+                CREATE TABLE IF NOT EXISTS T_CAP_FP_DATA (
+                    cap_image_id VARCHAR(256) NOT NULL PRIMARY KEY,
+                    dataset_code VARCHAR(32) NOT NULL,
+                    fingerprint_image BLOB NULL,
+                    created_by VARCHAR(20) NULL,
+                    created_time DATETIME NULL
                 )
                 """
             )
-            cursor.execute("DELETE FROM person_finger")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS T_FEATURE_RECORD (
+                    fp_feature_id VARCHAR(32) NOT NULL PRIMARY KEY,
+                    fp_image_id VARCHAR(256) NOT NULL,
+                    feature_ara_data VARCHAR(500) NULL,
+                    feature_neuro_data VARCHAR(500) NULL,
+                    created_by VARCHAR(16) NULL,
+                    created_time DATETIME NULL
+                )
+                """
+            )
+            cursor.execute("DELETE FROM T_FEATURE_RECORD")
+            cursor.execute("DELETE FROM T_CAP_FP_DATA")
 
-        writeback = {
-            "enabled": True,
-            "db_alias": "default",
-            "table": "person_finger",
-            "paths": {"image_column": "image_path"},
-        }
         zip_bytes = make_pair_zip()
-        upload = SimpleUploadedFile("wb.zip", zip_bytes, content_type="application/zip")
-        res = self.client.post(
-            "/api/fingerprints/pairs/import-zip/",
-            {
-                "file": upload,
-                "algo_version": "1.0",
-                "path_writeback": __import__("json").dumps(writeback),
-            },
-            format="multipart",
-        )
-        self.assertIn(res.status_code, {200, 202}, res.data)
-        job = self._wait_job(res.data["data"]["job"]["id"])
+        job = self._import_zip_async(zip_bytes, name="base.zip")
         self.assertEqual(job.status, "completed", job.message)
 
-        detail = self.client.get(f"/api/fingerprints/import-jobs/{job.id}/")
-        self.assertTrue(detail.data["data"]["path_writeback_enabled"])
-        self.assertGreaterEqual(detail.data["data"]["writeback_inserted"], 2)
+        from fingerprints.models import FingerprintPair
+        from fingerprints.path_writeback import writeback_import_sides
+        from fingerprints import path_writeback as pwb
+        from images.models import ImageInfo
+
+        pair = FingerprintPair.objects.filter(is_delete=0).first()
+        self.assertIsNotNone(pair)
+        left = ImageInfo.objects.get(pk=pair.left_image_id)
+        right = ImageInfo.objects.get(pk=pair.right_image_id)
+
+        pwb._SCHEMA_ENSURED.clear()
+        try:
+            cfg = {
+                "enabled": True,
+                "db_alias": "default",
+                "database": "",
+                "dataset_code": "PK_5W",
+            }
+            wb = writeback_import_sides(
+                cfg,
+                [
+                    {
+                        "cap_image_id": "100001_right_index",
+                        "image_path": left.image_path,
+                        "bidiso_path": "templates/20260101/a.bidiso",
+                        "neuiso_path": "templates/20260101/a.neuiso",
+                    },
+                    {
+                        "cap_image_id": "100002_right_index",
+                        "image_path": right.image_path,
+                        "bidiso_path": "templates/20260101/b.bidiso",
+                        "neuiso_path": "templates/20260101/b.neuiso",
+                    },
+                ],
+                created_by="fpuser",
+            )
+        finally:
+            pwb._SCHEMA_ENSURED.clear()
+
+        self.assertEqual(wb.failed, 0, wb.errors)
+        self.assertEqual(wb.updated, 2)
 
         with connection.cursor() as cursor:
-            cursor.execute("SELECT image_path, remark FROM person_finger ORDER BY id")
-            rows = cursor.fetchall()
-        self.assertEqual(len(rows), 2)
-        for image_path, remark in rows:
-            self.assertTrue(str(image_path).startswith("upload/"), image_path)
-            self.assertEqual(remark, "")
+            cursor.execute(
+                "SELECT cap_image_id, dataset_code, fingerprint_image FROM T_CAP_FP_DATA ORDER BY cap_image_id"
+            )
+            caps = cursor.fetchall()
+            cursor.execute(
+                "SELECT fp_image_id, feature_ara_data, feature_neuro_data FROM T_FEATURE_RECORD ORDER BY fp_image_id"
+            )
+            feats = cursor.fetchall()
+        self.assertEqual(len(caps), 2)
+        self.assertEqual(caps[0][0], "100001_right_index")
+        self.assertEqual(caps[0][1], "PK_5W")
+        blob0 = caps[0][2]
+        if isinstance(blob0, memoryview):
+            blob0 = blob0.tobytes()
+        if isinstance(blob0, bytes):
+            blob0 = blob0.decode("utf-8")
+        self.assertTrue(str(blob0).startswith("upload/"), blob0)
+        self.assertEqual(len(feats), 2)
+        self.assertEqual(feats[0][0], "100001_right_index")
+        self.assertTrue(str(feats[0][1]).startswith("templates/"))
+        self.assertTrue(str(feats[0][2]).startswith("templates/"))
 
     def test_path_writeback_invalid_config_rejected(self):
         zip_bytes = make_pair_zip()
         upload = SimpleUploadedFile("badwb.zip", zip_bytes, content_type="application/zip")
         bad = {
             "enabled": True,
-            "table": "person_finger;drop",
-            "paths": {"image_column": "image_path"},
+            "connection_id": "not-a-number",
         }
         res = self.client.post(
             "/api/fingerprints/pairs/import-zip/",
@@ -449,52 +499,94 @@ class PathWritebackUnitTestCase(TestCase):
         self.assertIsNone(parse_path_writeback_config({"enabled": False}))
 
     def test_parse_enabled_normalized(self):
-        from fingerprints.path_writeback import parse_path_writeback_config
+        from fingerprints.path_writeback import DEFAULT_DATASET_CODE, parse_path_writeback_config
 
         cfg = parse_path_writeback_config(
             {
                 "enabled": True,
                 "db_alias": "default",
-                "table": "person_finger",
-                "paths": {"image_column": "image_path"},
             }
         )
-        self.assertEqual(cfg["table"], "person_finger")
-        self.assertEqual(cfg["paths"]["image_column"], "image_path")
+        self.assertEqual(cfg["dataset_code"], DEFAULT_DATASET_CODE)
+        self.assertEqual(cfg["database"], "ara_fp_analyst")
 
-    def test_insert_image_path_row(self):
-        from fingerprints.path_writeback import insert_image_path_row, parse_path_writeback_config
+    def test_writeback_cap_and_feature(self):
+        from fingerprints.path_writeback import parse_path_writeback_config, writeback_cap_and_feature
 
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                CREATE TABLE IF NOT EXISTS wb_unit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    image_path VARCHAR(500) NOT NULL DEFAULT '',
-                    extra VARCHAR(50) NOT NULL DEFAULT ''
+                CREATE TABLE IF NOT EXISTS T_CAP_FP_DATA (
+                    cap_image_id VARCHAR(256) NOT NULL PRIMARY KEY,
+                    dataset_code VARCHAR(32) NOT NULL,
+                    fingerprint_image BLOB NULL,
+                    created_by VARCHAR(20) NULL,
+                    created_time DATETIME NULL
                 )
                 """
             )
-            cursor.execute("DELETE FROM wb_unit")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS T_FEATURE_RECORD (
+                    fp_feature_id VARCHAR(32) NOT NULL PRIMARY KEY,
+                    fp_image_id VARCHAR(256) NOT NULL,
+                    feature_ara_data VARCHAR(500) NULL,
+                    feature_neuro_data VARCHAR(500) NULL,
+                    created_by VARCHAR(16) NULL,
+                    created_time DATETIME NULL
+                )
+                """
+            )
+            cursor.execute("DELETE FROM T_FEATURE_RECORD")
+            cursor.execute("DELETE FROM T_CAP_FP_DATA")
 
-        cfg = parse_path_writeback_config(
-            {
-                "enabled": True,
-                "db_alias": "default",
-                "table": "wb_unit",
-                "paths": {"image_column": "image_path"},
-            }
-        )
-        ok = insert_image_path_row(cfg, image_path="upload/20260101/1/a.bmp")
-        self.assertEqual(ok.updated, 1)
-        self.assertEqual(ok.skipped, 0)
+        from fingerprints import path_writeback as pwb
 
-        empty = insert_image_path_row(cfg, image_path="")
-        self.assertEqual(empty.skipped, 1)
+        pwb._SCHEMA_ENSURED.clear()
+        try:
+            cfg = parse_path_writeback_config(
+                {"enabled": True, "db_alias": "default", "database": ""}
+            )
+            ok = writeback_cap_and_feature(
+                cfg,
+                cap_image_id="9_right_thumb",
+                image_path="upload/20260101/1/a.bmp",
+                bidiso_path="templates/20260101/a.bidiso",
+                neuiso_path="templates/20260101/a.neuiso",
+                created_by="tester",
+            )
+            self.assertEqual(ok.updated, 1, ok.errors)
+            self.assertEqual(ok.failed, 0)
+
+            # idempotent update
+            ok2 = writeback_cap_and_feature(
+                cfg,
+                cap_image_id="9_right_thumb",
+                image_path="upload/20260101/1/a2.bmp",
+                bidiso_path="templates/20260101/a2.bidiso",
+                neuiso_path=None,
+                created_by="tester",
+            )
+            self.assertEqual(ok2.updated, 1, ok2.errors)
+        finally:
+            pwb._SCHEMA_ENSURED.clear()
 
         with connection.cursor() as cursor:
-            cursor.execute("SELECT image_path, extra FROM wb_unit")
-            rows = cursor.fetchall()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0][0], "upload/20260101/1/a.bmp")
-        self.assertEqual(rows[0][1], "")
+            cursor.execute(
+                "SELECT dataset_code, fingerprint_image FROM T_CAP_FP_DATA WHERE cap_image_id=%s",
+                ["9_right_thumb"],
+            )
+            ds, blob = cursor.fetchone()
+            cursor.execute(
+                "SELECT feature_ara_data, feature_neuro_data FROM T_FEATURE_RECORD WHERE fp_image_id=%s",
+                ["9_right_thumb"],
+            )
+            ara, neuro = cursor.fetchone()
+        self.assertEqual(ds, "PK_5W")
+        if isinstance(blob, memoryview):
+            blob = blob.tobytes()
+        if isinstance(blob, bytes):
+            blob = blob.decode("utf-8")
+        self.assertEqual(blob, "upload/20260101/1/a2.bmp")
+        self.assertEqual(ara, "templates/20260101/a2.bidiso")
+        self.assertIsNone(neuro)

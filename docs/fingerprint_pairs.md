@@ -83,30 +83,28 @@ MinIO 下同样是相对路径对象键，前缀不变。
 
 ## 路径写回（可选）
 
-导入 batmatch zip 时，可在界面开启「路径写回」，或在 `path_writeback` 字段传入 JSON。行为：
+导入 batmatch zip 时可开启「路径写回」。目标固定为业务库：
 
-1. 仍按原流程写入 MinIO + `image_info` / `fingerprint_*`
-2. **每张 bmp** 对业务表执行一次 `INSERT`，只填你指定的**图像路径列**
-3. 其它业务列不写（保持默认/空），之后可用界面或 SQL 自行补全
-4. 单条写回失败不中止整包导入
+| 目标 | 写入 |
+|------|------|
+| `ara_fp_analyst.T_CAP_FP_DATA` | `cap_image_id`=bmp stem；`dataset_code`=**`PK_5W`**；`fingerprint_image`=相对路径 `upload/...`（以 utf8 字节写入 longblob） |
+| `ara_fp_analyst.T_FEATURE_RECORD` | `fp_image_id`=`cap_image_id`；`fp_feature_id`=32 位 hex；Bidiso→`feature_ara_data`；Neuiso→`feature_neuro_data`（`templates/...`） |
 
-示例：
+说明：
+
+1. 仍先写 MinIO + 本系统 `image_info` / `fingerprint_*`
+2. 导入对话框只需选择能访问 `ara_fp_analyst` 的数据库连接
+3. `feature_ara_data` / `feature_neuro_data` 原为 int 分数字段，首次写回时会自动 `ALTER` 为 `varchar(500)`（也可手工执行 [`sql/alter_t_feature_record_path_columns.sql`](../sql/alter_t_feature_record_path_columns.sql)）
+4. 同一 `cap_image_id` 再次导入会更新路径，不重复插主键冲突行
 
 ```json
 {
   "enabled": true,
   "connection_id": 3,
-  "database": "biz_db",
-  "table": "person_finger",
-  "paths": {
-    "image_column": "image_path"
-  }
+  "database": "ara_fp_analyst",
+  "dataset_code": "PK_5W"
 }
 ```
-
-也可用 `db_alias`（如 `default`）代替 `connection_id`。路径值为相对路径（如 `upload/20260722/2/uuid.bmp`），不含 MinIO bucket 前缀。
-
-一对 zip（左右两张图）默认插入 **2 行**。
 ## 扩展特征类型
 
 管理员调用：

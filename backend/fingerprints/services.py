@@ -31,7 +31,7 @@ from fingerprints.layer_config import (
     version_color,
 )
 from fingerprints.models import FingerprintFeatureLayer, FingerprintPair
-from fingerprints.path_writeback import WritebackCounters, writeback_image_paths
+from fingerprints.path_writeback import WritebackCounters, writeback_import_sides
 from images.models import ImageInfo
 from images.services import DuplicateImageError, save_image_bytes
 from utils.db_time import fetch_db_now
@@ -129,14 +129,51 @@ def _decode_and_cache(content: bytes, *, setlen: int, setang: int) -> tuple[int,
     return result.count, json.dumps(result.to_dict(), ensure_ascii=False, separators=(",", ":"))
 
 
-def _collect_pair_image_paths(pair: FingerprintPair) -> list[str]:
-    """Return left/right image relative paths for optional business-table INSERT."""
-    paths: list[str] = []
-    for image_id in (pair.left_image_id, pair.right_image_id):
-        image = ImageInfo.objects.filter(pk=image_id).only("image_path").first()
-        if image and image.image_path:
-            paths.append(image.image_path)
-    return paths
+def _collect_writeback_sides(
+    pair: FingerprintPair,
+    *,
+    samples: list[tuple[str, str, dict[str, Path]]],
+    layer_rows: list[dict],
+) -> list[dict]:
+    """
+    Build per-sample payloads for ara_fp_analyst write-back.
+
+    cap_image_id = bmp stem (shared with T_FEATURE_RECORD.fp_image_id)
+    """
+    sides_out: list[dict] = []
+    side_names = ("left", "right")
+    image_ids = (pair.left_image_id, pair.right_image_id)
+
+    templates_by_side: dict[str, dict[str, str]] = {"left": {}, "right": {}}
+    for row in layer_rows:
+        side = row.get("side")
+        if side not in templates_by_side:
+            continue
+        info: LayerTypeInfo = row["layer_info"]
+        path = row.get("template_path") or ""
+        if path:
+            templates_by_side[side][info.layer_key] = path
+    # Fill from DB for skipped/reused template layers
+    for side_name in side_names:
+        for layer in FingerprintFeatureLayer.objects.filter(
+            pair_id=pair.id, side=side_name
+        ).only("layer_type", "template_path"):
+            if layer.template_path:
+                templates_by_side[side_name].setdefault(layer.layer_type, layer.template_path)
+
+    for idx, side_name in enumerate(side_names):
+        _person_id, stem, _files = samples[idx]
+        image = ImageInfo.objects.filter(pk=image_ids[idx]).only("image_path").first()
+        tpl = templates_by_side.get(side_name) or {}
+        sides_out.append(
+            {
+                "cap_image_id": stem,
+                "image_path": image.image_path if image else "",
+                "bidiso_path": tpl.get("bidiso") or None,
+                "neuiso_path": tpl.get("neuiso") or None,
+            }
+        )
+    return sides_out
 
 
 def import_pair_directory(
@@ -348,9 +385,10 @@ def import_pair_directory(
     writeback = WritebackCounters()
     if path_writeback:
         try:
-            writeback = writeback_image_paths(
+            writeback = writeback_import_sides(
                 path_writeback,
-                _collect_pair_image_paths(pair),
+                _collect_writeback_sides(pair, samples=samples, layer_rows=layer_rows),
+                created_by=upload_user,
             )
         except Exception as exc:
             logger.warning("path writeback pair failed dir=%s: %s", pair_dir.name, exc)

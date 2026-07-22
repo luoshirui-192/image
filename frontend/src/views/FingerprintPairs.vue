@@ -4,10 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   fetchImageBlob,
-  getBlobCatalogObjectApi,
   listBlobCatalogConnectionsApi,
-  listBlobCatalogDatabasesApi,
-  listBlobCatalogObjectsApi,
 } from '@/api/images'
 import { useAuthStore } from '@/stores/auth'
 import {
@@ -45,13 +42,7 @@ const dupReportExpanded = ref(false)
 const wbEnabled = ref(false)
 const wbLoading = ref(false)
 const wbConnections = ref([])
-const wbDatabases = ref([])
-const wbTables = ref([])
-const wbColumns = ref([])
 const wbConnectionKey = ref('')
-const wbDatabase = ref('')
-const wbTable = ref('')
-const wbImageColumn = ref('')
 
 const selectedWbConnection = computed(() =>
   wbConnections.value.find((c) => connectionKey(c) === wbConnectionKey.value) || null,
@@ -69,22 +60,9 @@ function connectionKey(conn) {
   return `alias:${conn.alias || 'default'}`
 }
 
-function catalogParams() {
-  const conn = selectedWbConnection.value
-  if (!conn) return {}
-  if (conn.connection_id != null) return { connectionId: conn.connection_id }
-  return { dbAlias: conn.alias || 'default' }
-}
-
 function resetWritebackForm() {
   wbEnabled.value = false
-  wbDatabases.value = []
-  wbTables.value = []
-  wbColumns.value = []
   wbConnectionKey.value = ''
-  wbDatabase.value = ''
-  wbTable.value = ''
-  wbImageColumn.value = ''
 }
 
 async function ensureWbConnections() {
@@ -94,7 +72,12 @@ async function ensureWbConnections() {
     const res = await listBlobCatalogConnectionsApi()
     wbConnections.value = res.data || []
     if (!wbConnectionKey.value && wbConnections.value.length) {
-      wbConnectionKey.value = connectionKey(wbConnections.value[0])
+      // Prefer a connection that looks like the analyst DB host if labeled; else first.
+      const preferred = wbConnections.value.find((c) =>
+        String(c.label || c.alias || '').toLowerCase().includes('ara')
+        || String(c.name || '').toLowerCase().includes('ara'),
+      )
+      wbConnectionKey.value = connectionKey(preferred || wbConnections.value[0])
     }
   } catch (err) {
     ElMessage.error(err.message || '加载数据库连接失败')
@@ -103,81 +86,21 @@ async function ensureWbConnections() {
   }
 }
 
-async function loadWbDatabases() {
-  wbDatabases.value = []
-  wbTables.value = []
-  wbColumns.value = []
-  wbDatabase.value = ''
-  wbTable.value = ''
-  wbImageColumn.value = ''
-  if (!selectedWbConnection.value) return
-  wbLoading.value = true
-  try {
-    const res = await listBlobCatalogDatabasesApi(catalogParams())
-    wbDatabases.value = res.data?.databases || []
-  } catch (err) {
-    ElMessage.error(err.message || '加载数据库失败')
-  } finally {
-    wbLoading.value = false
-  }
-}
-
-async function loadWbTables() {
-  wbTables.value = []
-  wbColumns.value = []
-  wbTable.value = ''
-  wbImageColumn.value = ''
-  if (!wbDatabase.value) return
-  wbLoading.value = true
-  try {
-    const res = await listBlobCatalogObjectsApi({
-      ...catalogParams(),
-      database: wbDatabase.value,
-      objectType: 'table',
-    })
-    wbTables.value = res.data?.objects || []
-  } catch (err) {
-    ElMessage.error(err.message || '加载表失败')
-  } finally {
-    wbLoading.value = false
-  }
-}
-
-async function loadWbColumns() {
-  wbColumns.value = []
-  wbImageColumn.value = ''
-  if (!wbDatabase.value || !wbTable.value) return
-  wbLoading.value = true
-  try {
-    const res = await getBlobCatalogObjectApi(wbTable.value, {
-      ...catalogParams(),
-      database: wbDatabase.value,
-    })
-    wbColumns.value = res.data?.columns || []
-  } catch (err) {
-    ElMessage.error(err.message || '加载列失败')
-  } finally {
-    wbLoading.value = false
-  }
-}
-
 function buildPathWritebackPayload() {
   if (!wbEnabled.value) return null
-  const imageCol = (wbImageColumn.value || '').trim()
-  if (!wbDatabase.value || !wbTable.value || !imageCol) {
-    throw new Error('启用路径写回时请选择库、表与图像路径列')
-  }
   const conn = selectedWbConnection.value
+  if (!conn) {
+    throw new Error('启用路径写回时请选择数据库连接（需能访问 ara_fp_analyst）')
+  }
   const payload = {
     enabled: true,
-    database: wbDatabase.value,
-    table: wbTable.value,
-    paths: { image_column: imageCol },
+    database: 'ara_fp_analyst',
+    dataset_code: 'PK_5W',
   }
-  if (conn?.connection_id != null) {
+  if (conn.connection_id != null) {
     payload.connection_id = conn.connection_id
   } else {
-    payload.db_alias = conn?.alias || 'default'
+    payload.db_alias = conn.alias || 'default'
   }
   return payload
 }
@@ -427,21 +350,7 @@ function openImportDialog() {
 }
 
 watch(wbEnabled, (on) => {
-  if (on) ensureWbConnections().then(() => {
-    if (wbConnectionKey.value && !wbDatabases.value.length) loadWbDatabases()
-  })
-})
-
-watch(wbConnectionKey, () => {
-  if (wbEnabled.value) loadWbDatabases()
-})
-
-watch(wbDatabase, () => {
-  if (wbEnabled.value) loadWbTables()
-})
-
-watch(wbTable, () => {
-  if (wbEnabled.value) loadWbColumns()
+  if (on) ensureWbConnections()
 })
 
 function dupTypeLabel(type) {
@@ -973,40 +882,25 @@ onBeforeUnmount(() => {
 
         <el-divider content-position="left">路径写回（可选）</el-divider>
         <p class="dialog-tip">
-          每张导入的 bmp 会在目标表 <strong>INSERT 一行</strong>，只填你指定的路径列；其它列可之后手动或用 SQL 补全。
+          固定写入 <code>ara_fp_analyst.T_CAP_FP_DATA</code> /
+          <code>T_FEATURE_RECORD</code>；
+          <code>dataset_code=PK_5W</code>；
+          图像路径进 <code>fingerprint_image</code>，
+          Bidiso→<code>feature_ara_data</code>，Neuiso→<code>feature_neuro_data</code>；
+          <code>cap_image_id</code>=<code>fp_image_id</code>。
         </p>
         <el-form-item label="启用写回">
           <el-switch v-model="wbEnabled" />
         </el-form-item>
         <template v-if="wbEnabled">
           <el-form-item label="数据库连接" required>
-            <el-select v-model="wbConnectionKey" filterable placeholder="选择连接" style="width: 100%">
+            <el-select v-model="wbConnectionKey" filterable placeholder="选择能访问 ara_fp_analyst 的连接" style="width: 100%">
               <el-option
                 v-for="conn in wbConnections"
                 :key="connectionKey(conn)"
                 :label="conn.label || conn.alias"
                 :value="connectionKey(conn)"
               />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="数据库" required>
-            <el-select v-model="wbDatabase" filterable placeholder="选择库" style="width: 100%">
-              <el-option v-for="db in wbDatabases" :key="db.name" :label="db.name" :value="db.name" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="目标表" required>
-            <el-select v-model="wbTable" filterable placeholder="选择表" style="width: 100%">
-              <el-option
-                v-for="obj in wbTables"
-                :key="obj.name"
-                :label="obj.name"
-                :value="obj.name"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="图像路径列" required>
-            <el-select v-model="wbImageColumn" filterable clearable placeholder="写入 bmp 相对路径" style="width: 100%">
-              <el-option v-for="col in wbColumns" :key="`i-${col.name}`" :label="col.name" :value="col.name" />
             </el-select>
           </el-form-item>
         </template>
