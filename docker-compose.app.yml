@@ -32,6 +32,10 @@ x-backend-environment: &backend-environment
   BLOB_MIGRATION_UPLOAD_WORKERS: ${BLOB_MIGRATION_UPLOAD_WORKERS:-3}
   BLOB_MIGRATION_BATCH_SIZE: ${BLOB_MIGRATION_BATCH_SIZE:-100}
   BLOB_MIGRATION_SKIP_DIMENSIONS: ${BLOB_MIGRATION_SKIP_DIMENSIONS:-true}
+  # ~4–5 concurrent users; keep MySQL connections bounded on multi-core hosts
+  GUNICORN_WORKERS: ${GUNICORN_WORKERS:-6}
+  GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+  GUNICORN_MAX_REQUESTS: ${GUNICORN_MAX_REQUESTS:-800}
 
 services:
   db:
@@ -69,6 +73,8 @@ services:
     environment:
       <<: *backend-environment
       GUNICORN_BIND: "0.0.0.0:8000"
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-6}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
     volumes:
       - thumb_cache:/app/backend/thumb_cache
     expose:

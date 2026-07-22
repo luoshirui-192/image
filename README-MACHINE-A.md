@@ -83,6 +83,8 @@ cp .env.app.example .env
 |------|------|------|
 | `PUBLIC_URL` | **A** 的访问地址 | `http://192.168.17.162` |
 | `HTTP_PORT` | A 对外端口 | `80` |
+| `GUNICORN_WORKERS` | API 进程数（约 4～5 人用 **6**） | `6` |
+| `GUNICORN_TIMEOUT` | 单请求超时（秒） | `120` |
 | `MYSQL_ROOT_PASSWORD` | 本机 MySQL root 密码 | 强密码 |
 | `MYSQL_PASSWORD` | 应用库用户密码 | 强密码 |
 | `STORAGE_BACKEND` | 存储后端 | `minio`（生产）/ `local`（调试） |
