@@ -1,7 +1,8 @@
 """Optional path write-back after fingerprint ZIP import.
 
-Writes relative storage paths (upload/... / templates/...) into a user-selected
-business table via UPDATE, matched by person_id + finger_position.
+For each imported image, INSERT one new row into a user-selected business table
+and fill only the image path column. Other columns are left for the user to
+fill later (UI / SQL).
 """
 from __future__ import annotations
 
@@ -26,6 +27,8 @@ class PathWritebackError(Exception):
 
 @dataclass
 class WritebackCounters:
+    """`updated` counts successfully inserted rows (API field name kept for compat)."""
+
     updated: int = 0
     skipped: int = 0
     failed: int = 0
@@ -43,6 +46,7 @@ class WritebackCounters:
     def to_dict(self) -> dict[str, Any]:
         return {
             "writeback_updated": self.updated,
+            "writeback_inserted": self.updated,
             "writeback_skipped": self.skipped,
             "writeback_failed": self.failed,
             "writeback_errors": list(self.errors)[:MAX_WRITEBACK_ERRORS],
@@ -65,7 +69,16 @@ def parse_path_writeback_config(raw: Any) -> dict | None:
     """
     Normalize API/job options into an internal config dict, or None if disabled.
 
-    Raises PathWritebackError when enabled but invalid.
+    Expected shape:
+      {
+        "enabled": true,
+        "connection_id": 3,          # optional; else db_alias
+        "db_alias": "default",
+        "database": "biz_db",        # optional
+        "table": "person_finger",
+        "paths": { "image_column": "image_path" }
+        # also accepts top-level "image_column"
+      }
     """
     if raw is None or raw == "":
         return None
@@ -81,34 +94,13 @@ def parse_path_writeback_config(raw: Any) -> dict | None:
 
     try:
         table = validate_identifier(str(raw.get("table") or ""), label="写回表名")
-        match = raw.get("match") if isinstance(raw.get("match"), dict) else {}
         paths = raw.get("paths") if isinstance(raw.get("paths"), dict) else {}
-
-        person_col = validate_identifier(
-            str(match.get("person_id_column") or ""), label="人员号列"
-        )
-        finger_col = validate_identifier(
-            str(match.get("finger_column") or ""), label="指位列"
-        )
-
-        image_column_raw = str(paths.get("image_column") or "").strip()
-        image_column = (
-            validate_identifier(image_column_raw, label="图像路径列") if image_column_raw else ""
-        )
-
-        templates_raw = paths.get("templates") if isinstance(paths.get("templates"), dict) else {}
-        templates: dict[str, str] = {}
-        for key, col in templates_raw.items():
-            layer_key = str(key or "").strip().lower()
-            col_name = str(col or "").strip()
-            if not layer_key or not col_name:
-                continue
-            if not layer_key.replace("_", "").isalnum():
-                raise PathWritebackError(f"模板映射 key 无效: {key!r}")
-            templates[layer_key] = validate_identifier(col_name, label=f"模板路径列({layer_key})")
-
-        if not image_column and not templates:
-            raise PathWritebackError("启用路径写回时须至少指定 image_column 或 templates 映射")
+        image_column_raw = str(
+            paths.get("image_column") or raw.get("image_column") or ""
+        ).strip()
+        if not image_column_raw:
+            raise PathWritebackError("启用路径写回时须指定 image_column（图像路径列）")
+        image_column = validate_identifier(image_column_raw, label="图像路径列")
 
         connection_id = raw.get("connection_id")
         db_alias = str(raw.get("db_alias") or "").strip()
@@ -134,14 +126,8 @@ def parse_path_writeback_config(raw: Any) -> dict | None:
         "db_alias": db_alias,
         "database": database,
         "table": table,
-        "match": {
-            "person_id_column": person_col,
-            "finger_column": finger_col,
-        },
-        "paths": {
-            "image_column": image_column,
-            "templates": templates,
-        },
+        "paths": {"image_column": image_column},
+        "image_column": image_column,
     }
 
 
@@ -151,105 +137,76 @@ def _resolve_alias(config: dict) -> str:
     return str(config.get("db_alias") or "default")
 
 
-def writeback_side_paths(
-    config: dict,
-    *,
-    person_id: str,
-    finger_position: str,
-    image_path: str | None = None,
-    template_paths: dict[str, str] | None = None,
-) -> WritebackCounters:
-    """
-    UPDATE one business row for (person_id, finger_position).
-
-    template_paths keys are layer_key (e.g. bidiso, neuiso).
-    """
+def insert_image_path_row(config: dict, *, image_path: str) -> WritebackCounters:
+    """INSERT one row with only the image path column filled."""
     counters = WritebackCounters()
-    person_id = str(person_id or "").strip()
-    finger_position = str(finger_position or "").strip()
-    if not person_id or not finger_position:
+    path = str(image_path or "").strip()
+    if not path:
         counters.skipped += 1
         return counters
 
-    set_parts: list[str] = []
-    params: list[Any] = []
-    image_col = (config.get("paths") or {}).get("image_column") or ""
-    if image_col and image_path:
-        set_parts.append(f"{_quote_ident(image_col)}=%s")
-        params.append(image_path)
-
-    templates_map: dict[str, str] = (config.get("paths") or {}).get("templates") or {}
-    for layer_key, path in (template_paths or {}).items():
-        col = templates_map.get(str(layer_key).lower())
-        if not col or not path:
-            continue
-        set_parts.append(f"{_quote_ident(col)}=%s")
-        params.append(path)
-
-    if not set_parts:
+    image_col = (
+        (config.get("paths") or {}).get("image_column")
+        or config.get("image_column")
+        or ""
+    )
+    if not image_col:
         counters.skipped += 1
         return counters
 
     table = _quote_ident(config["table"])
-    person_col = _quote_ident(config["match"]["person_id_column"])
-    finger_col = _quote_ident(config["match"]["finger_column"])
-    sql = (
-        f"UPDATE {table} SET {', '.join(set_parts)} "
-        f"WHERE {person_col}=%s AND {finger_col}=%s"
-    )
-    params.extend([person_id, finger_position])
-
+    col = _quote_ident(image_col)
+    sql = f"INSERT INTO {table} ({col}) VALUES (%s)"
     alias = _resolve_alias(config)
     database = config.get("database")
     try:
         with db_alias_session(alias, database=database) as session_alias:
             conn = connections[session_alias]
             with conn.cursor() as cursor:
-                cursor.execute(sql, params)
-                affected = int(cursor.rowcount or 0)
-            # Some MySQL drivers report -1; treat as unknown success if no error.
-            if affected == 0:
-                counters.skipped += 1
-            else:
-                counters.updated += 1 if affected < 0 else affected
+                cursor.execute(sql, [path])
+            counters.updated += 1
     except (PathWritebackError, ExternalDbError) as exc:
         counters.failed += 1
-        counters.errors.append(f"{person_id}/{finger_position}: {exc}"[:240])
-        logger.warning("path writeback failed: %s", exc)
+        counters.errors.append(f"{path}: {exc}"[:240])
+        logger.warning("path writeback insert failed: %s", exc)
     except Exception as exc:
         counters.failed += 1
-        counters.errors.append(f"{person_id}/{finger_position}: {exc}"[:240])
-        logger.warning(
-            "path writeback failed person=%s finger=%s: %s",
-            person_id,
-            finger_position,
-            exc,
-            exc_info=True,
-        )
+        counters.errors.append(f"{path}: {exc}"[:240])
+        logger.warning("path writeback insert failed path=%s: %s", path, exc, exc_info=True)
     return counters
+
+
+def writeback_image_paths(config: dict | None, image_paths: list[str]) -> WritebackCounters:
+    """INSERT one row per image path."""
+    total = WritebackCounters()
+    if not config:
+        return total
+    for path in image_paths:
+        total.merge(insert_image_path_row(config, image_path=path))
+    return total
+
+
+# Backward-compatible aliases used by older call sites / tests.
+def writeback_side_paths(
+    config: dict,
+    *,
+    person_id: str = "",
+    finger_position: str = "",
+    image_path: str | None = None,
+    template_paths: dict[str, str] | None = None,
+) -> WritebackCounters:
+    """Deprecated: inserts a row for image_path only (ignores match keys / templates)."""
+    del person_id, finger_position, template_paths
+    return insert_image_path_row(config, image_path=image_path or "")
 
 
 def writeback_pair_paths(
     config: dict | None,
     *,
-    finger_position: str,
-    sides: list[dict[str, Any]],
+    finger_position: str = "",
+    sides: list[dict[str, Any]] | None = None,
 ) -> WritebackCounters:
-    """
-    Write paths for left/right sides of one pair.
-
-    Each side dict: {person_id, image_path, template_paths: {layer_key: path}}
-    """
-    total = WritebackCounters()
-    if not config:
-        return total
-    for side in sides:
-        part = writeback_side_paths(
-            config,
-            person_id=str(side.get("person_id") or ""),
-            finger_position=finger_position,
-            image_path=side.get("image_path"),
-            template_paths=side.get("template_paths") or {},
-        )
-        total.merge(part)
-    return total
+    """Deprecated: inserts one row per side image_path."""
+    del finger_position
+    paths = [str(s.get("image_path") or "") for s in (sides or [])]
+    return writeback_image_paths(config, paths)

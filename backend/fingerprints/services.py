@@ -31,7 +31,7 @@ from fingerprints.layer_config import (
     version_color,
 )
 from fingerprints.models import FingerprintFeatureLayer, FingerprintPair
-from fingerprints.path_writeback import WritebackCounters, writeback_pair_paths
+from fingerprints.path_writeback import WritebackCounters, writeback_image_paths
 from images.models import ImageInfo
 from images.services import DuplicateImageError, save_image_bytes
 from utils.db_time import fetch_db_now
@@ -129,40 +129,14 @@ def _decode_and_cache(content: bytes, *, setlen: int, setang: int) -> tuple[int,
     return result.count, json.dumps(result.to_dict(), ensure_ascii=False, separators=(",", ":"))
 
 
-def _build_writeback_sides(
-    pair: FingerprintPair,
-    *,
-    samples: list[tuple[str, str, dict[str, Path]]],
-    layer_rows: list[dict],
-) -> list[dict]:
-    """Build left/right path payloads for optional business-table write-back."""
-    sides_out: list[dict] = []
-    side_names = ("left", "right")
-    image_ids = (pair.left_image_id, pair.right_image_id)
-    for idx, side_name in enumerate(side_names):
-        person_id = samples[idx][0]
-        image = ImageInfo.objects.filter(pk=image_ids[idx]).only("image_path").first()
-        template_paths: dict[str, str] = {}
-        for row in layer_rows:
-            if row.get("side") != side_name:
-                continue
-            info: LayerTypeInfo = row["layer_info"]
-            path = row.get("template_path") or ""
-            if path:
-                template_paths[info.layer_key] = path
-        for layer in FingerprintFeatureLayer.objects.filter(
-            pair_id=pair.id, side=side_name
-        ).only("layer_type", "template_path"):
-            if layer.template_path:
-                template_paths.setdefault(layer.layer_type, layer.template_path)
-        sides_out.append(
-            {
-                "person_id": person_id,
-                "image_path": image.image_path if image else None,
-                "template_paths": template_paths,
-            }
-        )
-    return sides_out
+def _collect_pair_image_paths(pair: FingerprintPair) -> list[str]:
+    """Return left/right image relative paths for optional business-table INSERT."""
+    paths: list[str] = []
+    for image_id in (pair.left_image_id, pair.right_image_id):
+        image = ImageInfo.objects.filter(pk=image_id).only("image_path").first()
+        if image and image.image_path:
+            paths.append(image.image_path)
+    return paths
 
 
 def import_pair_directory(
@@ -374,11 +348,9 @@ def import_pair_directory(
     writeback = WritebackCounters()
     if path_writeback:
         try:
-            sides = _build_writeback_sides(pair, samples=samples, layer_rows=layer_rows)
-            writeback = writeback_pair_paths(
+            writeback = writeback_image_paths(
                 path_writeback,
-                finger_position=finger_position,
-                sides=sides,
+                _collect_pair_image_paths(pair),
             )
         except Exception as exc:
             logger.warning("path writeback pair failed dir=%s: %s", pair_dir.name, exc)
@@ -412,7 +384,7 @@ def import_pair_directory(
         msg += f"; warnings={len(pair_warnings)}"
     if path_writeback:
         msg += (
-            f"; writeback updated={writeback.updated}"
+            f"; writeback inserted={writeback.updated}"
             f" skipped={writeback.skipped} failed={writeback.failed}"
         )
     return PairImportResult(

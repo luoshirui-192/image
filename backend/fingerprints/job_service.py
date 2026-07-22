@@ -85,6 +85,9 @@ def serialize_import_job(job: FingerprintImportJob) -> dict:
         "duplicate_report": duplicate_report,
         "library_bmp_reused": int(result.get("library_bmp_reused") or 0),
         "writeback_updated": int(result.get("writeback_updated") or 0),
+        "writeback_inserted": int(
+            result.get("writeback_inserted") or result.get("writeback_updated") or 0
+        ),
         "writeback_skipped": int(result.get("writeback_skipped") or 0),
         "writeback_failed": int(result.get("writeback_failed") or 0),
         "writeback_errors": result.get("writeback_errors") or [],
@@ -328,6 +331,7 @@ def execute_import_job(job_id: int) -> None:
 
             def _persist_writeback_stats() -> None:
                 base_result["writeback_updated"] = writeback_totals.updated
+                base_result["writeback_inserted"] = writeback_totals.updated
                 base_result["writeback_skipped"] = writeback_totals.skipped
                 base_result["writeback_failed"] = writeback_totals.failed
                 base_result["writeback_errors"] = list(writeback_totals.errors)
@@ -427,7 +431,7 @@ def execute_import_job(job_id: int) -> None:
                 msg += f"；图库复用 bmp {library_bmp_reused}"
             if path_writeback:
                 msg += (
-                    f"；路径写回 更新 {writeback_totals.updated}"
+                    f"；路径写回 插入 {writeback_totals.updated}"
                     f" · 跳过 {writeback_totals.skipped}"
                     f" · 失败 {writeback_totals.failed}"
                 )

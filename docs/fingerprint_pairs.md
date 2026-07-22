@@ -86,9 +86,9 @@ MinIO 下同样是相对路径对象键，前缀不变。
 导入 batmatch zip 时，可在界面开启「路径写回」，或在 `path_writeback` 字段传入 JSON。行为：
 
 1. 仍按原流程写入 MinIO + `image_info` / `fingerprint_*`
-2. 额外对业务表执行 `UPDATE`，只填**相对路径字符串**（`upload/...`、`templates/...`）
-3. 行匹配固定为：bmp 文件名中的 **personId + 指位**（如 `100001_right_index.bmp` → `person_id=100001` 且 `finger=right_index`）
-4. 匹配不到的行记为跳过，不中止整包导入
+2. **每张 bmp** 对业务表执行一次 `INSERT`，只填你指定的**图像路径列**
+3. 其它业务列不写（保持默认/空），之后可用界面或 SQL 自行补全
+4. 单条写回失败不中止整包导入
 
 示例：
 
@@ -98,22 +98,15 @@ MinIO 下同样是相对路径对象键，前缀不变。
   "connection_id": 3,
   "database": "biz_db",
   "table": "person_finger",
-  "match": {
-    "person_id_column": "person_id",
-    "finger_column": "finger_code"
-  },
   "paths": {
-    "image_column": "image_path",
-    "templates": {
-      "bidiso": "bidiso_path",
-      "neuiso": "neuiso_path"
-    }
+    "image_column": "image_path"
   }
 }
 ```
 
-也可用 `db_alias`（如 `default`）代替 `connection_id`。未映射的模板后缀不会写回。
+也可用 `db_alias`（如 `default`）代替 `connection_id`。路径值为相对路径（如 `upload/20260722/2/uuid.bmp`），不含 MinIO bucket 前缀。
 
+一对 zip（左右两张图）默认插入 **2 行**。
 ## 扩展特征类型
 
 管理员调用：

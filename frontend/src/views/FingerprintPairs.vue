@@ -51,17 +51,10 @@ const wbColumns = ref([])
 const wbConnectionKey = ref('')
 const wbDatabase = ref('')
 const wbTable = ref('')
-const wbPersonColumn = ref('')
-const wbFingerColumn = ref('')
 const wbImageColumn = ref('')
-const wbTemplateColumns = reactive({})
 
 const selectedWbConnection = computed(() =>
   wbConnections.value.find((c) => connectionKey(c) === wbConnectionKey.value) || null,
-)
-
-const enabledLayerTypes = computed(() =>
-  (meta.layer_types || []).filter((t) => t.enabled !== false && t.enabled !== 0),
 )
 
 const dupReport = computed(() => importJob.value?.duplicate_report || null)
@@ -91,10 +84,7 @@ function resetWritebackForm() {
   wbConnectionKey.value = ''
   wbDatabase.value = ''
   wbTable.value = ''
-  wbPersonColumn.value = ''
-  wbFingerColumn.value = ''
   wbImageColumn.value = ''
-  Object.keys(wbTemplateColumns).forEach((k) => delete wbTemplateColumns[k])
 }
 
 async function ensureWbConnections() {
@@ -119,6 +109,7 @@ async function loadWbDatabases() {
   wbColumns.value = []
   wbDatabase.value = ''
   wbTable.value = ''
+  wbImageColumn.value = ''
   if (!selectedWbConnection.value) return
   wbLoading.value = true
   try {
@@ -135,6 +126,7 @@ async function loadWbTables() {
   wbTables.value = []
   wbColumns.value = []
   wbTable.value = ''
+  wbImageColumn.value = ''
   if (!wbDatabase.value) return
   wbLoading.value = true
   try {
@@ -153,10 +145,7 @@ async function loadWbTables() {
 
 async function loadWbColumns() {
   wbColumns.value = []
-  wbPersonColumn.value = ''
-  wbFingerColumn.value = ''
   wbImageColumn.value = ''
-  Object.keys(wbTemplateColumns).forEach((k) => delete wbTemplateColumns[k])
   if (!wbDatabase.value || !wbTable.value) return
   wbLoading.value = true
   try {
@@ -174,31 +163,16 @@ async function loadWbColumns() {
 
 function buildPathWritebackPayload() {
   if (!wbEnabled.value) return null
-  if (!wbDatabase.value || !wbTable.value || !wbPersonColumn.value || !wbFingerColumn.value) {
-    throw new Error('启用路径写回时请选择库、表、人员号列与指位列')
-  }
-  const templates = {}
-  for (const lt of enabledLayerTypes.value) {
-    const col = (wbTemplateColumns[lt.layer_key] || '').trim()
-    if (col) templates[lt.layer_key] = col
-  }
   const imageCol = (wbImageColumn.value || '').trim()
-  if (!imageCol && !Object.keys(templates).length) {
-    throw new Error('请至少指定图像路径列或一个模板路径列')
+  if (!wbDatabase.value || !wbTable.value || !imageCol) {
+    throw new Error('启用路径写回时请选择库、表与图像路径列')
   }
   const conn = selectedWbConnection.value
   const payload = {
     enabled: true,
     database: wbDatabase.value,
     table: wbTable.value,
-    match: {
-      person_id_column: wbPersonColumn.value,
-      finger_column: wbFingerColumn.value,
-    },
-    paths: {
-      image_column: imageCol || undefined,
-      templates,
-    },
+    paths: { image_column: imageCol },
   }
   if (conn?.connection_id != null) {
     payload.connection_id = conn.connection_id
@@ -787,7 +761,7 @@ onBeforeUnmount(() => {
           · 图库复用 bmp {{ importJob.library_bmp_reused }}
         </template>
         <template v-if="importJob.path_writeback_enabled">
-          · 路径写回 更新 {{ importJob.writeback_updated || 0 }}
+          · 路径写回 插入 {{ importJob.writeback_inserted || importJob.writeback_updated || 0 }}
           / 跳过 {{ importJob.writeback_skipped || 0 }}
           / 失败 {{ importJob.writeback_failed || 0 }}
         </template>
@@ -999,7 +973,7 @@ onBeforeUnmount(() => {
 
         <el-divider content-position="left">路径写回（可选）</el-divider>
         <p class="dialog-tip">
-          导入成功后，把 MinIO 相对路径 UPDATE 到业务表；按文件名中的人员号 + 指位匹配行。
+          每张导入的 bmp 会在目标表 <strong>INSERT 一行</strong>，只填你指定的路径列；其它列可之后手动或用 SQL 补全。
         </p>
         <el-form-item label="启用写回">
           <el-switch v-model="wbEnabled" />
@@ -1030,34 +1004,9 @@ onBeforeUnmount(() => {
               />
             </el-select>
           </el-form-item>
-          <el-form-item label="人员号列" required>
-            <el-select v-model="wbPersonColumn" filterable clearable placeholder="匹配 personId" style="width: 100%">
-              <el-option v-for="col in wbColumns" :key="`p-${col.name}`" :label="col.name" :value="col.name" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="指位列" required>
-            <el-select v-model="wbFingerColumn" filterable clearable placeholder="匹配 right_index 等" style="width: 100%">
-              <el-option v-for="col in wbColumns" :key="`f-${col.name}`" :label="col.name" :value="col.name" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="图像路径列">
+          <el-form-item label="图像路径列" required>
             <el-select v-model="wbImageColumn" filterable clearable placeholder="写入 bmp 相对路径" style="width: 100%">
               <el-option v-for="col in wbColumns" :key="`i-${col.name}`" :label="col.name" :value="col.name" />
-            </el-select>
-          </el-form-item>
-          <el-form-item
-            v-for="lt in enabledLayerTypes"
-            :key="`tpl-${lt.layer_key}`"
-            :label="`${lt.label || lt.layer_key} 路径`"
-          >
-            <el-select
-              v-model="wbTemplateColumns[lt.layer_key]"
-              filterable
-              clearable
-              :placeholder="`写入 ${lt.layer_key} 模板路径`"
-              style="width: 100%"
-            >
-              <el-option v-for="col in wbColumns" :key="`${lt.layer_key}-${col.name}`" :label="col.name" :value="col.name" />
             </el-select>
           </el-form-item>
         </template>
