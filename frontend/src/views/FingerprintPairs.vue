@@ -34,7 +34,6 @@ const total = ref(0)
 const selectedCapId = ref(null)
 const comparePanelRef = ref(null)
 const treeRef = ref(null)
-let wheelLocked = false
 
 const importDialogVisible = ref(false)
 const importFile = ref(null)
@@ -338,21 +337,6 @@ function onPreviewKeydown(event) {
     event.preventDefault()
     goNextSample()
   }
-}
-
-function onPreviewWheel(event) {
-  if (!payload.value || rows.value.length <= 1 || wheelLocked) return
-  if (importDialogVisible.value || typeDialogVisible.value) return
-  // Only when over the compare panel (not the tree)
-  const root = comparePanelRef.value
-  if (!root || !root.contains(event.target)) return
-  event.preventDefault()
-  wheelLocked = true
-  window.setTimeout(() => {
-    wheelLocked = false
-  }, 200)
-  if (event.deltaY > 0) goNextSample()
-  else if (event.deltaY < 0) goPrevSample()
 }
 
 function clearView() {
@@ -856,7 +840,6 @@ onBeforeUnmount(() => {
         class="compare-panel"
         v-loading="compareLoading"
         tabindex="0"
-        @wheel.prevent="onPreviewWheel"
       >
         <template v-if="payload && primaryPanel">
           <div class="compare-toolbar">
@@ -871,7 +854,7 @@ onBeforeUnmount(() => {
             <div class="controls">
               <el-button size="small" :disabled="!canPrevSample || compareLoading" @click="goPrevSample">上一张</el-button>
               <el-button size="small" :disabled="!canNextSample || compareLoading" @click="goNextSample">下一张</el-button>
-              <span class="hint">方向键 / 滚轮切换</span>
+              <span class="hint">方向键切换</span>
               <el-checkbox v-model="showLabels">编号</el-checkbox>
               <span class="label">缩放</span>
               <el-slider v-model="zoom" :min="0.5" :max="3" :step="0.1" style="width: 120px" />
