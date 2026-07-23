@@ -20,9 +20,10 @@ t_match_result_image
 ## 功能
 
 1. 导入 batmatch zip（可选路径写回 `T_CAP_FP_DATA` + `T_FEATURE_RECORD`）
-2. 左侧树：按 `data_set_code` 分组的配对（来自 `t_match_result_image`）
-3. 右侧双栏：注册(`image_reg`) / 比对(`image_match`) 细节点叠加
-4. 方向键切换上一对 / 下一对
+2. 顶栏切换 **配对 / 单图**
+   - 配对：左树 `t_match_result_image`；右栏双栏 `image_reg` / `image_match`
+   - 单图：左树 `T_CAP_FP_DATA`；右栏单栏叠加
+3. 方向键切换上一项 / 下一项
 
 ## API（业务浏览）
 
