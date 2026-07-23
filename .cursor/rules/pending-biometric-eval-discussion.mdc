@@ -1,0 +1,22 @@
+---
+description: Pending discussion — FVC-style biometric eval report (EER/FMR/DET) vs current system gaps
+alwaysApply: false
+---
+
+# Pending: Biometric evaluation report (resume later)
+
+User shared Hisign V5.0 / FV-HARD-1.0 style metrics report. Discussed meanings of EER, FMR*, ZeroFMR/FNMR, REJ*, enroll/match time, model/memory, score/DET charts.
+
+## Agreed understanding
+
+- Formulas for EER/FMR/FNMR/DET/score distributions are known and implementable.
+- Current system is a sample/pair store + path write-back, not an FVC bench platform.
+- Missing for a same-style report: match engine (SDK), genuine/impostor score matrix + failure flags, timing/memory probes, eval job + report UI.
+- Dataset in the screenshot is finger-vein (Hisign); current product line is mainly fingerprint zip / Bidiso·Neuiso.
+
+## Open decisions (ask when resuming)
+
+1. Evaluate fingerprint vs finger-vein?
+2. Scores from external SDK callback vs in-process engine?
+
+## Do not start implementation until user asks to resume this topic.

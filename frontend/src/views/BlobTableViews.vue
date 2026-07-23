@@ -1228,17 +1228,28 @@ function pathCell(row, colName) {
   return null
 }
 
+function focusWithoutScroll(el) {
+  if (!el || typeof el.focus !== 'function') return
+  try {
+    el.focus({ preventScroll: true })
+  } catch {
+    el.focus()
+  }
+}
+
 function autoSelectFirstRow() {
   const row = tableRows.value[0] ?? null
   selectPreviewRow(row)
 }
 
-function selectPreviewRow(row, { focusPanel = false } = {}) {
+function selectPreviewRow(row, { focusPanel = false, scrollIntoView = true } = {}) {
   selectedRow.value = row
-  syncTableCurrentRow(row)
+  if (scrollIntoView) {
+    syncTableCurrentRow(row)
+  }
   persistBrowseUiState()
   if (focusPanel) {
-    nextTick(() => rowPreviewPanelRef.value?.focus())
+    nextTick(() => focusWithoutScroll(rowPreviewPanelRef.value))
   }
 }
 
@@ -1284,14 +1295,16 @@ function onPreviewKeydown(event) {
 }
 
 function focusSqlBrowse() {
-  nextTick(() => sqlTableWrapRef.value?.focus())
+  nextTick(() => focusWithoutScroll(sqlTableWrapRef.value))
 }
 
-function selectSqlPreviewRow(row, { focusPanel = false, focusBrowse = false } = {}) {
+function selectSqlPreviewRow(row, { focusPanel = false, focusBrowse = false, scrollIntoView = true } = {}) {
   sqlSelectedRow.value = row
-  syncSqlTableCurrentRow(row)
+  if (scrollIntoView) {
+    syncSqlTableCurrentRow(row)
+  }
   if (focusPanel) {
-    nextTick(() => sqlPreviewPanelRef.value?.focus())
+    nextTick(() => focusWithoutScroll(sqlPreviewPanelRef.value))
   }
   if (focusBrowse || focusPanel) {
     focusSqlBrowse()
@@ -1336,14 +1349,18 @@ function getSqlRowKey(row) {
 }
 
 function onSqlTableRowClick(row, _column, event) {
-  if (event?.target?.closest?.('button, a, .el-button')) return
-  selectSqlPreviewRow(row, { focusBrowse: true })
+  const ev = event?.target ? event : _column
+  if (ev?.target?.closest?.('button, a, .el-button')) return
+  // Click already landed on the row — do not focus/scroll the viewport (that jumps to top).
+  selectSqlPreviewRow(row, { focusBrowse: true, scrollIntoView: false })
 }
 
-function onTableRowClick(row, _column, event) {
+function onTableRowClick(row, event) {
   if (event?.target?.closest?.('button, a, .el-button')) return
-  selectPreviewRow(row, { focusPanel: true })
-  nextTick(() => tableWrapRef.value?.focus())
+  // Click already landed on the row — focusing the scroll container without
+  // preventScroll makes Chromium reset scrollTop to 0 (jump back to row 1).
+  selectPreviewRow(row, { focusPanel: false, scrollIntoView: false })
+  nextTick(() => focusWithoutScroll(tableWrapRef.value))
 }
 
 function rowPreviewCells(row) {
@@ -1804,8 +1821,14 @@ function syncTableCurrentRow(row) {
       ? CSS.escape(key)
       : key.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
     const el = wrap.querySelector(`[data-row-key="${safe}"]`)
-    if (el && typeof el.scrollIntoView === 'function') {
-      el.scrollIntoView({ block: 'nearest' })
+    if (!el) return
+    // Adjust only the browse viewport — el.scrollIntoView can scroll outer panels to top.
+    const wrapRect = wrap.getBoundingClientRect()
+    const rowRect = el.getBoundingClientRect()
+    if (rowRect.top < wrapRect.top) {
+      wrap.scrollTop += rowRect.top - wrapRect.top - 8
+    } else if (rowRect.bottom > wrapRect.bottom) {
+      wrap.scrollTop += rowRect.bottom - wrapRect.bottom + 8
     }
   })
 }
@@ -2128,7 +2151,7 @@ onUnmounted(() => {
                                 :key="getRowKey(row)"
                                 :data-row-key="getRowKey(row)"
                                 :class="{ 'is-current': row === selectedRow }"
-                                @click="onTableRowClick(row)"
+                                @click="onTableRowClick(row, $event)"
                               >
                                 <td
                                   v-for="col in columns"
