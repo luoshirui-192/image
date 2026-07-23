@@ -6,8 +6,10 @@ from rest_framework.views import APIView
 
 from fingerprints.biz_browse import (
     BizBrowseError,
+    build_pair_view,
     build_sample_view,
     list_biz_meta,
+    list_biz_pairs,
     list_biz_samples,
     parse_biz_connection_params,
 )
@@ -411,7 +413,7 @@ class FingerprintMetaView(APIView):
 
 
 class FingerprintBizMetaView(APIView):
-    """GET /api/fingerprints/biz/meta/ — dataset_code options from T_CAP_FP_DATA."""
+    """GET /api/fingerprints/biz/meta/ — data_set_code options from t_match_result_image."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
 
@@ -424,8 +426,61 @@ class FingerprintBizMetaView(APIView):
         return success_response(data)
 
 
+class FingerprintBizPairListView(APIView):
+    """GET /api/fingerprints/biz/pairs/ — list t_match_result_image pairings."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request):
+        try:
+            cfg = _biz_config_from_request(request)
+            data = list_biz_pairs(
+                cfg,
+                dataset_code=request.query_params.get("dataset_code")
+                or request.query_params.get("data_set_code")
+                or None,
+                keyword=request.query_params.get("keyword") or None,
+                page=int(request.query_params.get("page") or 1),
+                page_size=int(request.query_params.get("page_size") or 100),
+            )
+        except (BizBrowseError, ValueError) as exc:
+            return error_response(str(exc), code=4001, status=400)
+        return success_response(data)
+
+
+class FingerprintBizPairViewView(APIView):
+    """GET /api/fingerprints/biz/pairs/{id}/view/ — panels[] dual sample (reg + match)."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request, pk: int):
+        layers_param = request.query_params.get("layers")
+        if layers_param is None:
+            layers_param = request.query_params.get("layer_types")
+        selected_layers = None
+        if layers_param is not None:
+            selected_layers = [x.strip() for x in layers_param.split(",") if x.strip()]
+        show_labels = str(request.query_params.get("show_labels", "1")).lower() not in {
+            "0",
+            "false",
+            "no",
+        }
+        try:
+            cfg = _biz_config_from_request(request)
+            data = build_pair_view(
+                cfg,
+                pk,
+                selected_layer_types=selected_layers,
+                show_labels=show_labels,
+            )
+        except BizBrowseError as exc:
+            status = 404 if "未找到" in str(exc) else 400
+            return error_response(str(exc), code=4041 if status == 404 else 4001, status=status)
+        return success_response(data)
+
+
 class FingerprintBizSampleListView(APIView):
-    """GET /api/fingerprints/biz/samples/ — list T_CAP_FP_DATA rows."""
+    """GET /api/fingerprints/biz/samples/ — list T_CAP_FP_DATA rows (compat)."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
 

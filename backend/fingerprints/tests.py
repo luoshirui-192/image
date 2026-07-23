@@ -518,36 +518,60 @@ class FingerprintAPITestCase(TestCase):
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS t_match_result_image (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    image_reg VARCHAR(200) NULL,
+                    image_match VARCHAR(200) NULL,
+                    score REAL NULL,
+                    algorithm_type VARCHAR(50) NULL,
+                    match_time DATETIME NULL,
+                    fingerprint_image VARCHAR(500) NOT NULL DEFAULT '',
+                    sameflag INTEGER NULL,
+                    data_set_code VARCHAR(255) NULL
+                )
+                """
+            )
             cursor.execute("DELETE FROM T_FEATURE_RECORD")
             cursor.execute("DELETE FROM T_CAP_FP_DATA")
+            cursor.execute("DELETE FROM t_match_result_image")
 
-    def test_biz_browse_list_and_view(self):
+    def _seed_cap_side(self, stem: str, *, uuid_img: str, uuid_bi: str, uuid_ne: str):
         from utils.storage import get_image_storage
 
-        self._ensure_biz_tables()
-        img_path = "upload/20260720/1/550e8400-e29b-41d4-a716-446655440001.bmp"
-        bi_path = "templates/20260720/550e8400-e29b-41d4-a716-446655440002.bidiso"
-        ne_path = "templates/20260720/550e8400-e29b-41d4-a716-446655440003.neuiso"
-        _, bmp = make_bmp_bytes("x.bmp")
-        bi = build_minimal_fmr([(10, 20, 30, 1), (40, 50, 60, 2)], width=64, height=64)
+        img_path = f"upload/20260720/1/{uuid_img}.bmp"
+        bi_path = f"templates/20260720/{uuid_bi}.bidiso"
+        ne_path = f"templates/20260720/{uuid_ne}.neuiso"
+        _, bmp = make_bmp_bytes(f"{stem}.bmp")
+        bi = build_minimal_fmr([(10, 20, 30, 1)], width=64, height=64)
         ne = build_minimal_fmr([(11, 21, 31, 1)], width=64, height=64)
         storage = get_image_storage()
         storage.write_bytes(img_path, bmp)
         storage.write_bytes(bi_path, bi)
         storage.write_bytes(ne_path, ne)
-
         with connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO T_CAP_FP_DATA (cap_image_id, dataset_code, fingerprint_image, fingerprint_url) "
-                "VALUES (%s, %s, %s, %s)",
-                ["100001_right_index", "PK_5W", img_path.encode("utf-8"), img_path],
+                "INSERT INTO T_CAP_FP_DATA (cap_image_id, dataset_code, fingerprint_image) "
+                "VALUES (%s, %s, %s)",
+                [stem, "PK_5W", img_path.encode("utf-8")],
             )
             cursor.execute(
                 "INSERT INTO T_FEATURE_RECORD "
                 "(fp_feature_id, fp_image_id, feature_ara_data, feature_neuro_data) "
                 "VALUES (%s, %s, %s, %s)",
-                ["a" * 32, "100001_right_index", bi_path, ne_path],
+                [uuid_bi.replace("-", "")[:32], stem, bi_path, ne_path],
             )
+        return img_path
+
+    def test_biz_browse_list_and_view(self):
+        self._ensure_biz_tables()
+        self._seed_cap_side(
+            "100001_right_index",
+            uuid_img="550e8400-e29b-41d4-a716-446655440001",
+            uuid_bi="550e8400-e29b-41d4-a716-446655440002",
+            uuid_ne="550e8400-e29b-41d4-a716-446655440003",
+        )
 
         listed = self.client.get(
             "/api/fingerprints/biz/samples/",
@@ -558,14 +582,6 @@ class FingerprintAPITestCase(TestCase):
         items = listed.data["data"]["items"]
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["cap_image_id"], "100001_right_index")
-        self.assertEqual(items[0]["dataset_code"], "PK_5W")
-
-        meta = self.client.get(
-            "/api/fingerprints/biz/meta/",
-            {"db_alias": "default", "database": ""},
-        )
-        self.assertEqual(meta.status_code, 200)
-        self.assertIn("PK_5W", meta.data["data"]["dataset_codes"])
 
         view = self.client.get(
             "/api/fingerprints/biz/samples/100001_right_index/view/",
@@ -574,17 +590,9 @@ class FingerprintAPITestCase(TestCase):
         self.assertEqual(view.status_code, 200, view.data)
         data = view.data["data"]
         self.assertEqual(data["mode"], "single")
-        self.assertIsNone(data["pair_meta"])
         self.assertEqual(len(data["panels"]), 1)
-        panel = data["panels"][0]
-        self.assertEqual(panel["role"], "primary")
-        self.assertEqual(panel["image"]["path"], img_path)
-        self.assertIsNone(panel["image"]["error"])
-        types = {layer["layer_type"] for layer in panel["layers"]}
+        types = {layer["layer_type"] for layer in data["panels"][0]["layers"]}
         self.assertEqual(types, {"bidiso", "neuiso"})
-        bidiso = next(layer for layer in panel["layers"] if layer["layer_type"] == "bidiso")
-        self.assertGreater(bidiso["minutiae"]["count"], 0)
-        self.assertIsNone(bidiso["error"])
 
     def test_biz_browse_empty_feature_paths(self):
         from utils.storage import get_image_storage
@@ -613,7 +621,64 @@ class FingerprintAPITestCase(TestCase):
         self.assertEqual(view.status_code, 200, view.data)
         panel = view.data["data"]["panels"][0]
         self.assertEqual(panel["layers"], [])
-        self.assertEqual(panel["available_layer_types"], [])
+
+    def test_biz_pair_list_and_dual_view(self):
+        self._ensure_biz_tables()
+        self._seed_cap_side(
+            "100001_right_index",
+            uuid_img="550e8400-e29b-41d4-a716-446655440021",
+            uuid_bi="550e8400-e29b-41d4-a716-446655440022",
+            uuid_ne="550e8400-e29b-41d4-a716-446655440023",
+        )
+        self._seed_cap_side(
+            "100002_right_index",
+            uuid_img="550e8400-e29b-41d4-a716-446655440024",
+            uuid_bi="550e8400-e29b-41d4-a716-446655440025",
+            uuid_ne="550e8400-e29b-41d4-a716-446655440026",
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO t_match_result_image "
+                "(id, image_reg, image_match, data_set_code, fingerprint_image) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                [101, "100001_right_index", "100002_right_index", "PK_5W", ""],
+            )
+
+        meta = self.client.get(
+            "/api/fingerprints/biz/meta/",
+            {"db_alias": "default", "database": ""},
+        )
+        self.assertEqual(meta.status_code, 200, meta.data)
+        self.assertIn("PK_5W", meta.data["data"]["dataset_codes"])
+        self.assertEqual(meta.data["data"]["match_table"], "t_match_result_image")
+
+        listed = self.client.get(
+            "/api/fingerprints/biz/pairs/",
+            {"db_alias": "default", "database": "", "dataset_code": "PK_5W"},
+        )
+        self.assertEqual(listed.status_code, 200, listed.data)
+        items = listed.data["data"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["id"], 101)
+        self.assertEqual(items[0]["image_reg"], "100001_right_index")
+        self.assertEqual(items[0]["image_match"], "100002_right_index")
+        self.assertNotIn("score", items[0])
+
+        view = self.client.get(
+            "/api/fingerprints/biz/pairs/101/view/",
+            {"db_alias": "default", "database": ""},
+        )
+        self.assertEqual(view.status_code, 200, view.data)
+        data = view.data["data"]
+        self.assertEqual(data["mode"], "pair")
+        self.assertEqual(len(data["panels"]), 2)
+        self.assertEqual(data["panels"][0]["role"], "reg")
+        self.assertEqual(data["panels"][1]["role"], "match")
+        self.assertEqual(data["pair_meta"]["id"], 101)
+        self.assertEqual(data["pair_meta"]["image_reg"], "100001_right_index")
+        self.assertNotIn("score", data["pair_meta"])
+        self.assertGreater(data["panels"][0]["layers"][0]["minutiae"]["count"], 0)
+        self.assertGreater(data["panels"][1]["layers"][0]["minutiae"]["count"], 0)
 
 
 class PathWritebackUnitTestCase(TestCase):

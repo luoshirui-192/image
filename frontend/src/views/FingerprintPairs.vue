@@ -11,8 +11,8 @@ import {
   cancelFingerprintImportJobApi,
   createFingerprintLayerTypeApi,
   fetchFingerprintBizMetaApi,
-  fetchFingerprintBizSampleViewApi,
-  fetchFingerprintBizSamplesApi,
+  fetchFingerprintBizPairViewApi,
+  fetchFingerprintBizPairsApi,
   fetchFingerprintImportJobApi,
   fetchFingerprintLayerTypesApi,
   importFingerprintZipApi,
@@ -31,7 +31,7 @@ const pollTimer = ref(null)
 
 const rows = ref([])
 const total = ref(0)
-const selectedCapId = ref(null)
+const selectedMatchId = ref(null)
 const comparePanelRef = ref(null)
 const treeRef = ref(null)
 
@@ -168,11 +168,12 @@ const panelImgs = ref([])
 
 const panels = computed(() => payload.value?.panels || [])
 const primaryPanel = computed(() => panels.value[0] || null)
+const pairMeta = computed(() => payload.value?.pair_meta || null)
 
 const treeData = computed(() => {
   const groups = new Map()
   for (const row of rows.value) {
-    const key = row.dataset_code || 'unknown'
+    const key = row.data_set_code || 'unknown'
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key).push(row)
   }
@@ -183,9 +184,9 @@ const treeData = computed(() => {
       label: `${dataset}（${items.length}）`,
       isGroup: true,
       children: items.map((row) => ({
-        id: `cap:${row.cap_image_id}`,
-        capImageId: row.cap_image_id,
-        label: row.cap_image_id,
+        id: `match:${row.id}`,
+        matchId: row.id,
+        label: `${row.image_reg || '?'} ↔ ${row.image_match || '?'}`,
         isGroup: false,
         row,
       })),
@@ -193,7 +194,10 @@ const treeData = computed(() => {
 })
 
 const checkboxOptions = computed(() => {
-  const available = new Set(primaryPanel.value?.available_layer_types || payload.value?.available_layer_types || [])
+  const available = new Set(payload.value?.available_layer_types || [])
+  for (const panel of panels.value) {
+    for (const t of panel.available_layer_types || []) available.add(t)
+  }
   const opts = (payload.value?.layer_type_options || meta.layer_types || []).filter((t) =>
     available.has(t.layer_key),
   )
@@ -243,15 +247,15 @@ async function loadSamples() {
     }
     if (filters.keyword) q.keyword = filters.keyword
     if (filters.dataset_code) q.dataset_code = filters.dataset_code
-    const res = await fetchFingerprintBizSamplesApi(q)
+    const res = await fetchFingerprintBizPairsApi(q)
     rows.value = res.data.items || []
     total.value = res.data.total || 0
-    if (selectedCapId.value && !rows.value.some((r) => r.cap_image_id === selectedCapId.value)) {
-      selectedCapId.value = null
+    if (selectedMatchId.value != null && !rows.value.some((r) => r.id === selectedMatchId.value)) {
+      selectedMatchId.value = null
       clearView()
     }
   } catch (err) {
-    ElMessage.error(err.message || '加载业务样本失败')
+    ElMessage.error(err.message || '加载配对列表失败')
     rows.value = []
     total.value = 0
   } finally {
@@ -270,8 +274,8 @@ function onReset() {
 }
 
 const selectedSampleIndex = computed(() => {
-  if (!selectedCapId.value) return -1
-  return rows.value.findIndex((r) => r.cap_image_id === selectedCapId.value)
+  if (selectedMatchId.value == null) return -1
+  return rows.value.findIndex((r) => r.id === selectedMatchId.value)
 })
 
 const canPrevSample = computed(() => selectedSampleIndex.value > 0)
@@ -292,22 +296,22 @@ function focusComparePanel() {
   nextTick(() => focusWithoutScroll(comparePanelRef.value))
 }
 
-function syncTreeCurrent(capImageId) {
+function syncTreeCurrent(matchId) {
   nextTick(() => {
-    treeRef.value?.setCurrentKey?.(capImageId ? `cap:${capImageId}` : null)
+    treeRef.value?.setCurrentKey?.(matchId != null ? `match:${matchId}` : null)
   })
 }
 
 function onTreeNodeClick(data) {
-  if (data.isGroup || !data.capImageId) return
-  selectSample(data.capImageId, { focusPanel: true })
+  if (data.isGroup || data.matchId == null) return
+  selectPair(data.matchId, { focusPanel: true })
 }
 
-function selectSample(capImageId, { focusPanel = false } = {}) {
-  const id = String(capImageId)
-  selectedCapId.value = id
+function selectPair(matchId, { focusPanel = false } = {}) {
+  const id = Number(matchId)
+  selectedMatchId.value = id
   syncTreeCurrent(id)
-  router.replace({ query: { ...route.query, cap: id } }).catch(() => {})
+  router.replace({ query: { ...route.query, match: String(id) } }).catch(() => {})
   loadView(id)
   if (focusPanel) focusComparePanel()
 }
@@ -315,17 +319,17 @@ function selectSample(capImageId, { focusPanel = false } = {}) {
 function goPrevSample() {
   if (compareLoading.value || !canPrevSample.value) return
   const prev = rows.value[selectedSampleIndex.value - 1]
-  if (prev?.cap_image_id) selectSample(prev.cap_image_id, { focusPanel: true })
+  if (prev?.id != null) selectPair(prev.id, { focusPanel: true })
 }
 
 function goNextSample() {
   if (compareLoading.value || !canNextSample.value) return
   const next = rows.value[selectedSampleIndex.value + 1]
-  if (next?.cap_image_id) selectSample(next.cap_image_id, { focusPanel: true })
+  if (next?.id != null) selectPair(next.id, { focusPanel: true })
 }
 
 function onPreviewKeydown(event) {
-  if (!rows.value.length || !selectedCapId.value) return
+  if (!rows.value.length || selectedMatchId.value == null) return
   if (importDialogVisible.value || typeDialogVisible.value) return
   const tag = String(event.target?.tagName || '').toLowerCase()
   if (tag === 'input' || tag === 'textarea' || tag === 'select') return
@@ -354,8 +358,8 @@ function revokeUrls() {
   panelUrls.value = []
 }
 
-async function loadView(capImageId) {
-  if (!capImageId) return
+async function loadView(matchId) {
+  if (matchId == null) return
   const conn = selectedBrowseConnection.value
   const params = connectionQueryParams(conn)
   if (!params) {
@@ -365,12 +369,12 @@ async function loadView(capImageId) {
   compareLoading.value = true
   layersReady.value = false
   try {
-    const res = await fetchFingerprintBizSampleViewApi(capImageId, {
+    const res = await fetchFingerprintBizPairViewApi(matchId, {
       ...params,
       show_labels: '1',
     })
     payload.value = res.data
-    const types = res.data.available_layer_types || res.data.panels?.[0]?.available_layer_types || []
+    const types = res.data.available_layer_types || []
     panelTypes.value = [...types]
     layersReady.value = true
 
@@ -380,6 +384,9 @@ async function loadView(capImageId) {
       const path = panel.image?.path
       if (!path) {
         urls.push('')
+        if (panel.image?.error || panel.error) {
+          ElMessage.warning(`${panel.cap_image_id || panel.role}: ${panel.image?.error || panel.error}`)
+        }
         continue
       }
       if (panel.image?.error) {
@@ -398,7 +405,7 @@ async function loadView(capImageId) {
     await drawPanels()
   } catch (err) {
     clearView()
-    ElMessage.error(err.message || '加载样本失败')
+    ElMessage.error(err.message || '加载配对失败')
   } finally {
     compareLoading.value = false
   }
@@ -486,7 +493,7 @@ watch([panelTypes, showLabels, zoom], async () => {
 
 watch(browseConnectionKey, async () => {
   clearView()
-  selectedCapId.value = null
+  selectedMatchId.value = null
   await loadMeta()
   await loadSamples()
 })
@@ -555,7 +562,7 @@ async function pollImportJob(jobId) {
       else ElMessage.warning(job.message || '已取消')
       await loadMeta()
       await loadSamples()
-      if (selectedCapId.value) await loadView(selectedCapId.value)
+      if (selectedMatchId.value != null) await loadView(selectedMatchId.value)
     }
   } catch (err) {
     pollFailStreak.value += 1
@@ -693,12 +700,15 @@ onMounted(async () => {
   await ensureConnections()
   await loadMeta()
   await loadSamples()
-  const cap = route.query.cap || route.params.cap
-  if (cap) {
-    selectedCapId.value = String(cap)
-    syncTreeCurrent(String(cap))
-    await loadView(String(cap))
-    focusComparePanel()
+  const matchQ = route.query.match || route.params.match
+  if (matchQ != null && matchQ !== '') {
+    const id = Number(matchQ)
+    if (!Number.isNaN(id)) {
+      selectedMatchId.value = id
+      syncTreeCurrent(id)
+      await loadView(id)
+      focusComparePanel()
+    }
   }
 })
 
@@ -713,8 +723,8 @@ onBeforeUnmount(() => {
   <div class="fp-page">
     <div class="fp-toolbar">
       <div class="fp-title">
-        <h2>指纹特征浏览</h2>
-        <p>业务表 T_CAP_FP_DATA → T_FEATURE_RECORD · 单图叠加细节点（预留双栏）</p>
+        <h2>指纹配对对比</h2>
+        <p>t_match_result_image 配对 · 左右拉 T_CAP_FP_DATA / T_FEATURE_RECORD（指标稍后）</p>
       </div>
       <div class="import-actions">
         <el-select
@@ -793,12 +803,12 @@ onBeforeUnmount(() => {
     <div class="layout">
       <aside class="tree-panel" v-loading="loading">
         <div class="panel-head">
-          <strong>业务样本</strong>
+          <strong>配对列表</strong>
           <span class="muted">共 {{ total }}</span>
         </div>
         <div class="filter-box">
-          <el-input v-model="filters.keyword" clearable size="small" placeholder="cap_image_id" @keyup.enter="onSearch" />
-          <el-select v-model="filters.dataset_code" clearable size="small" placeholder="dataset_code" style="width: 100%">
+          <el-input v-model="filters.keyword" clearable size="small" placeholder="reg / match / id" @keyup.enter="onSearch" />
+          <el-select v-model="filters.dataset_code" clearable size="small" placeholder="data_set_code" style="width: 100%">
             <el-option v-for="c in meta.dataset_codes" :key="c" :label="c" :value="c" />
           </el-select>
           <div class="filter-actions">
@@ -814,20 +824,20 @@ onBeforeUnmount(() => {
             node-key="id"
             default-expand-all
             highlight-current
-            :current-node-key="selectedCapId ? `cap:${selectedCapId}` : undefined"
+            :current-node-key="selectedMatchId != null ? `match:${selectedMatchId}` : undefined"
             :expand-on-click-node="false"
             @node-click="onTreeNodeClick"
           />
           <el-empty
             v-else
-            :description="browseConnectionKey ? '暂无业务样本（需先导入并启用路径写回）' : '请选择业务库连接'"
+            :description="browseConnectionKey ? '暂无配对（需 t_match_result_image 有数据，且两侧已写回路径）' : '请选择业务库连接'"
             :image-size="64"
           />
         </div>
-        <div v-if="selectedCapId" class="selection-foot">
-          <div class="sel-title">{{ selectedCapId }}</div>
+        <div v-if="selectedMatchId != null" class="selection-foot">
+          <div class="sel-title">#{{ selectedMatchId }}</div>
           <div class="sel-meta">
-            来自 T_CAP_FP_DATA
+            来自 t_match_result_image
             <template v-if="selectedSampleIndex >= 0">
               · {{ selectedSampleIndex + 1 }}/{{ rows.length }}
             </template>
@@ -841,44 +851,52 @@ onBeforeUnmount(() => {
         v-loading="compareLoading"
         tabindex="0"
       >
-        <template v-if="payload && primaryPanel">
+        <template v-if="payload && panels.length">
           <div class="compare-toolbar">
             <div class="meta">
-              {{ primaryPanel.cap_image_id }}
-              <template v-if="primaryPanel.dataset_code"> · {{ primaryPanel.dataset_code }}</template>
-              <template v-if="payload.mode"> · {{ payload.mode }}</template>
+              <template v-if="pairMeta">
+                #{{ pairMeta.id }}
+                · {{ pairMeta.image_reg }} ↔ {{ pairMeta.image_match }}
+                <template v-if="pairMeta.data_set_code"> · {{ pairMeta.data_set_code }}</template>
+              </template>
               <template v-if="selectedSampleIndex >= 0">
                 · {{ selectedSampleIndex + 1 }}/{{ rows.length }}
               </template>
             </div>
             <div class="controls">
-              <el-button size="small" :disabled="!canPrevSample || compareLoading" @click="goPrevSample">上一张</el-button>
-              <el-button size="small" :disabled="!canNextSample || compareLoading" @click="goNextSample">下一张</el-button>
+              <el-button size="small" :disabled="!canPrevSample || compareLoading" @click="goPrevSample">上一对</el-button>
+              <el-button size="small" :disabled="!canNextSample || compareLoading" @click="goNextSample">下一对</el-button>
               <span class="hint">方向键切换</span>
               <el-checkbox v-model="showLabels">编号</el-checkbox>
               <span class="label">缩放</span>
               <el-slider v-model="zoom" :min="0.5" :max="3" :step="0.1" style="width: 120px" />
             </div>
             <div
-              v-if="(primaryPanel.layers || []).some((l) => l.error)"
+              v-if="panels.some((p) => (p.layers || []).some((l) => l.error) || p.error)"
               class="hint"
             >
-              部分特征层加载失败，见下方勾选层旁提示
+              部分侧图/特征加载失败，见各栏提示
             </div>
           </div>
 
-          <div class="compare-grid" :class="{ 'single-mode': panels.length < 2 }">
+          <div class="compare-grid">
             <div
               v-for="(panel, idx) in panels"
               :key="panel.role || panel.cap_image_id || idx"
               class="pane"
             >
               <div class="pane-title">
-                {{ panel.cap_image_id }}
-                <span v-if="panel.role" class="muted"> · {{ panel.role }}</span>
+                <template v-if="panel.role === 'reg'">注册 · </template>
+                <template v-else-if="panel.role === 'match'">比对 · </template>
+                {{ panel.cap_image_id || '(缺失)' }}
               </div>
               <div class="canvas-wrap">
-                <canvas :ref="(el) => setCanvasRef(idx, el)" />
+                <canvas v-if="panelUrls[idx]" :ref="(el) => setCanvasRef(idx, el)" />
+                <el-empty
+                  v-else
+                  :description="panel.error || panel.image?.error || '无图像'"
+                  :image-size="48"
+                />
               </div>
               <div class="pane-layers">
                 <span class="label">特征层</span>
@@ -902,17 +920,9 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </div>
-
-            <!-- Reserved second pane when only one panel (future pair mode). -->
-            <div v-if="panels.length < 2" class="pane pane-placeholder" aria-hidden="true">
-              <div class="pane-title muted">配对栏（预留）</div>
-              <div class="canvas-wrap placeholder-body">
-                <el-empty description="关联表就绪后显示双栏对比" :image-size="48" />
-              </div>
-            </div>
           </div>
         </template>
-        <el-empty v-else description="请在左侧树中选择一条业务样本" />
+        <el-empty v-else description="请在左侧树中选择一对指纹" />
       </main>
     </div>
 

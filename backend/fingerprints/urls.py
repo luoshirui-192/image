@@ -2,6 +2,8 @@ from django.urls import path
 
 from fingerprints.views import (
     FingerprintBizMetaView,
+    FingerprintBizPairListView,
+    FingerprintBizPairViewView,
     FingerprintBizSampleListView,
     FingerprintBizSampleViewView,
     FingerprintImportJobDetailView,
@@ -19,6 +21,12 @@ from fingerprints.views import (
 urlpatterns = [
     path("meta/", FingerprintMetaView.as_view(), name="fingerprint-meta"),
     path("biz/meta/", FingerprintBizMetaView.as_view(), name="fingerprint-biz-meta"),
+    path("biz/pairs/", FingerprintBizPairListView.as_view(), name="fingerprint-biz-pairs"),
+    path(
+        "biz/pairs/<int:pk>/view/",
+        FingerprintBizPairViewView.as_view(),
+        name="fingerprint-biz-pair-view",
+    ),
     path("biz/samples/", FingerprintBizSampleListView.as_view(), name="fingerprint-biz-samples"),
     path(
         "biz/samples/<str:cap_image_id>/view/",
