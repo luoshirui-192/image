@@ -4,6 +4,19 @@ export function fetchFingerprintMetaApi() {
   return request.get('/fingerprints/meta/')
 }
 
+/** Business-table browse: T_CAP_FP_DATA + T_FEATURE_RECORD */
+export function fetchFingerprintBizMetaApi(params = {}) {
+  return request.get('/fingerprints/biz/meta/', { params })
+}
+
+export function fetchFingerprintBizSamplesApi(params = {}) {
+  return request.get('/fingerprints/biz/samples/', { params })
+}
+
+export function fetchFingerprintBizSampleViewApi(capImageId, params = {}) {
+  return request.get(`/fingerprints/biz/samples/${encodeURIComponent(capImageId)}/view/`, { params })
+}
+
 export function fetchFingerprintLayerTypesApi(params = {}) {
   return request.get('/fingerprints/layer-types/', { params })
 }

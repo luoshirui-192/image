@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import {
   fetchImageBlob,
   listBlobCatalogConnectionsApi,
@@ -10,12 +10,11 @@ import { useAuthStore } from '@/stores/auth'
 import {
   cancelFingerprintImportJobApi,
   createFingerprintLayerTypeApi,
-  deleteFingerprintPairApi,
-  fetchFingerprintCompareApi,
+  fetchFingerprintBizMetaApi,
+  fetchFingerprintBizSampleViewApi,
+  fetchFingerprintBizSamplesApi,
   fetchFingerprintImportJobApi,
   fetchFingerprintLayerTypesApi,
-  fetchFingerprintMetaApi,
-  fetchFingerprintPairsApi,
   importFingerprintZipApi,
   updateFingerprintLayerTypeApi,
 } from '@/api/fingerprints'
@@ -29,9 +28,10 @@ const compareLoading = ref(false)
 const importing = ref(false)
 const importJob = ref(null)
 const pollTimer = ref(null)
+
 const rows = ref([])
 const total = ref(0)
-const selectedPairId = ref(null)
+const selectedCapId = ref(null)
 
 const importDialogVisible = ref(false)
 const importFile = ref(null)
@@ -44,8 +44,15 @@ const wbLoading = ref(false)
 const wbConnections = ref([])
 const wbConnectionKey = ref('')
 
+/** Browse connection (same catalog as writeback). */
+const browseConnectionKey = ref('')
+const browseLoading = ref(false)
+
 const selectedWbConnection = computed(() =>
   wbConnections.value.find((c) => connectionKey(c) === wbConnectionKey.value) || null,
+)
+const selectedBrowseConnection = computed(() =>
+  wbConnections.value.find((c) => connectionKey(c) === browseConnectionKey.value) || null,
 )
 
 const dupReport = computed(() => importJob.value?.duplicate_report || null)
@@ -60,29 +67,48 @@ function connectionKey(conn) {
   return `alias:${conn.alias || 'default'}`
 }
 
+function connectionQueryParams(conn) {
+  if (!conn) return null
+  const params = { database: 'ara_fp_analyst' }
+  if (conn.connection_id != null) {
+    params.connection_id = conn.connection_id
+  } else {
+    params.db_alias = conn.alias || 'default'
+    // Local/default alias: leave database empty so sqlite tests / same-DB work.
+    if (!conn.connection_id && (conn.alias === 'default' || !conn.alias)) {
+      params.database = ''
+    }
+  }
+  return params
+}
+
 function resetWritebackForm() {
   wbEnabled.value = false
   wbConnectionKey.value = ''
 }
 
-async function ensureWbConnections() {
+async function ensureConnections() {
   if (wbConnections.value.length) return
   wbLoading.value = true
+  browseLoading.value = true
   try {
     const res = await listBlobCatalogConnectionsApi()
     wbConnections.value = res.data || []
-    if (!wbConnectionKey.value && wbConnections.value.length) {
-      // Prefer a connection that looks like the analyst DB host if labeled; else first.
-      const preferred = wbConnections.value.find((c) =>
-        String(c.label || c.alias || '').toLowerCase().includes('ara')
-        || String(c.name || '').toLowerCase().includes('ara'),
-      )
-      wbConnectionKey.value = connectionKey(preferred || wbConnections.value[0])
+    const preferred = wbConnections.value.find((c) =>
+      String(c.label || c.alias || '').toLowerCase().includes('ara')
+      || String(c.name || '').toLowerCase().includes('ara'),
+    )
+    const fallback = preferred || wbConnections.value[0]
+    if (fallback) {
+      const key = connectionKey(fallback)
+      if (!browseConnectionKey.value) browseConnectionKey.value = key
+      if (!wbConnectionKey.value) wbConnectionKey.value = key
     }
   } catch (err) {
     ElMessage.error(err.message || '加载数据库连接失败')
   } finally {
     wbLoading.value = false
+    browseLoading.value = false
   }
 }
 
@@ -119,181 +145,290 @@ const typeForm = reactive({
 })
 
 const meta = reactive({
-  finger_positions: [],
-  algo_versions: [],
+  dataset_codes: [],
   layer_types: [],
 })
 
 const filters = reactive({
   keyword: '',
-  finger_position: '',
-  batch_name: '',
-  layer_type: '',
-  algo_version: '',
-  score_min: undefined,
-  score_max: undefined,
+  dataset_code: '',
 })
 
 const payload = ref(null)
 const showLabels = ref(true)
 const zoom = ref(1)
-const versionMode = ref('overlay') // overlay | split
-const leftTypes = ref([])
-const rightTypes = ref([])
-const selectedVersions = ref([])
+const panelTypes = ref([]) // layer_type keys checked for primary panel
 const layersReady = ref(false)
 
-const leftUrl = ref('')
-const rightUrl = ref('')
-const leftCanvas = ref(null)
-const rightCanvas = ref(null)
-const leftCanvasA = ref(null)
-const leftCanvasB = ref(null)
-const rightCanvasA = ref(null)
-const rightCanvasB = ref(null)
-const leftImg = ref(null)
-const rightImg = ref(null)
+const panelUrls = ref([]) // object URLs per panel
+const panelCanvases = ref([]) // canvas refs via function
+const panelImgs = ref([])
 
-const layerTypeLabel = computed(() => {
-  const map = {}
-  for (const item of meta.layer_types) {
-    map[item.layer_key] = item.label || item.layer_key
-  }
-  return map
-})
-
-const checkboxOptions = computed(() => {
-  const available = new Set(payload.value?.available_layer_types || [])
-  const opts = (payload.value?.layer_type_options || []).filter((t) => available.has(t.layer_key))
-  if (opts.length) return opts
-  return [...available].map((key) => ({
-    layer_key: key,
-    label: layerTypeLabel.value[key] || key,
-    color: '#888',
-  }))
-})
-
-const availableVersions = computed(() => payload.value?.available_algo_versions || [])
-
-/** In split mode use the first two checked versions (sorted). */
-const splitVersions = computed(() => {
-  const sorted = [...selectedVersions.value].sort()
-  return sorted.slice(0, 2)
-})
-
-const selectedPair = computed(() => rows.value.find((r) => r.id === selectedPairId.value) || null)
+const panels = computed(() => payload.value?.panels || [])
+const primaryPanel = computed(() => panels.value[0] || null)
 
 const treeData = computed(() => {
   const groups = new Map()
   for (const row of rows.value) {
-    const key = row.finger_position || 'unknown'
+    const key = row.dataset_code || 'unknown'
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key).push(row)
   }
   return [...groups.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([position, items]) => ({
-      id: `pos:${position}`,
-      label: `${position}（${items.length}）`,
+    .map(([dataset, items]) => ({
+      id: `ds:${dataset}`,
+      label: `${dataset}（${items.length}）`,
       isGroup: true,
       children: items.map((row) => ({
-        id: `pair:${row.id}`,
-        pairId: row.id,
-        label: formatPairLabel(row),
+        id: `cap:${row.cap_image_id}`,
+        capImageId: row.cap_image_id,
+        label: row.cap_image_id,
         isGroup: false,
         row,
       })),
     }))
 })
 
-function formatPairLabel(row) {
-  const score = row.match_score != null ? ` · ${row.match_score}` : ''
-  const vers = (row.algo_versions || []).join('/')
-  const verPart = vers ? ` [${vers}]` : ''
-  return `${row.batch_name || `#${row.id}`}${score}${verPart}`
+const checkboxOptions = computed(() => {
+  const available = new Set(primaryPanel.value?.available_layer_types || payload.value?.available_layer_types || [])
+  const opts = (payload.value?.layer_type_options || meta.layer_types || []).filter((t) =>
+    available.has(t.layer_key),
+  )
+  if (opts.length) return opts
+  return [...available].map((key) => ({
+    layer_key: key,
+    label: key,
+    color: '#888',
+  }))
+})
+
+function setCanvasRef(idx, el) {
+  panelCanvases.value[idx] = el
 }
 
 async function loadMeta() {
-  const res = await fetchFingerprintMetaApi()
-  meta.finger_positions = res.data.finger_positions || []
-  meta.algo_versions = res.data.algo_versions || []
-  meta.layer_types = res.data.layer_types || []
+  const conn = selectedBrowseConnection.value
+  const params = connectionQueryParams(conn)
+  if (!params) {
+    meta.dataset_codes = []
+    meta.layer_types = []
+    return
+  }
+  try {
+    const res = await fetchFingerprintBizMetaApi(params)
+    meta.dataset_codes = res.data.dataset_codes || []
+    meta.layer_types = res.data.layer_types || []
+  } catch (err) {
+    ElMessage.error(err.message || '加载业务表元数据失败')
+  }
 }
 
-async function loadPairs() {
+async function loadSamples() {
+  const conn = selectedBrowseConnection.value
+  const params = connectionQueryParams(conn)
+  if (!params) {
+    rows.value = []
+    total.value = 0
+    return
+  }
   loading.value = true
   try {
-    const params = { page: 1, page_size: 500 }
-    for (const key of ['keyword', 'finger_position', 'batch_name', 'layer_type', 'algo_version']) {
-      if (filters[key]) params[key] = filters[key]
+    const q = {
+      ...params,
+      page: 1,
+      page_size: 500,
     }
-    if (filters.score_min != null && filters.score_min !== '') params.score_min = filters.score_min
-    if (filters.score_max != null && filters.score_max !== '') params.score_max = filters.score_max
-    const res = await fetchFingerprintPairsApi(params)
+    if (filters.keyword) q.keyword = filters.keyword
+    if (filters.dataset_code) q.dataset_code = filters.dataset_code
+    const res = await fetchFingerprintBizSamplesApi(q)
     rows.value = res.data.items || []
     total.value = res.data.total || 0
-    if (selectedPairId.value && !rows.value.some((r) => r.id === selectedPairId.value)) {
-      selectedPairId.value = null
-      clearCompare()
+    if (selectedCapId.value && !rows.value.some((r) => r.cap_image_id === selectedCapId.value)) {
+      selectedCapId.value = null
+      clearView()
     }
   } catch (err) {
-    ElMessage.error(err.message || '加载失败')
+    ElMessage.error(err.message || '加载业务样本失败')
+    rows.value = []
+    total.value = 0
   } finally {
     loading.value = false
   }
 }
 
 function onSearch() {
-  loadPairs()
+  loadSamples()
 }
 
 function onReset() {
   filters.keyword = ''
-  filters.finger_position = ''
-  filters.batch_name = ''
-  filters.layer_type = ''
-  filters.algo_version = ''
-  filters.score_min = undefined
-  filters.score_max = undefined
-  loadPairs()
+  filters.dataset_code = ''
+  loadSamples()
 }
 
 function onTreeNodeClick(data) {
-  if (data.isGroup || !data.pairId) return
-  selectPair(data.pairId)
+  if (data.isGroup || !data.capImageId) return
+  selectSample(data.capImageId)
 }
 
-function selectPair(pairId) {
-  selectedPairId.value = Number(pairId)
-  router.replace({ query: { ...route.query, id: String(pairId) } }).catch(() => {})
-  loadCompare(Number(pairId))
+function selectSample(capImageId) {
+  selectedCapId.value = String(capImageId)
+  router.replace({ query: { ...route.query, cap: String(capImageId) } }).catch(() => {})
+  loadView(String(capImageId))
 }
 
-function clearCompare() {
+function clearView() {
   payload.value = null
   layersReady.value = false
-  leftTypes.value = []
-  rightTypes.value = []
-  selectedVersions.value = []
+  panelTypes.value = []
   revokeUrls()
-  leftImg.value = null
-  rightImg.value = null
+  panelImgs.value = []
 }
 
-async function onDeleteSelected() {
-  const row = selectedPair.value
-  if (!row) return
+function revokeUrls() {
+  for (const url of panelUrls.value) {
+    if (url) URL.revokeObjectURL(url)
+  }
+  panelUrls.value = []
+}
+
+async function loadView(capImageId) {
+  if (!capImageId) return
+  const conn = selectedBrowseConnection.value
+  const params = connectionQueryParams(conn)
+  if (!params) {
+    ElMessage.warning('请先选择能访问 ara_fp_analyst 的数据库连接')
+    return
+  }
+  compareLoading.value = true
+  layersReady.value = false
   try {
-    await ElMessageBox.confirm(`确认删除配对 ${row.batch_name}？`, '删除确认', { type: 'warning' })
-    await deleteFingerprintPairApi(row.id)
-    ElMessage.success('已删除')
-    selectedPairId.value = null
-    clearCompare()
-    await loadPairs()
+    const res = await fetchFingerprintBizSampleViewApi(capImageId, {
+      ...params,
+      show_labels: '1',
+    })
+    payload.value = res.data
+    const types = res.data.available_layer_types || res.data.panels?.[0]?.available_layer_types || []
+    panelTypes.value = [...types]
+    layersReady.value = true
+
+    revokeUrls()
+    const urls = []
+    for (const panel of res.data.panels || []) {
+      const path = panel.image?.path
+      if (!path) {
+        urls.push('')
+        continue
+      }
+      if (panel.image?.error) {
+        ElMessage.warning(`${panel.cap_image_id}: ${panel.image.error}`)
+      }
+      try {
+        const blob = await fetchImageBlob(path, { thumb: false })
+        urls.push(URL.createObjectURL(blob))
+      } catch (err) {
+        urls.push('')
+        ElMessage.error(err.message || `加载图像失败: ${path}`)
+      }
+    }
+    panelUrls.value = urls
+    await nextTick()
+    await drawPanels()
   } catch (err) {
-    if (err !== 'cancel') ElMessage.error(err.message || '删除失败')
+    clearView()
+    ElMessage.error(err.message || '加载样本失败')
+  } finally {
+    compareLoading.value = false
   }
 }
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = reject
+    img.src = url
+  })
+}
+
+function layerVisible(layer) {
+  return panelTypes.value.includes(layer.layer_type)
+}
+
+function drawPanel(canvasEl, imgEl, panel) {
+  if (!canvasEl || !imgEl || !panel) return
+  const layers = (panel.layers || []).filter(layerVisible)
+  const width = imgEl.naturalWidth || imgEl.width
+  const height = imgEl.naturalHeight || imgEl.height
+  const scale = zoom.value
+  canvasEl.width = Math.round(width * scale)
+  canvasEl.height = Math.round(height * scale)
+  const ctx = canvasEl.getContext('2d')
+  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height)
+  ctx.imageSmoothingEnabled = false
+  ctx.drawImage(imgEl, 0, 0, canvasEl.width, canvasEl.height)
+
+  const arrowLen = 12 * scale
+  for (const layer of layers) {
+    const color = layer.color || '#e53935'
+    const minutiae = layer.minutiae?.minutiae || []
+    for (const m of minutiae) {
+      const x = m.x * scale
+      const y = m.y * scale
+      const rad = ((m.d || 0) * Math.PI) / 180
+      ctx.beginPath()
+      ctx.arc(x, y, 2.2 * scale, 0, Math.PI * 2)
+      ctx.fillStyle = color
+      ctx.fill()
+      ctx.beginPath()
+      ctx.moveTo(x, y)
+      ctx.lineTo(x + Math.cos(rad) * arrowLen, y - Math.sin(rad) * arrowLen)
+      ctx.strokeStyle = color
+      ctx.lineWidth = Math.max(1, scale)
+      ctx.stroke()
+      if (showLabels.value && m.index != null) {
+        ctx.fillStyle = '#111'
+        ctx.font = `${Math.max(9, 10 * scale)}px sans-serif`
+        ctx.fillText(String(m.index), x + 3 * scale, y - 3 * scale)
+      }
+    }
+  }
+}
+
+async function drawPanels() {
+  const imgs = []
+  for (let i = 0; i < panelUrls.value.length; i += 1) {
+    const url = panelUrls.value[i]
+    if (!url) {
+      imgs[i] = null
+      continue
+    }
+    imgs[i] = await loadImage(url)
+  }
+  panelImgs.value = imgs
+  await nextTick()
+  redrawPanels()
+}
+
+function redrawPanels() {
+  for (let i = 0; i < panels.value.length; i += 1) {
+    drawPanel(panelCanvases.value[i], panelImgs.value[i], panels.value[i])
+  }
+}
+
+watch([panelTypes, showLabels, zoom], async () => {
+  if (!layersReady.value) return
+  await nextTick()
+  redrawPanels()
+})
+
+watch(browseConnectionKey, async () => {
+  clearView()
+  selectedCapId.value = null
+  await loadMeta()
+  await loadSamples()
+})
 
 function stopPoll() {
   if (pollTimer.value) {
@@ -307,9 +442,8 @@ function stopPoll() {
 const pollInFlight = ref(false)
 const pollFailStreak = ref(0)
 
-function normalizeImportJobPayload(payload) {
-  // request interceptor returns { code, message, data }
-  const data = payload?.data ?? payload
+function normalizeImportJobPayload(jobPayload) {
+  const data = jobPayload?.data ?? jobPayload
   if (!data || typeof data !== 'object') return null
   if (data.job && typeof data.job === 'object') return data.job
   if (data.id != null || data.status != null) return data
@@ -329,7 +463,6 @@ async function pollImportJob(jobId) {
     const job = normalizeImportJobPayload(res)
     if (!job) {
       pollFailStreak.value += 1
-      // Keep last known progress visible; only stop after repeated bad payloads
       if (pollFailStreak.value >= 5) {
         stopPoll()
         importing.value = false
@@ -360,8 +493,8 @@ async function pollImportJob(jobId) {
       } else if (status === 'failed') ElMessage.error(job.message || job.last_error || '导入失败')
       else ElMessage.warning(job.message || '已取消')
       await loadMeta()
-      await loadPairs()
-      if (selectedPairId.value) await loadCompare(selectedPairId.value)
+      await loadSamples()
+      if (selectedCapId.value) await loadView(selectedCapId.value)
     }
   } catch (err) {
     pollFailStreak.value += 1
@@ -381,11 +514,11 @@ function openImportDialog() {
   importFailOnDuplicates.value = false
   resetWritebackForm()
   importDialogVisible.value = true
-  ensureWbConnections()
+  ensureConnections()
 }
 
 watch(wbEnabled, (on) => {
-  if (on) ensureWbConnections()
+  if (on) ensureConnections()
 })
 
 function dupTypeLabel(type) {
@@ -437,22 +570,11 @@ async function submitImport() {
       return
     }
     importJob.value = job
-    dupReportExpanded.value = false
-    pollFailStreak.value = 0
-    ElMessage.success(
-      pathWriteback
-        ? `已启动导入（版本 ${ver}，含路径写回）`
-        : `已启动导入（版本 ${ver}）：已有配对会合并新版本特征层`,
-    )
+    pollTimer.value = setInterval(() => pollImportJob(job.id), 1200)
     await pollImportJob(job.id)
-    if (importing.value) {
-      pollTimer.value = setInterval(() => {
-        pollImportJob(job.id)
-      }, 1500)
-    }
   } catch (err) {
     importing.value = false
-    ElMessage.error(err.message || '导入失败')
+    ElMessage.error(err.message || '启动导入失败')
   }
 }
 
@@ -460,15 +582,9 @@ async function onCancelImport() {
   if (!importJob.value?.id) return
   try {
     await cancelFingerprintImportJobApi(importJob.value.id)
-    ElMessage.info('已请求取消')
   } catch (err) {
     ElMessage.error(err.message || '取消失败')
   }
-}
-
-async function openTypeDialog() {
-  typeDialogVisible.value = true
-  await loadTypeRows()
 }
 
 async function loadTypeRows() {
@@ -483,27 +599,13 @@ async function loadTypeRows() {
   }
 }
 
+function openTypeDialog() {
+  typeDialogVisible.value = true
+}
+
 async function submitNewType() {
-  if (!auth.isAdmin) {
-    ElMessage.error('仅管理员可新增')
-    return
-  }
-  const key = (typeForm.layer_key || '').trim().toLowerCase()
-  const suffixes = (typeForm.suffixes || key).trim().toLowerCase()
-  if (!key || !suffixes) {
-    ElMessage.warning('layer_key 与 suffixes 必填')
-    return
-  }
   try {
-    await createFingerprintLayerTypeApi({
-      layer_key: key,
-      label: typeForm.label || key,
-      color: typeForm.color || '#888888',
-      suffixes,
-      default_setlen: Number(typeForm.default_setlen) || 0,
-      default_setang: Number(typeForm.default_setang) || 256,
-      sort_order: Number(typeForm.sort_order) || 100,
-    })
+    await createFingerprintLayerTypeApi({ ...typeForm })
     ElMessage.success('已新增特征类型')
     typeForm.layer_key = ''
     typeForm.label = ''
@@ -516,7 +618,6 @@ async function submitNewType() {
 }
 
 async function toggleTypeEnabled(row) {
-  if (!auth.isAdmin) return
   try {
     await updateFingerprintLayerTypeApi(row.id, { enabled: !row.enabled })
     await loadTypeRows()
@@ -526,147 +627,14 @@ async function toggleTypeEnabled(row) {
   }
 }
 
-function revokeUrls() {
-  if (leftUrl.value) URL.revokeObjectURL(leftUrl.value)
-  if (rightUrl.value) URL.revokeObjectURL(rightUrl.value)
-  leftUrl.value = ''
-  rightUrl.value = ''
-}
-
-async function loadCompare(pairId) {
-  if (!pairId) return
-  compareLoading.value = true
-  layersReady.value = false
-  try {
-    const res = await fetchFingerprintCompareApi(pairId, { show_labels: '1' })
-    payload.value = res.data
-    leftTypes.value = [...(res.data.available_layer_types || [])]
-    rightTypes.value = [...(res.data.available_layer_types || [])]
-    selectedVersions.value = [...(res.data.available_algo_versions || [])]
-    if (selectedVersions.value.length >= 2) {
-      versionMode.value = versionMode.value || 'overlay'
-    }
-    layersReady.value = true
-
-    revokeUrls()
-    const leftBlob = await fetchImageBlob(res.data.left.image_path, {
-      id: res.data.left.image_id,
-      thumb: false,
-    })
-    const rightBlob = await fetchImageBlob(res.data.right.image_path, {
-      id: res.data.right.image_id,
-      thumb: false,
-    })
-    leftUrl.value = URL.createObjectURL(leftBlob)
-    rightUrl.value = URL.createObjectURL(rightBlob)
-    await nextTick()
-    await drawBoth()
-  } catch (err) {
-    clearCompare()
-    ElMessage.error(err.message || '加载对比失败')
-  } finally {
-    compareLoading.value = false
-  }
-}
-
-function loadImage(url) {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => resolve(img)
-    img.onerror = reject
-    img.src = url
-  })
-}
-
-function layerVisible(layer, side, versionFilter) {
-  const types = side === 'left' ? leftTypes.value : rightTypes.value
-  if (!types.includes(layer.layer_type)) return false
-  if (versionFilter != null) {
-    return layer.algo_version === versionFilter
-  }
-  if (selectedVersions.value.length && !selectedVersions.value.includes(layer.algo_version)) {
-    return false
-  }
-  return true
-}
-
-function drawSide(canvasEl, imgEl, side, versionFilter = null) {
-  if (!canvasEl || !imgEl || !payload.value) return
-  const layers = (payload.value.layers || []).filter(
-    (l) => l.side === side && layerVisible(l, side, versionFilter),
-  )
-  const width = imgEl.naturalWidth || imgEl.width
-  const height = imgEl.naturalHeight || imgEl.height
-  const scale = zoom.value
-  canvasEl.width = Math.round(width * scale)
-  canvasEl.height = Math.round(height * scale)
-  const ctx = canvasEl.getContext('2d')
-  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height)
-  ctx.imageSmoothingEnabled = false
-  ctx.drawImage(imgEl, 0, 0, canvasEl.width, canvasEl.height)
-
-  const arrowLen = 12 * scale
-  for (const layer of layers) {
-    const color = layer.color || '#e53935'
-    const minutiae = layer.minutiae?.minutiae || []
-    for (const m of minutiae) {
-      const x = m.x * scale
-      const y = m.y * scale
-      const rad = ((m.d || 0) * Math.PI) / 180
-      ctx.beginPath()
-      ctx.arc(x, y, 2.2 * scale, 0, Math.PI * 2)
-      ctx.fillStyle = color
-      ctx.fill()
-      ctx.beginPath()
-      ctx.moveTo(x, y)
-      ctx.lineTo(x + Math.cos(rad) * arrowLen, y - Math.sin(rad) * arrowLen)
-      ctx.strokeStyle = color
-      ctx.lineWidth = Math.max(1, scale)
-      ctx.stroke()
-      if (showLabels.value && m.index != null) {
-        ctx.fillStyle = '#111'
-        ctx.font = `${Math.max(9, 10 * scale)}px sans-serif`
-        ctx.fillText(String(m.index), x + 3 * scale, y - 3 * scale)
-      }
-    }
-  }
-}
-
-async function drawBoth() {
-  if (!leftUrl.value || !rightUrl.value) return
-  leftImg.value = await loadImage(leftUrl.value)
-  rightImg.value = await loadImage(rightUrl.value)
-  await nextTick()
-  redrawBoth()
-}
-
-function redrawBoth() {
-  if (!leftImg.value || !rightImg.value) return
-  if (versionMode.value === 'split' && splitVersions.value.length >= 2) {
-    const [va, vb] = splitVersions.value
-    drawSide(leftCanvasA.value, leftImg.value, 'left', va)
-    drawSide(leftCanvasB.value, leftImg.value, 'left', vb)
-    drawSide(rightCanvasA.value, rightImg.value, 'right', va)
-    drawSide(rightCanvasB.value, rightImg.value, 'right', vb)
-  } else {
-    drawSide(leftCanvas.value, leftImg.value, 'left', null)
-    drawSide(rightCanvas.value, rightImg.value, 'right', null)
-  }
-}
-
-watch([leftTypes, rightTypes, selectedVersions, showLabels, zoom, versionMode], async () => {
-  if (!layersReady.value) return
-  await nextTick()
-  redrawBoth()
-})
-
 onMounted(async () => {
+  await ensureConnections()
   await loadMeta()
-  await loadPairs()
-  const qid = Number(route.query.id || route.params.id)
-  if (qid) {
-    selectedPairId.value = qid
-    await loadCompare(qid)
+  await loadSamples()
+  const cap = route.query.cap || route.params.cap
+  if (cap) {
+    selectedCapId.value = String(cap)
+    await loadView(String(cap))
   }
 })
 
@@ -680,10 +648,25 @@ onBeforeUnmount(() => {
   <div class="fp-page">
     <div class="fp-toolbar">
       <div class="fp-title">
-        <h2>指纹成对对比</h2>
-        <p>左树选配对 · 右栏对比 · 支持多特征类型与多算法版本</p>
+        <h2>指纹特征浏览</h2>
+        <p>业务表 T_CAP_FP_DATA → T_FEATURE_RECORD · 单图叠加细节点（预留双栏）</p>
       </div>
       <div class="import-actions">
+        <el-select
+          v-model="browseConnectionKey"
+          filterable
+          size="default"
+          placeholder="业务库连接"
+          style="width: 220px"
+          :loading="browseLoading"
+        >
+          <el-option
+            v-for="conn in wbConnections"
+            :key="connectionKey(conn)"
+            :label="conn.label || conn.alias"
+            :value="connectionKey(conn)"
+          />
+        </el-select>
         <el-button v-if="auth.isAdmin" @click="openTypeDialog">特征类型</el-button>
         <el-button type="primary" :loading="importing" @click="openImportDialog">导入 zip</el-button>
         <el-button v-if="importing && importJob" @click="onCancelImport">取消导入</el-button>
@@ -717,24 +700,23 @@ onBeforeUnmount(() => {
         v-if="importJob.path_writeback_enabled && (importJob.writeback_errors || []).length"
         class="dup-report"
       >
-        <div class="muted">写回错误样例：</div>
+        <div class="dup-report-head"><strong>写回错误</strong></div>
         <ul class="wb-errors">
-          <li v-for="(err, idx) in (importJob.writeback_errors || []).slice(0, 8)" :key="idx">{{ err }}</li>
+          <li v-for="(err, i) in importJob.writeback_errors" :key="i">{{ err }}</li>
         </ul>
       </div>
       <div v-if="dupReport && dupReport.total > 0" class="dup-report">
         <div class="dup-report-head">
-          <el-tag type="warning" size="small">重复检测</el-tag>
-          <span>{{ dupReport.summary }}</span>
-          <el-button link type="primary" size="small" @click="dupReportExpanded = !dupReportExpanded">
-            {{ dupReportExpanded ? '收起' : '展开明细' }}
+          <strong>重复检测</strong>
+          <span class="muted">{{ dupReport.total }} 项</span>
+          <el-button link type="primary" @click="dupReportExpanded = !dupReportExpanded">
+            {{ dupReportExpanded ? '收起' : '展开' }}
           </el-button>
         </div>
         <div v-if="dupReportExpanded" class="dup-report-body">
           <div v-for="(w, idx) in dupWarningRows" :key="idx" class="dup-row">
-            <el-tag size="small" effect="plain">{{ dupTypeLabel(w.type) }}</el-tag>
-            <span>{{ w.message }}</span>
-            <span v-if="w.paths?.length" class="dup-paths">{{ w.paths.slice(0, 4).join(' · ') }}</span>
+            <el-tag size="small" type="warning">{{ dupTypeLabel(w.type) }}</el-tag>
+            <span class="dup-paths">{{ (w.paths || w.names || []).join(' · ') }}</span>
           </div>
           <div v-if="(dupReport.warnings || []).length > dupWarningRows.length" class="muted">
             仅显示前 {{ dupWarningRows.length }} 条
@@ -746,25 +728,14 @@ onBeforeUnmount(() => {
     <div class="layout">
       <aside class="tree-panel" v-loading="loading">
         <div class="panel-head">
-          <strong>配对目录</strong>
-          <span class="muted">共 {{ total }} 对</span>
+          <strong>业务样本</strong>
+          <span class="muted">共 {{ total }}</span>
         </div>
         <div class="filter-box">
-          <el-input v-model="filters.keyword" clearable size="small" placeholder="关键词" @keyup.enter="onSearch" />
-          <el-select v-model="filters.finger_position" clearable size="small" placeholder="指位" style="width: 100%">
-            <el-option v-for="p in meta.finger_positions" :key="p" :label="p" :value="p" />
+          <el-input v-model="filters.keyword" clearable size="small" placeholder="cap_image_id" @keyup.enter="onSearch" />
+          <el-select v-model="filters.dataset_code" clearable size="small" placeholder="dataset_code" style="width: 100%">
+            <el-option v-for="c in meta.dataset_codes" :key="c" :label="c" :value="c" />
           </el-select>
-          <el-select v-model="filters.layer_type" clearable size="small" placeholder="特征层" style="width: 100%">
-            <el-option v-for="t in meta.layer_types" :key="t.layer_key" :label="t.label" :value="t.layer_key" />
-          </el-select>
-          <el-select v-model="filters.algo_version" clearable size="small" placeholder="算法版本" style="width: 100%">
-            <el-option v-for="v in meta.algo_versions" :key="v" :label="v" :value="v" />
-          </el-select>
-          <div class="score-row">
-            <el-input-number v-model="filters.score_min" :controls="false" size="small" placeholder="分min" style="width: 100%" />
-            <span>~</span>
-            <el-input-number v-model="filters.score_max" :controls="false" size="small" placeholder="分max" style="width: 100%" />
-          </div>
           <div class="filter-actions">
             <el-button type="primary" size="small" @click="onSearch">筛选</el-button>
             <el-button size="small" @click="onReset">重置</el-button>
@@ -780,72 +751,58 @@ onBeforeUnmount(() => {
             :expand-on-click-node="false"
             @node-click="onTreeNodeClick"
           />
-          <el-empty v-else description="暂无配对，请先导入 zip" :image-size="64" />
+          <el-empty
+            v-else
+            :description="browseConnectionKey ? '暂无业务样本（需先导入并启用路径写回）' : '请选择业务库连接'"
+            :image-size="64"
+          />
         </div>
-        <div v-if="selectedPair" class="selection-foot">
-          <div class="sel-title">{{ selectedPair.batch_name }}</div>
-          <div class="sel-meta">
-            {{ selectedPair.finger_position }}
-            <template v-if="selectedPair.match_score != null"> · score {{ selectedPair.match_score }}</template>
-            <template v-if="selectedPair.algo_versions?.length"> · ver {{ selectedPair.algo_versions.join(', ') }}</template>
-          </div>
-          <el-button size="small" type="danger" plain @click="onDeleteSelected">删除此配对</el-button>
+        <div v-if="selectedCapId" class="selection-foot">
+          <div class="sel-title">{{ selectedCapId }}</div>
+          <div class="sel-meta">来自 T_CAP_FP_DATA</div>
         </div>
       </aside>
 
       <main class="compare-panel" v-loading="compareLoading">
-        <template v-if="payload">
+        <template v-if="payload && primaryPanel">
           <div class="compare-toolbar">
             <div class="meta">
-              {{ payload.pair.batch_name }} · {{ payload.pair.finger_position }}
-              <template v-if="payload.pair.match_score != null"> · score {{ payload.pair.match_score }}</template>
+              {{ primaryPanel.cap_image_id }}
+              <template v-if="primaryPanel.dataset_code"> · {{ primaryPanel.dataset_code }}</template>
+              <template v-if="payload.mode"> · {{ payload.mode }}</template>
             </div>
             <div class="controls">
-              <span class="label">版本对比</span>
-              <el-radio-group v-model="versionMode" size="small">
-                <el-radio-button value="overlay">叠色</el-radio-button>
-                <el-radio-button value="split" :disabled="availableVersions.length < 2">分列</el-radio-button>
-              </el-radio-group>
-              <span class="label">版本</span>
-              <el-checkbox-group v-model="selectedVersions">
-                <el-checkbox v-for="v in availableVersions" :key="v" :label="v" :value="v">{{ v }}</el-checkbox>
-              </el-checkbox-group>
               <el-checkbox v-model="showLabels">编号</el-checkbox>
               <span class="label">缩放</span>
               <el-slider v-model="zoom" :min="0.5" :max="3" :step="0.1" style="width: 120px" />
             </div>
-            <div v-if="versionMode === 'split'" class="hint">
-              分列模式使用已勾选版本中的前两个：{{ splitVersions.join(' | ') || '请至少勾选两个版本' }}
+            <div
+              v-if="(primaryPanel.layers || []).some((l) => l.error)"
+              class="hint"
+            >
+              部分特征层加载失败，见下方勾选层旁提示
             </div>
           </div>
 
-          <div class="compare-grid">
-            <!-- LEFT sample -->
-            <div class="pane">
-              <div class="pane-title">{{ payload.left.image_name }}</div>
-              <div v-if="versionMode === 'overlay'" class="canvas-wrap">
-                <canvas ref="leftCanvas" />
+          <div class="compare-grid" :class="{ 'single-mode': panels.length < 2 }">
+            <div
+              v-for="(panel, idx) in panels"
+              :key="panel.role || panel.cap_image_id || idx"
+              class="pane"
+            >
+              <div class="pane-title">
+                {{ panel.cap_image_id }}
+                <span v-if="panel.role" class="muted"> · {{ panel.role }}</span>
               </div>
-              <div v-else class="split-wrap">
-                <div class="split-col">
-                  <div class="split-label">ver {{ splitVersions[0] || '-' }}</div>
-                  <div class="canvas-wrap">
-                    <canvas ref="leftCanvasA" />
-                  </div>
-                </div>
-                <div class="split-col">
-                  <div class="split-label">ver {{ splitVersions[1] || '-' }}</div>
-                  <div class="canvas-wrap">
-                    <canvas ref="leftCanvasB" />
-                  </div>
-                </div>
+              <div class="canvas-wrap">
+                <canvas :ref="(el) => setCanvasRef(idx, el)" />
               </div>
               <div class="pane-layers">
-                <span class="label">本侧特征层</span>
-                <el-checkbox-group v-model="leftTypes">
+                <span class="label">特征层</span>
+                <el-checkbox-group v-model="panelTypes">
                   <el-checkbox
                     v-for="opt in checkboxOptions"
-                    :key="`L-${opt.layer_key}`"
+                    :key="`${idx}-${opt.layer_key}`"
                     :label="opt.layer_key"
                     :value="opt.layer_key"
                   >
@@ -853,55 +810,32 @@ onBeforeUnmount(() => {
                     {{ opt.label || opt.layer_key }}
                   </el-checkbox>
                 </el-checkbox-group>
+                <div
+                  v-for="layer in (panel.layers || []).filter((l) => l.error)"
+                  :key="`err-${layer.layer_type}`"
+                  class="layer-error"
+                >
+                  {{ layer.layer_type }}: {{ layer.error }}
+                </div>
               </div>
             </div>
 
-            <!-- RIGHT sample -->
-            <div class="pane">
-              <div class="pane-title">{{ payload.right.image_name }}</div>
-              <div v-if="versionMode === 'overlay'" class="canvas-wrap">
-                <canvas ref="rightCanvas" />
-              </div>
-              <div v-else class="split-wrap">
-                <div class="split-col">
-                  <div class="split-label">ver {{ splitVersions[0] || '-' }}</div>
-                  <div class="canvas-wrap">
-                    <canvas ref="rightCanvasA" />
-                  </div>
-                </div>
-                <div class="split-col">
-                  <div class="split-label">ver {{ splitVersions[1] || '-' }}</div>
-                  <div class="canvas-wrap">
-                    <canvas ref="rightCanvasB" />
-                  </div>
-                </div>
-              </div>
-              <div class="pane-layers">
-                <span class="label">本侧特征层</span>
-                <el-checkbox-group v-model="rightTypes">
-                  <el-checkbox
-                    v-for="opt in checkboxOptions"
-                    :key="`R-${opt.layer_key}`"
-                    :label="opt.layer_key"
-                    :value="opt.layer_key"
-                  >
-                    <span class="swatch" :style="{ background: opt.color }" />
-                    {{ opt.label || opt.layer_key }}
-                  </el-checkbox>
-                </el-checkbox-group>
+            <!-- Reserved second pane when only one panel (future pair mode). -->
+            <div v-if="panels.length < 2" class="pane pane-placeholder" aria-hidden="true">
+              <div class="pane-title muted">配对栏（预留）</div>
+              <div class="canvas-wrap placeholder-body">
+                <el-empty description="关联表就绪后显示双栏对比" :image-size="48" />
               </div>
             </div>
           </div>
         </template>
-        <el-empty v-else description="请在左侧树中选择一对指纹" />
+        <el-empty v-else description="请在左侧树中选择一条业务样本" />
       </main>
     </div>
 
-    <!-- Import dialog -->
     <el-dialog v-model="importDialogVisible" title="导入 batmatch zip" width="640px">
       <p class="dialog-tip">
-        同一配对再次导入时，若填写<strong>新的算法版本</strong>，会把该版本特征层合并进已有配对，用于版本对比；
-        相同版本已存在的层会跳过。
+        导入仍写入本系统图库与配对表；开启<strong>路径写回</strong>后才会进入业务表，左侧树才能看到样本。
       </p>
       <el-form label-width="110px" v-loading="wbLoading">
         <el-form-item label="算法版本" required>
@@ -918,14 +852,12 @@ onBeforeUnmount(() => {
           </el-checkbox>
         </el-form-item>
 
-        <el-divider content-position="left">路径写回（可选）</el-divider>
+        <el-divider content-position="left">路径写回（浏览数据源）</el-divider>
         <p class="dialog-tip">
           固定写入 <code>ara_fp_analyst.T_CAP_FP_DATA</code> /
           <code>T_FEATURE_RECORD</code>；
-          <code>dataset_code=PK_5W</code>；
           图像路径进 <code>fingerprint_image</code>，
-          Bidiso→<code>feature_ara_data</code>，Neuiso→<code>feature_neuro_data</code>；
-          <code>cap_image_id</code>=<code>fp_image_id</code>。
+          Bidiso→<code>feature_ara_data</code>，Neuiso→<code>feature_neuro_data</code>。
         </p>
         <el-form-item label="启用写回">
           <el-switch v-model="wbEnabled" />
@@ -949,9 +881,8 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
-    <!-- Layer type management -->
     <el-dialog v-model="typeDialogVisible" title="特征类型配置" width="720px" @opened="loadTypeRows">
-      <p class="dialog-tip">新增类型后，导入带对应后缀的模板即可在勾选框中出现（扩到约 6 种无需改页面结构）。</p>
+      <p class="dialog-tip">业务浏览当前映射：feature_ara_data→bidiso，feature_neuro_data→neuiso。</p>
       <el-table v-loading="typeLoading" :data="typeRows" size="small" border>
         <el-table-column prop="layer_key" label="key" width="110" />
         <el-table-column prop="label" label="显示名" width="110" />
@@ -987,12 +918,6 @@ onBeforeUnmount(() => {
         </el-form-item>
         <el-form-item label="颜色">
           <el-color-picker v-model="typeForm.color" />
-        </el-form-item>
-        <el-form-item label="setlen">
-          <el-input-number v-model="typeForm.default_setlen" :controls="false" style="width: 70px" />
-        </el-form-item>
-        <el-form-item label="setang">
-          <el-input-number v-model="typeForm.default_setang" :controls="false" style="width: 70px" />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="submitNewType">添加</el-button>
@@ -1030,6 +955,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 .import-progress { flex-shrink: 0; }
 .import-progress-head {
@@ -1113,12 +1039,6 @@ onBeforeUnmount(() => {
   padding: 10px 12px;
   border-bottom: 1px solid var(--el-border-color-lighter);
 }
-.score-row {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  gap: 6px;
-  align-items: center;
-}
 .filter-actions { display: flex; gap: 8px; }
 .tree-wrap { flex: 1; overflow: auto; padding: 8px 4px; }
 .selection-foot {
@@ -1153,6 +1073,9 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
 }
+.compare-grid.single-mode .pane:first-child {
+  /* keep two columns: primary + reserved */
+}
 .pane {
   display: flex;
   flex-direction: column;
@@ -1161,6 +1084,15 @@ onBeforeUnmount(() => {
   background: #f7f7f7;
 }
 .pane:last-child { border-right: none; }
+.pane-placeholder {
+  background: #fafafa;
+  opacity: 0.85;
+}
+.placeholder-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .pane-title {
   padding: 8px 12px;
   font-size: 12px;
@@ -1176,27 +1108,6 @@ onBeforeUnmount(() => {
   text-align: center;
   min-height: 0;
 }
-.split-wrap {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  min-height: 0;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-.split-col {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-right: 1px dashed var(--el-border-color-lighter);
-}
-.split-col:last-child { border-right: none; }
-.split-label {
-  padding: 4px 8px;
-  font-size: 11px;
-  background: #fff;
-  border-bottom: 1px solid var(--el-border-color-extra-light);
-  color: var(--el-text-color-secondary);
-}
 .pane-layers {
   flex-shrink: 0;
   padding: 8px 12px;
@@ -1205,6 +1116,11 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.layer-error {
+  font-size: 12px;
+  color: var(--el-color-danger);
+  word-break: break-all;
 }
 .swatch {
   display: inline-block;
@@ -1225,8 +1141,10 @@ canvas {
   background: #fff;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06);
 }
-@media (max-width: 960px) {
-  .layout { grid-template-columns: 1fr; }
-  .compare-grid { grid-template-columns: 1fr; }
+:deep(.el-tree-node__content) {
+  height: auto;
+  min-height: 28px;
+  padding: 4px 0;
+  white-space: normal;
 }
 </style>

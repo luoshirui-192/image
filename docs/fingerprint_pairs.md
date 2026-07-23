@@ -1,20 +1,43 @@
-# 指纹成对对比（Fingerprint Pair Compare）
+# 指纹特征浏览（业务表驱动）
 
 机器 A 部署本分支后即可使用「指纹对比」菜单。
 
+## 主线流程（一条线）
+
+```text
+T_CAP_FP_DATA (图路径)
+    → 选 cap_image_id
+T_FEATURE_RECORD (特征路径，fp_image_id = cap_image_id)
+    → 读 MinIO/本地 upload|templates
+    → ISO 解码细节点 → 单栏叠加
+```
+
+| 表 | 用途 |
+|----|------|
+| `ara_fp_analyst.T_CAP_FP_DATA` | `fingerprint_image` = `upload/...` |
+| `ara_fp_analyst.T_FEATURE_RECORD` | Bidiso→`feature_ara_data`；Neuiso→`feature_neuro_data` |
+
+界面：
+
+1. 顶栏选择能访问 `ara_fp_analyst` 的数据库连接
+2. 左侧树按 `dataset_code` 分组，叶子为 `cap_image_id`
+3. 右侧单栏叠加细节点；第二栏占位预留（配对关联表就绪后 `panels.length=2`）
+
+导入 zip **仍会**写入本系统 `image_info` / `fingerprint_*`；左侧树只读业务表，因此需开启**路径写回**后样本才会出现在树上。
+
 ## 功能
 
-1. 导入 batmatch_out 风格 zip（每对目录含 2 张 bmp + 各侧多层模板）
-2. 按指位 / 批次 / 分数 / 特征类型 / 算法版本筛选配对
-3. 对比页左右双栏，勾选 Bidiso / neuiso（及后续扩展类型）即时叠加细节点
-4. 同算法多 `algo_version` 用不同颜色区分
+1. 导入 batmatch_out 风格 zip（可选路径写回业务表）
+2. 按 `dataset_code` / `cap_image_id` 筛选业务样本
+3. 勾选 Bidiso / neuiso 即时叠加细节点
+4. API 载荷使用 `panels[]`：本期 `mode=single`；以后 `mode=pair` 不改解码核心
 
 ## 存储
 
 | 类型 | 路径 |
 |------|------|
-| 指纹 bmp | `upload/{YYYYMMDD}/{category_id}/{uuid}.bmp`（沿用现有） |
-| 特征模板 | `templates/{YYYYMMDD}/{uuid}.{suffix}`（独立目录） |
+| 指纹 bmp | `upload/{YYYYMMDD}/{category_id}/{uuid}.bmp` |
+| 特征模板 | `templates/{YYYYMMDD}/{uuid}.{suffix}` |
 
 MinIO 下同样是相对路径对象键，前缀不变。
 
@@ -27,30 +50,13 @@ MinIO 下同样是相对路径对象键，前缀不变。
 
 按 `fingerprint_layer_type` 可为每种特征类型单独配置。
 
-## 成对筛选（已实现）
-
-列表/左侧树通过 `GET /api/fingerprints/pairs/` 查询，支持：
-
-| 参数 | 作用 |
-|------|------|
-| `finger_position` | 指位，如 `right_ring` |
-| `batch_name` | 批次目录名模糊匹配 |
-| `score_min` / `score_max` | 匹配分数区间 |
-| `layer_type` | 是否含某特征层（bidiso/neuiso/…） |
-| `algo_version` | 算法版本 |
-| `keyword` | 人名 ID / 文件名 / 批次 / 标签 |
-
-导入时已按 batmatch 目录解析成「一对」写入 `fingerprint_pair`，筛选作用在这对记录上，不是单张图。
-
 ## 界面
 
-- 左侧：按指位分组的树 + 筛选条件
-- 右侧：选中后即时双栏对比（不跳转新页）
-- 每侧图片下方独立勾选特征层
-- 版本对比：**叠色**（同图多 version 不同色）或 **分列**（同图左右两列各一 version）
-- 导入 zip 时填写 `algo_version`；同一配对再导新版本会**合并特征层**（相同版本跳过）
-- 管理员「特征类型」可增删启用类型（扩到约 6 种只加配置）
-- **重复文件检测**（导入预检）：包内同内容、同名覆盖、左右同图、跨配对共用 bmp；默认告警仍导入，可选「严格模式」中止；进度区可展开明细
+- 左侧：业务样本树（`dataset_code` → `cap_image_id`）
+- 右侧：单栏 canvas + 特征层勾选；右侧第二栏为「配对栏（预留）」
+- 导入 zip 时填写 `algo_version`；开启写回后刷新树可见新样本
+- 管理员「特征类型」可增删启用类型
+- **重复文件检测**（导入预检）：包内同内容、同名覆盖、左右同图、跨配对共用 bmp
 
 ## 重复文件检测
 
@@ -67,34 +73,64 @@ MinIO 下同样是相对路径对象键，前缀不变。
 
 1. 拉取本分支并重启 backend / web
 2. 表会自动创建，或执行 `sql/fingerprint_pairs.sql`
-3. 打开「指纹对比」→ 导入 zip → 左侧树点选配对即可对比
+3. 打开「指纹对比」→ 选业务库连接 →（导入 zip 并启用路径写回）→ 点选样本浏览
 
 环境变量 `FP_IMPORT_WORKERS`（默认 4）控制同时导入几对。
 
-## API 摘要
+## API 摘要（业务浏览）
+
+连接参数：`connection_id` + `database=ara_fp_analyst`（或测试用 `db_alias=default`）。
+
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| GET | `/api/fingerprints/biz/meta/` | `dataset_codes` + layer-types |
+| GET | `/api/fingerprints/biz/samples/` | 分页列表（`dataset_code`、`keyword`） |
+| GET | `/api/fingerprints/biz/samples/{cap_image_id}/view/` | `panels[]` 单栏载荷 |
+
+View 响应形态：
+
+```json
+{
+  "mode": "single",
+  "panels": [
+    {
+      "role": "primary",
+      "cap_image_id": "...",
+      "dataset_code": "PK_5W",
+      "image": { "path": "upload/...", "url": "", "error": null },
+      "layers": [
+        { "layer_type": "bidiso", "template_path": "templates/...", "minutiae": {}, "color": "...", "error": null }
+      ]
+    }
+  ],
+  "pair_meta": null
+}
+```
+
+## 兼容 API（导入 / 旧配对）
 
 - `GET /api/fingerprints/layer-types/` — 动态勾选配置
 - `POST /api/fingerprints/layer-types/` — 管理员新增特征类型
-- `PATCH /api/fingerprints/layer-types/{id}/` — 管理员更新（启用/颜色/解码参数等）
-- `POST /api/fingerprints/pairs/import-zip/` — 导入 zip（`algo_version`；`fail_on_duplicates=1` 严格模式；同配对新版本合并层；可选 `path_writeback`）
-- `GET /api/fingerprints/import-jobs/{id}/` — 任务进度，含 `duplicate_report`；启用写回时含 `writeback_updated` / `writeback_skipped` / `writeback_failed`
-- `GET /api/fingerprints/pairs/` — 列表筛选
-- `GET /api/fingerprints/pairs/{id}/compare/` — 对比数据（含 `available_algo_versions` / 各层 `color`）
+- `PATCH /api/fingerprints/layer-types/{id}/` — 管理员更新
+- `POST /api/fingerprints/pairs/import-zip/` — 导入 zip（可选 `path_writeback`）
+- `GET /api/fingerprints/import-jobs/{id}/` — 任务进度
+- `GET /api/fingerprints/pairs/` — 旧配对列表（仍可用，UI 已切到 biz）
+- `GET /api/fingerprints/pairs/{id}/compare/` — 旧配对对比
 
-## 路径写回（可选）
+## 路径写回（浏览数据源）
 
 导入 batmatch zip 时可开启「路径写回」。目标固定为业务库：
 
 | 目标 | 写入 |
 |------|------|
-| `ara_fp_analyst.T_CAP_FP_DATA` | `cap_image_id`=bmp stem；`dataset_code`=**`PK_5W`**；`fingerprint_image`=相对路径 `upload/...`（utf8 写入 longblob）；同时写入 `fingerprint_url`（同路径字符串，便于查询） |
-| `ara_fp_analyst.T_FEATURE_RECORD` | `fp_image_id`=`cap_image_id`；`fp_feature_id`=32 位 hex；Bidiso→`feature_ara_data`；Neuiso→`feature_neuro_data`（`templates/...`） |
+| `ara_fp_analyst.T_CAP_FP_DATA` | `cap_image_id`=bmp stem；`dataset_code`=**`PK_5W`**；`fingerprint_image`=相对路径 `upload/...`（utf8 写入 longblob）；同时写入 `fingerprint_url` |
+| `ara_fp_analyst.T_FEATURE_RECORD` | `fp_image_id`=`cap_image_id`；`fp_feature_id`=32 位 hex；Bidiso→`feature_ara_data`；Neuiso→`feature_neuro_data` |
 
 说明：
 
 1. 仍先写 MinIO + 本系统 `image_info` / `fingerprint_*`
 2. 导入对话框只需选择能访问 `ara_fp_analyst` 的数据库连接
-3. `feature_ara_data` / `feature_neuro_data` 原为 int 分数字段，首次写回时会自动 `ALTER` 为 `varchar(500)`（也可手工执行 [`sql/alter_t_feature_record_path_columns.sql`](../sql/alter_t_feature_record_path_columns.sql)）
+3. `feature_ara_data` / `feature_neuro_data` 原为 int 分数字段，首次写回时会自动 `ALTER` 为 `varchar(500)`
 4. 同一 `cap_image_id` 再次导入会更新路径，不重复插主键冲突行
 
 ```json
@@ -105,24 +141,14 @@ MinIO 下同样是相对路径对象键，前缀不变。
   "dataset_code": "PK_5W"
 }
 ```
+
 ## 扩展特征类型
 
-管理员调用：
+管理员可增删 `fingerprint_layer_type`；业务浏览当前硬映射两列：
 
-```json
-POST /api/fingerprints/layer-types/
-{
-  "layer_key": "newtype",
-  "label": "NewType",
-  "color": "#43a047",
-  "suffixes": "newtype",
-  "default_setlen": 0,
-  "default_setang": 256
-}
-```
-
-导入带 `.newtype` 后缀的模板后，对比页勾选框会自动出现。
+- `feature_ara_data` → `bidiso`
+- `feature_neuro_data` → `neuiso`
 
 ## 非目标（本期不做）
 
-bmp→模板提取引擎、Neurotec/ISOTemplateView 集成、嵌入式固件；通用批量上传到任意表；INSERT 新业务行；zip 清单映射。
+配对关联表与双栏对比接线、bmp→模板提取引擎、删除 `fingerprint_pair` 导入路径、通用任意表浏览。

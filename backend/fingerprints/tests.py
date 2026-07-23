@@ -492,6 +492,129 @@ class FingerprintAPITestCase(TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertNotEqual(res.data["code"], 0)
 
+    def _ensure_biz_tables(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS T_CAP_FP_DATA (
+                    cap_image_id VARCHAR(256) NOT NULL PRIMARY KEY,
+                    dataset_code VARCHAR(32) NOT NULL,
+                    fingerprint_image BLOB NULL,
+                    fingerprint_url VARCHAR(256) NULL,
+                    created_by VARCHAR(20) NULL,
+                    created_time DATETIME NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS T_FEATURE_RECORD (
+                    fp_feature_id VARCHAR(32) NOT NULL PRIMARY KEY,
+                    fp_image_id VARCHAR(256) NOT NULL,
+                    feature_ara_data VARCHAR(500) NULL,
+                    feature_neuro_data VARCHAR(500) NULL,
+                    created_by VARCHAR(16) NULL,
+                    created_time DATETIME NULL
+                )
+                """
+            )
+            cursor.execute("DELETE FROM T_FEATURE_RECORD")
+            cursor.execute("DELETE FROM T_CAP_FP_DATA")
+
+    def test_biz_browse_list_and_view(self):
+        from utils.storage import get_image_storage
+
+        self._ensure_biz_tables()
+        img_path = "upload/20260720/1/550e8400-e29b-41d4-a716-446655440001.bmp"
+        bi_path = "templates/20260720/550e8400-e29b-41d4-a716-446655440002.bidiso"
+        ne_path = "templates/20260720/550e8400-e29b-41d4-a716-446655440003.neuiso"
+        _, bmp = make_bmp_bytes("x.bmp")
+        bi = build_minimal_fmr([(10, 20, 30, 1), (40, 50, 60, 2)], width=64, height=64)
+        ne = build_minimal_fmr([(11, 21, 31, 1)], width=64, height=64)
+        storage = get_image_storage()
+        storage.write_bytes(img_path, bmp)
+        storage.write_bytes(bi_path, bi)
+        storage.write_bytes(ne_path, ne)
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO T_CAP_FP_DATA (cap_image_id, dataset_code, fingerprint_image, fingerprint_url) "
+                "VALUES (%s, %s, %s, %s)",
+                ["100001_right_index", "PK_5W", img_path.encode("utf-8"), img_path],
+            )
+            cursor.execute(
+                "INSERT INTO T_FEATURE_RECORD "
+                "(fp_feature_id, fp_image_id, feature_ara_data, feature_neuro_data) "
+                "VALUES (%s, %s, %s, %s)",
+                ["a" * 32, "100001_right_index", bi_path, ne_path],
+            )
+
+        listed = self.client.get(
+            "/api/fingerprints/biz/samples/",
+            {"db_alias": "default", "database": "", "page_size": 50},
+        )
+        self.assertEqual(listed.status_code, 200, listed.data)
+        self.assertEqual(listed.data["code"], 0)
+        items = listed.data["data"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["cap_image_id"], "100001_right_index")
+        self.assertEqual(items[0]["dataset_code"], "PK_5W")
+
+        meta = self.client.get(
+            "/api/fingerprints/biz/meta/",
+            {"db_alias": "default", "database": ""},
+        )
+        self.assertEqual(meta.status_code, 200)
+        self.assertIn("PK_5W", meta.data["data"]["dataset_codes"])
+
+        view = self.client.get(
+            "/api/fingerprints/biz/samples/100001_right_index/view/",
+            {"db_alias": "default", "database": ""},
+        )
+        self.assertEqual(view.status_code, 200, view.data)
+        data = view.data["data"]
+        self.assertEqual(data["mode"], "single")
+        self.assertIsNone(data["pair_meta"])
+        self.assertEqual(len(data["panels"]), 1)
+        panel = data["panels"][0]
+        self.assertEqual(panel["role"], "primary")
+        self.assertEqual(panel["image"]["path"], img_path)
+        self.assertIsNone(panel["image"]["error"])
+        types = {layer["layer_type"] for layer in panel["layers"]}
+        self.assertEqual(types, {"bidiso", "neuiso"})
+        bidiso = next(layer for layer in panel["layers"] if layer["layer_type"] == "bidiso")
+        self.assertGreater(bidiso["minutiae"]["count"], 0)
+        self.assertIsNone(bidiso["error"])
+
+    def test_biz_browse_empty_feature_paths(self):
+        from utils.storage import get_image_storage
+
+        self._ensure_biz_tables()
+        img_path = "upload/20260720/1/550e8400-e29b-41d4-a716-446655440011.bmp"
+        _, bmp = make_bmp_bytes("y.bmp", color=100)
+        get_image_storage().write_bytes(img_path, bmp)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO T_CAP_FP_DATA (cap_image_id, dataset_code, fingerprint_image) "
+                "VALUES (%s, %s, %s)",
+                ["only_image", "PK_5W", img_path.encode("utf-8")],
+            )
+            cursor.execute(
+                "INSERT INTO T_FEATURE_RECORD "
+                "(fp_feature_id, fp_image_id, feature_ara_data, feature_neuro_data) "
+                "VALUES (%s, %s, %s, %s)",
+                ["b" * 32, "only_image", None, ""],
+            )
+
+        view = self.client.get(
+            "/api/fingerprints/biz/samples/only_image/view/",
+            {"db_alias": "default", "database": ""},
+        )
+        self.assertEqual(view.status_code, 200, view.data)
+        panel = view.data["data"]["panels"][0]
+        self.assertEqual(panel["layers"], [])
+        self.assertEqual(panel["available_layer_types"], [])
+
 
 class PathWritebackUnitTestCase(TestCase):
     def test_parse_disabled(self):

@@ -40,7 +40,7 @@ export const MENU_ITEMS = [
     title: '指纹对比',
     icon: 'CopyDocument',
     adminOnly: false,
-    description: '成对指纹入库、筛选与多层特征叠加对比',
+    description: '业务表样本浏览、路径写回导入与细节点叠加',
   },
   {
     path: 'logs',
