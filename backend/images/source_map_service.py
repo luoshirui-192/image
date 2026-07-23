@@ -210,12 +210,33 @@ def upsert_source_map(
 
 
 def count_live_map_entries_for_source(source: BlobMigrationSource) -> int:
+    from images.blob_schema_helpers import parse_blob_column_path_mappings
+
     blob_cols = parse_blob_columns(source.blob_columns, source.blob_column)
     qs = map_queryset_for_source(source)
-    if blob_cols:
-        cols = list(blob_cols)
-        if len(cols) == 1:
-            cols.append("")
+
+    # Maps for JOIN views store base-table source_column (may differ from view column).
+    cols: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str | None) -> None:
+        value = (name or "").strip()
+        if value in seen:
+            return
+        seen.add(value)
+        cols.append(value)
+
+    for col in blob_cols:
+        _add(col)
+    for mapping in parse_blob_column_path_mappings(
+        getattr(source, "blob_column_path_mappings", "") or ""
+    ):
+        _add(mapping.get("source_column"))
+        _add(mapping.get("view_column"))
+    if len(cols) == 1:
+        # Legacy rows may use empty source_column
+        _add("")
+    if cols:
         qs = qs.filter(source_column__in=cols)
     return int(qs.aggregate(total=Count("id"))["total"] or 0)
 

@@ -1935,16 +1935,40 @@ def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dic
         if extra:
             where_parts.append(f"({extra})")
         if path_mappings:
-            checks = _cursor_candidate_checks(source, conn)
-            if checks:
-                where_parts.append("(" + " OR ".join(checks) + ")")
-            sql = f"SELECT COUNT(*) FROM {table}"
-            if where_parts:
-                sql += f" WHERE {' AND '.join(where_parts)}"
+            # JOIN views often repeat the same base keys across many view rows.
+            # Count DISTINCT mapping keys per BLOB column so pending matches real work.
+            total_with_blob = 0
             with conn.cursor() as cursor:
-                cursor.execute(sql)
-                rows_with_keys = int((cursor.fetchone() or [0])[0] or 0)
-            total_with_blob = rows_with_keys * max(1, len(blob_cols))
+                for mapping in path_mappings:
+                    key_col = (mapping.get("source_id_column") or "").strip()
+                    if not key_col:
+                        continue
+                    try:
+                        validate_identifier(key_col, label="路径映射键列")
+                    except BlobMigrationError:
+                        continue
+                    parts = list(where_parts)
+                    parts.append(_blob_nonempty_sql(conn, _quote_ident(key_col)))
+                    sql = (
+                        f"SELECT COUNT(DISTINCT {_quote_ident(key_col)}) FROM {table}"
+                    )
+                    if parts:
+                        sql += f" WHERE {' AND '.join(parts)}"
+                    cursor.execute(sql)
+                    total_with_blob += int((cursor.fetchone() or [0])[0] or 0)
+            if total_with_blob <= 0:
+                # Fallback: row×column estimate when mappings lack usable keys
+                checks = _cursor_candidate_checks(source, conn)
+                parts = list(where_parts)
+                if checks:
+                    parts.append("(" + " OR ".join(checks) + ")")
+                sql = f"SELECT COUNT(*) FROM {table}"
+                if parts:
+                    sql += f" WHERE {' AND '.join(parts)}"
+                with conn.cursor() as cursor:
+                    cursor.execute(sql)
+                    rows_with_keys = int((cursor.fetchone() or [0])[0] or 0)
+                total_with_blob = rows_with_keys * max(1, len(blob_cols))
         else:
             where_sql = f" WHERE ({extra})" if extra else ""
             select_parts = [
