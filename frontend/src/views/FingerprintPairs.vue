@@ -13,6 +13,8 @@ import {
   fetchFingerprintBizMetaApi,
   fetchFingerprintBizPairViewApi,
   fetchFingerprintBizPairsApi,
+  fetchFingerprintBizSampleViewApi,
+  fetchFingerprintBizSamplesApi,
   fetchFingerprintImportJobApi,
   fetchFingerprintLayerTypesApi,
   importFingerprintZipApi,
@@ -32,6 +34,9 @@ const pollTimer = ref(null)
 const rows = ref([])
 const total = ref(0)
 const selectedMatchId = ref(null)
+const selectedCapId = ref(null)
+/** pair | single */
+const browseMode = ref('pair')
 const comparePanelRef = ref(null)
 const treeRef = ref(null)
 
@@ -169,10 +174,14 @@ const panelImgs = ref([])
 const panels = computed(() => payload.value?.panels || [])
 const pairMeta = computed(() => payload.value?.pair_meta || null)
 
+const isPairMode = computed(() => browseMode.value === 'pair')
+
 const treeData = computed(() => {
   const groups = new Map()
   for (const row of rows.value) {
-    const key = row.data_set_code || 'unknown'
+    const key = isPairMode.value
+      ? (row.data_set_code || 'unknown')
+      : (row.dataset_code || 'unknown')
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key).push(row)
   }
@@ -182,15 +191,60 @@ const treeData = computed(() => {
       id: `ds:${dataset}`,
       label: `${dataset}（${items.length}）`,
       isGroup: true,
-      children: items.map((row) => ({
-        id: `match:${row.id}`,
-        matchId: row.id,
-        label: `${row.image_reg || '?'} ↔ ${row.image_match || '?'}`,
-        isGroup: false,
-        row,
-      })),
+      children: items.map((row) => {
+        if (isPairMode.value) {
+          return {
+            id: `match:${row.id}`,
+            matchId: row.id,
+            label: `${row.image_reg || '?'} ↔ ${row.image_match || '?'}`,
+            isGroup: false,
+            row,
+          }
+        }
+        return {
+          id: `cap:${row.cap_image_id}`,
+          capImageId: row.cap_image_id,
+          label: row.cap_image_id,
+          isGroup: false,
+          row,
+        }
+      }),
     }))
 })
+
+const currentNodeKey = computed(() => {
+  if (isPairMode.value) {
+    return selectedMatchId.value != null ? `match:${selectedMatchId.value}` : undefined
+  }
+  return selectedCapId.value ? `cap:${selectedCapId.value}` : undefined
+})
+
+const hasSelection = computed(() =>
+  isPairMode.value ? selectedMatchId.value != null : !!selectedCapId.value,
+)
+
+const selectionTitle = computed(() => {
+  if (isPairMode.value) {
+    return selectedMatchId.value != null ? `#${selectedMatchId.value}` : ''
+  }
+  return selectedCapId.value || ''
+})
+
+const selectionSource = computed(() =>
+  isPairMode.value ? '来自 t_match_result_image' : '来自 T_CAP_FP_DATA',
+)
+
+const navPrevLabel = computed(() => (isPairMode.value ? '上一对' : '上一张'))
+const navNextLabel = computed(() => (isPairMode.value ? '下一对' : '下一张'))
+const emptyTreeHint = computed(() => {
+  if (!browseConnectionKey.value) return '请选择业务库连接'
+  return isPairMode.value
+    ? '暂无配对（需 t_match_result_image 有数据）'
+    : '暂无样本（需 T_CAP_FP_DATA 有写回路径）'
+})
+const emptyMainHint = computed(() =>
+  isPairMode.value ? '请在左侧树中选择一对指纹' : '请在左侧树中选择一张指纹',
+)
 
 const checkboxOptions = computed(() => {
   const available = new Set(payload.value?.available_layer_types || [])
@@ -246,15 +300,25 @@ async function loadSamples() {
     }
     if (filters.keyword) q.keyword = filters.keyword
     if (filters.dataset_code) q.dataset_code = filters.dataset_code
-    const res = await fetchFingerprintBizPairsApi(q)
-    rows.value = res.data.items || []
-    total.value = res.data.total || 0
-    if (selectedMatchId.value != null && !rows.value.some((r) => r.id === selectedMatchId.value)) {
-      selectedMatchId.value = null
-      clearView()
+    if (isPairMode.value) {
+      const res = await fetchFingerprintBizPairsApi(q)
+      rows.value = res.data.items || []
+      total.value = res.data.total || 0
+      if (selectedMatchId.value != null && !rows.value.some((r) => r.id === selectedMatchId.value)) {
+        selectedMatchId.value = null
+        clearView()
+      }
+    } else {
+      const res = await fetchFingerprintBizSamplesApi(q)
+      rows.value = res.data.items || []
+      total.value = res.data.total || 0
+      if (selectedCapId.value && !rows.value.some((r) => r.cap_image_id === selectedCapId.value)) {
+        selectedCapId.value = null
+        clearView()
+      }
     }
   } catch (err) {
-    ElMessage.error(err.message || '加载配对列表失败')
+    ElMessage.error(err.message || (isPairMode.value ? '加载配对列表失败' : '加载样本列表失败'))
     rows.value = []
     total.value = 0
   } finally {
@@ -273,8 +337,12 @@ function onReset() {
 }
 
 const selectedSampleIndex = computed(() => {
-  if (selectedMatchId.value == null) return -1
-  return rows.value.findIndex((r) => r.id === selectedMatchId.value)
+  if (isPairMode.value) {
+    if (selectedMatchId.value == null) return -1
+    return rows.value.findIndex((r) => r.id === selectedMatchId.value)
+  }
+  if (!selectedCapId.value) return -1
+  return rows.value.findIndex((r) => r.cap_image_id === selectedCapId.value)
 })
 
 const canPrevSample = computed(() => selectedSampleIndex.value > 0)
@@ -295,40 +363,69 @@ function focusComparePanel() {
   nextTick(() => focusWithoutScroll(comparePanelRef.value))
 }
 
-function syncTreeCurrent(matchId) {
+function syncTreeCurrent() {
   nextTick(() => {
-    treeRef.value?.setCurrentKey?.(matchId != null ? `match:${matchId}` : null)
+    treeRef.value?.setCurrentKey?.(currentNodeKey.value ?? null)
   })
 }
 
 function onTreeNodeClick(data) {
-  if (data.isGroup || data.matchId == null) return
-  selectPair(data.matchId, { focusPanel: true })
+  if (data.isGroup) return
+  if (isPairMode.value) {
+    if (data.matchId == null) return
+    selectPair(data.matchId, { focusPanel: true })
+  } else {
+    if (!data.capImageId) return
+    selectSample(data.capImageId, { focusPanel: true })
+  }
 }
 
 function selectPair(matchId, { focusPanel = false } = {}) {
   const id = Number(matchId)
   selectedMatchId.value = id
-  syncTreeCurrent(id)
-  router.replace({ query: { ...route.query, match: String(id) } }).catch(() => {})
-  loadView(id)
+  selectedCapId.value = null
+  syncTreeCurrent()
+  router.replace({
+    query: { ...route.query, mode: 'pair', match: String(id), cap: undefined },
+  }).catch(() => {})
+  loadView()
+  if (focusPanel) focusComparePanel()
+}
+
+function selectSample(capImageId, { focusPanel = false } = {}) {
+  const id = String(capImageId)
+  selectedCapId.value = id
+  selectedMatchId.value = null
+  syncTreeCurrent()
+  router.replace({
+    query: { ...route.query, mode: 'single', cap: id, match: undefined },
+  }).catch(() => {})
+  loadView()
   if (focusPanel) focusComparePanel()
 }
 
 function goPrevSample() {
   if (compareLoading.value || !canPrevSample.value) return
   const prev = rows.value[selectedSampleIndex.value - 1]
-  if (prev?.id != null) selectPair(prev.id, { focusPanel: true })
+  if (isPairMode.value) {
+    if (prev?.id != null) selectPair(prev.id, { focusPanel: true })
+  } else if (prev?.cap_image_id) {
+    selectSample(prev.cap_image_id, { focusPanel: true })
+  }
 }
 
 function goNextSample() {
   if (compareLoading.value || !canNextSample.value) return
   const next = rows.value[selectedSampleIndex.value + 1]
-  if (next?.id != null) selectPair(next.id, { focusPanel: true })
+  if (isPairMode.value) {
+    if (next?.id != null) selectPair(next.id, { focusPanel: true })
+  } else if (next?.cap_image_id) {
+    selectSample(next.cap_image_id, { focusPanel: true })
+  }
 }
 
 function onPreviewKeydown(event) {
-  if (!rows.value.length || selectedMatchId.value == null) return
+  if (!rows.value.length || !hasSelection.value) return
   if (importDialogVisible.value || typeDialogVisible.value) return
   const tag = String(event.target?.tagName || '').toLowerCase()
   if (tag === 'input' || tag === 'textarea' || tag === 'select') return
@@ -357,21 +454,25 @@ function revokeUrls() {
   panelUrls.value = []
 }
 
-async function loadView(matchId) {
-  if (matchId == null) return
+async function loadView() {
   const conn = selectedBrowseConnection.value
   const params = connectionQueryParams(conn)
   if (!params) {
     ElMessage.warning('请先选择能访问 ara_fp_analyst 的数据库连接')
     return
   }
+  if (isPairMode.value) {
+    if (selectedMatchId.value == null) return
+  } else if (!selectedCapId.value) {
+    return
+  }
+
   compareLoading.value = true
   layersReady.value = false
   try {
-    const res = await fetchFingerprintBizPairViewApi(matchId, {
-      ...params,
-      show_labels: '1',
-    })
+    const res = isPairMode.value
+      ? await fetchFingerprintBizPairViewApi(selectedMatchId.value, { ...params, show_labels: '1' })
+      : await fetchFingerprintBizSampleViewApi(selectedCapId.value, { ...params, show_labels: '1' })
     payload.value = res.data
     const types = res.data.available_layer_types || []
     panelTypes.value = [...types]
@@ -404,10 +505,23 @@ async function loadView(matchId) {
     await drawPanels()
   } catch (err) {
     clearView()
-    ElMessage.error(err.message || '加载配对失败')
+    ElMessage.error(err.message || (isPairMode.value ? '加载配对失败' : '加载样本失败'))
   } finally {
     compareLoading.value = false
   }
+}
+
+async function switchBrowseMode(mode) {
+  if (mode !== 'pair' && mode !== 'single') return
+  if (browseMode.value === mode) return
+  browseMode.value = mode
+  clearView()
+  selectedMatchId.value = null
+  selectedCapId.value = null
+  router.replace({
+    query: { ...route.query, mode, match: undefined, cap: undefined },
+  }).catch(() => {})
+  await loadSamples()
 }
 
 function loadImage(url) {
@@ -493,6 +607,7 @@ watch([panelTypes, showLabels, zoom], async () => {
 watch(browseConnectionKey, async () => {
   clearView()
   selectedMatchId.value = null
+  selectedCapId.value = null
   await loadMeta()
   await loadSamples()
 })
@@ -561,7 +676,7 @@ async function pollImportJob(jobId) {
       else ElMessage.warning(job.message || '已取消')
       await loadMeta()
       await loadSamples()
-      if (selectedMatchId.value != null) await loadView(selectedMatchId.value)
+      if (hasSelection.value) await loadView()
     }
   } catch (err) {
     pollFailStreak.value += 1
@@ -697,17 +812,27 @@ async function toggleTypeEnabled(row) {
 onMounted(async () => {
   window.addEventListener('keydown', onPreviewKeydown, true)
   await ensureConnections()
+  const modeQ = String(route.query.mode || '').toLowerCase()
+  if (modeQ === 'single' || modeQ === 'pair') {
+    browseMode.value = modeQ
+  }
   await loadMeta()
   await loadSamples()
   const matchQ = route.query.match || route.params.match
-  if (matchQ != null && matchQ !== '') {
+  const capQ = route.query.cap || route.params.cap
+  if (browseMode.value === 'pair' && matchQ != null && matchQ !== '') {
     const id = Number(matchQ)
     if (!Number.isNaN(id)) {
       selectedMatchId.value = id
-      syncTreeCurrent(id)
-      await loadView(id)
+      syncTreeCurrent()
+      await loadView()
       focusComparePanel()
     }
+  } else if (browseMode.value === 'single' && capQ) {
+    selectedCapId.value = String(capQ)
+    syncTreeCurrent()
+    await loadView()
+    focusComparePanel()
   }
 })
 
@@ -722,10 +847,14 @@ onBeforeUnmount(() => {
   <div class="fp-page">
     <div class="fp-toolbar">
       <div class="fp-title">
-        <h2>指纹配对对比</h2>
-        <p>t_match_result_image 配对 · 左右拉 T_CAP_FP_DATA / T_FEATURE_RECORD（指标稍后）</p>
+        <h2>指纹特征浏览</h2>
+        <p>单图读 T_CAP_FP_DATA；配对读 t_match_result_image（指标稍后）</p>
       </div>
       <div class="import-actions">
+        <el-radio-group :model-value="browseMode" size="default" @change="switchBrowseMode">
+          <el-radio-button value="pair">配对</el-radio-button>
+          <el-radio-button value="single">单图</el-radio-button>
+        </el-radio-group>
         <el-select
           v-model="browseConnectionKey"
           filterable
@@ -802,12 +931,24 @@ onBeforeUnmount(() => {
     <div class="layout">
       <aside class="tree-panel" v-loading="loading">
         <div class="panel-head">
-          <strong>配对列表</strong>
+          <strong>{{ isPairMode ? '配对列表' : '样本列表' }}</strong>
           <span class="muted">共 {{ total }}</span>
         </div>
         <div class="filter-box">
-          <el-input v-model="filters.keyword" clearable size="small" placeholder="reg / match / id" @keyup.enter="onSearch" />
-          <el-select v-model="filters.dataset_code" clearable size="small" placeholder="data_set_code" style="width: 100%">
+          <el-input
+            v-model="filters.keyword"
+            clearable
+            size="small"
+            :placeholder="isPairMode ? 'reg / match / id' : 'cap_image_id'"
+            @keyup.enter="onSearch"
+          />
+          <el-select
+            v-model="filters.dataset_code"
+            clearable
+            size="small"
+            :placeholder="isPairMode ? 'data_set_code' : 'dataset_code'"
+            style="width: 100%"
+          >
             <el-option v-for="c in meta.dataset_codes" :key="c" :label="c" :value="c" />
           </el-select>
           <div class="filter-actions">
@@ -823,20 +964,16 @@ onBeforeUnmount(() => {
             node-key="id"
             default-expand-all
             highlight-current
-            :current-node-key="selectedMatchId != null ? `match:${selectedMatchId}` : undefined"
+            :current-node-key="currentNodeKey"
             :expand-on-click-node="false"
             @node-click="onTreeNodeClick"
           />
-          <el-empty
-            v-else
-            :description="browseConnectionKey ? '暂无配对（需 t_match_result_image 有数据，且两侧已写回路径）' : '请选择业务库连接'"
-            :image-size="64"
-          />
+          <el-empty v-else :description="emptyTreeHint" :image-size="64" />
         </div>
-        <div v-if="selectedMatchId != null" class="selection-foot">
-          <div class="sel-title">#{{ selectedMatchId }}</div>
+        <div v-if="hasSelection" class="selection-foot">
+          <div class="sel-title">{{ selectionTitle }}</div>
           <div class="sel-meta">
-            来自 t_match_result_image
+            {{ selectionSource }}
             <template v-if="selectedSampleIndex >= 0">
               · {{ selectedSampleIndex + 1 }}/{{ rows.length }}
             </template>
@@ -853,18 +990,26 @@ onBeforeUnmount(() => {
         <template v-if="payload && panels.length">
           <div class="compare-toolbar">
             <div class="meta">
-              <template v-if="pairMeta">
+              <template v-if="isPairMode && pairMeta">
                 #{{ pairMeta.id }}
                 · {{ pairMeta.image_reg }} ↔ {{ pairMeta.image_match }}
                 <template v-if="pairMeta.data_set_code"> · {{ pairMeta.data_set_code }}</template>
+              </template>
+              <template v-else-if="panels[0]">
+                {{ panels[0].cap_image_id }}
+                <template v-if="panels[0].dataset_code"> · {{ panels[0].dataset_code }}</template>
               </template>
               <template v-if="selectedSampleIndex >= 0">
                 · {{ selectedSampleIndex + 1 }}/{{ rows.length }}
               </template>
             </div>
             <div class="controls">
-              <el-button size="small" :disabled="!canPrevSample || compareLoading" @click="goPrevSample">上一对</el-button>
-              <el-button size="small" :disabled="!canNextSample || compareLoading" @click="goNextSample">下一对</el-button>
+              <el-button size="small" :disabled="!canPrevSample || compareLoading" @click="goPrevSample">
+                {{ navPrevLabel }}
+              </el-button>
+              <el-button size="small" :disabled="!canNextSample || compareLoading" @click="goNextSample">
+                {{ navNextLabel }}
+              </el-button>
               <span class="hint">方向键切换</span>
               <el-checkbox v-model="showLabels">编号</el-checkbox>
               <span class="label">缩放</span>
@@ -878,7 +1023,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div class="compare-grid">
+          <div class="compare-grid" :class="{ 'single-mode': panels.length < 2 }">
             <div
               v-for="(panel, idx) in panels"
               :key="panel.role || panel.cap_image_id || idx"
@@ -921,7 +1066,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </template>
-        <el-empty v-else description="请在左侧树中选择一对指纹" />
+        <el-empty v-else :description="emptyMainHint" />
       </main>
     </div>
 
@@ -1170,8 +1315,8 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
 }
-.compare-grid.single-mode .pane:first-child {
-  /* keep two columns: primary + reserved */
+.compare-grid.single-mode {
+  grid-template-columns: 1fr;
 }
 .pane {
   display: flex;

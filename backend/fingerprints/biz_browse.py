@@ -155,27 +155,41 @@ def list_biz_pairs(
 
 
 def list_biz_meta(config: dict) -> dict:
-    """Distinct data_set_code from match table + enabled layer types."""
+    """Distinct dataset codes from match + CAP tables + enabled layer types."""
     seed_default_layer_types()
-    dataset_codes: list[str] = []
+    codes: set[str] = set()
     try:
         with _with_biz_cursor(config) as session_alias:
             conn = connections[session_alias]
             with conn.cursor() as cursor:
-                cursor.execute(
-                    f"SELECT DISTINCT `data_set_code` FROM `{MATCH_TABLE}` "
-                    f"WHERE `data_set_code` IS NOT NULL AND `data_set_code`<>'' "
-                    f"ORDER BY `data_set_code`"
-                )
-                dataset_codes = [str(r[0]) for r in cursor.fetchall() if r and r[0]]
+                try:
+                    cursor.execute(
+                        f"SELECT DISTINCT `data_set_code` FROM `{MATCH_TABLE}` "
+                        f"WHERE `data_set_code` IS NOT NULL AND `data_set_code`<>''"
+                    )
+                    for r in cursor.fetchall():
+                        if r and r[0]:
+                            codes.add(str(r[0]))
+                except Exception:
+                    logger.warning("list_biz_meta: read %s codes failed", MATCH_TABLE, exc_info=True)
+                try:
+                    cursor.execute(
+                        f"SELECT DISTINCT `dataset_code` FROM `{CAP_TABLE}` "
+                        f"WHERE `dataset_code` IS NOT NULL AND `dataset_code`<>''"
+                    )
+                    for r in cursor.fetchall():
+                        if r and r[0]:
+                            codes.add(str(r[0]))
+                except Exception:
+                    logger.warning("list_biz_meta: read %s codes failed", CAP_TABLE, exc_info=True)
     except ExternalDbError as exc:
         raise BizBrowseError(str(exc)) from exc
     except Exception as exc:
         logger.exception("list_biz_meta failed")
-        raise BizBrowseError(f"读取 {MATCH_TABLE} 元数据失败: {exc}") from exc
+        raise BizBrowseError(f"读取业务表元数据失败: {exc}") from exc
 
     return {
-        "dataset_codes": dataset_codes,
+        "dataset_codes": sorted(codes),
         "layer_types": [info.to_dict() for info in list_layer_types(enabled_only=True)],
         "cap_table": CAP_TABLE,
         "feature_table": FEATURE_TABLE,
