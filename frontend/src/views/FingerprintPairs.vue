@@ -167,7 +167,6 @@ const panelCanvases = ref([]) // canvas refs via function
 const panelImgs = ref([])
 
 const panels = computed(() => payload.value?.panels || [])
-const primaryPanel = computed(() => panels.value[0] || null)
 const pairMeta = computed(() => payload.value?.pair_meta || null)
 
 const treeData = computed(() => {
