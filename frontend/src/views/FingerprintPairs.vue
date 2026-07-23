@@ -32,6 +32,9 @@ const pollTimer = ref(null)
 const rows = ref([])
 const total = ref(0)
 const selectedCapId = ref(null)
+const comparePanelRef = ref(null)
+const treeRef = ref(null)
+let wheelLocked = false
 
 const importDialogVisible = ref(false)
 const importFile = ref(null)
@@ -267,15 +270,89 @@ function onReset() {
   loadSamples()
 }
 
-function onTreeNodeClick(data) {
-  if (data.isGroup || !data.capImageId) return
-  selectSample(data.capImageId)
+const selectedSampleIndex = computed(() => {
+  if (!selectedCapId.value) return -1
+  return rows.value.findIndex((r) => r.cap_image_id === selectedCapId.value)
+})
+
+const canPrevSample = computed(() => selectedSampleIndex.value > 0)
+const canNextSample = computed(
+  () => selectedSampleIndex.value >= 0 && selectedSampleIndex.value < rows.value.length - 1,
+)
+
+function focusWithoutScroll(el) {
+  if (!el || typeof el.focus !== 'function') return
+  try {
+    el.focus({ preventScroll: true })
+  } catch {
+    el.focus()
+  }
 }
 
-function selectSample(capImageId) {
-  selectedCapId.value = String(capImageId)
-  router.replace({ query: { ...route.query, cap: String(capImageId) } }).catch(() => {})
-  loadView(String(capImageId))
+function focusComparePanel() {
+  nextTick(() => focusWithoutScroll(comparePanelRef.value))
+}
+
+function syncTreeCurrent(capImageId) {
+  nextTick(() => {
+    treeRef.value?.setCurrentKey?.(capImageId ? `cap:${capImageId}` : null)
+  })
+}
+
+function onTreeNodeClick(data) {
+  if (data.isGroup || !data.capImageId) return
+  selectSample(data.capImageId, { focusPanel: true })
+}
+
+function selectSample(capImageId, { focusPanel = false } = {}) {
+  const id = String(capImageId)
+  selectedCapId.value = id
+  syncTreeCurrent(id)
+  router.replace({ query: { ...route.query, cap: id } }).catch(() => {})
+  loadView(id)
+  if (focusPanel) focusComparePanel()
+}
+
+function goPrevSample() {
+  if (compareLoading.value || !canPrevSample.value) return
+  const prev = rows.value[selectedSampleIndex.value - 1]
+  if (prev?.cap_image_id) selectSample(prev.cap_image_id, { focusPanel: true })
+}
+
+function goNextSample() {
+  if (compareLoading.value || !canNextSample.value) return
+  const next = rows.value[selectedSampleIndex.value + 1]
+  if (next?.cap_image_id) selectSample(next.cap_image_id, { focusPanel: true })
+}
+
+function onPreviewKeydown(event) {
+  if (!rows.value.length || !selectedCapId.value) return
+  if (importDialogVisible.value || typeDialogVisible.value) return
+  const tag = String(event.target?.tagName || '').toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return
+  if (event.target?.isContentEditable) return
+  if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+    event.preventDefault()
+    goPrevSample()
+  } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+    event.preventDefault()
+    goNextSample()
+  }
+}
+
+function onPreviewWheel(event) {
+  if (!payload.value || rows.value.length <= 1 || wheelLocked) return
+  if (importDialogVisible.value || typeDialogVisible.value) return
+  // Only when over the compare panel (not the tree)
+  const root = comparePanelRef.value
+  if (!root || !root.contains(event.target)) return
+  event.preventDefault()
+  wheelLocked = true
+  window.setTimeout(() => {
+    wheelLocked = false
+  }, 200)
+  if (event.deltaY > 0) goNextSample()
+  else if (event.deltaY < 0) goPrevSample()
 }
 
 function clearView() {
@@ -628,17 +705,21 @@ async function toggleTypeEnabled(row) {
 }
 
 onMounted(async () => {
+  window.addEventListener('keydown', onPreviewKeydown, true)
   await ensureConnections()
   await loadMeta()
   await loadSamples()
   const cap = route.query.cap || route.params.cap
   if (cap) {
     selectedCapId.value = String(cap)
+    syncTreeCurrent(String(cap))
     await loadView(String(cap))
+    focusComparePanel()
   }
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onPreviewKeydown, true)
   stopPoll()
   revokeUrls()
 })
@@ -744,10 +825,12 @@ onBeforeUnmount(() => {
         <div class="tree-wrap">
           <el-tree
             v-if="treeData.length"
+            ref="treeRef"
             :data="treeData"
             node-key="id"
             default-expand-all
             highlight-current
+            :current-node-key="selectedCapId ? `cap:${selectedCapId}` : undefined"
             :expand-on-click-node="false"
             @node-click="onTreeNodeClick"
           />
@@ -759,19 +842,36 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="selectedCapId" class="selection-foot">
           <div class="sel-title">{{ selectedCapId }}</div>
-          <div class="sel-meta">来自 T_CAP_FP_DATA</div>
+          <div class="sel-meta">
+            来自 T_CAP_FP_DATA
+            <template v-if="selectedSampleIndex >= 0">
+              · {{ selectedSampleIndex + 1 }}/{{ rows.length }}
+            </template>
+          </div>
         </div>
       </aside>
 
-      <main class="compare-panel" v-loading="compareLoading">
+      <main
+        ref="comparePanelRef"
+        class="compare-panel"
+        v-loading="compareLoading"
+        tabindex="0"
+        @wheel.prevent="onPreviewWheel"
+      >
         <template v-if="payload && primaryPanel">
           <div class="compare-toolbar">
             <div class="meta">
               {{ primaryPanel.cap_image_id }}
               <template v-if="primaryPanel.dataset_code"> · {{ primaryPanel.dataset_code }}</template>
               <template v-if="payload.mode"> · {{ payload.mode }}</template>
+              <template v-if="selectedSampleIndex >= 0">
+                · {{ selectedSampleIndex + 1 }}/{{ rows.length }}
+              </template>
             </div>
             <div class="controls">
+              <el-button size="small" :disabled="!canPrevSample || compareLoading" @click="goPrevSample">上一张</el-button>
+              <el-button size="small" :disabled="!canNextSample || compareLoading" @click="goNextSample">下一张</el-button>
+              <span class="hint">方向键 / 滚轮切换</span>
               <el-checkbox v-model="showLabels">编号</el-checkbox>
               <span class="label">缩放</span>
               <el-slider v-model="zoom" :min="0.5" :max="3" :step="0.1" style="width: 120px" />
@@ -1017,6 +1117,11 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  outline: none;
+}
+.compare-panel:focus,
+.compare-panel:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
 }
 .panel-head {
   display: flex;
