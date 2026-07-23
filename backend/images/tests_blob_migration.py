@@ -631,6 +631,48 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(mapping.image_info_id, existing.id)
             self.assertEqual(ImageInfo.objects.filter(is_delete=0).count(), 1)
 
+    def test_path_export_stats_count_distinct_paths(self):
+        """Match-result path tables fan out one path to many rows; stats use DISTINCT."""
+        path_a = "upload/20260630/1/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jpg"
+        path_b = "upload/20260630/1/bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee.jpg"
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS path_export_dup (
+                    id INTEGER PRIMARY KEY,
+                    bcnt INTEGER NOT NULL,
+                    fingerprint_image VARCHAR(500) NULL
+                )
+                """
+            )
+            cursor.execute("DELETE FROM path_export_dup")
+            cursor.execute(
+                "INSERT INTO path_export_dup (id, bcnt, fingerprint_image) VALUES (1, 0, ?)",
+                [path_a],
+            )
+            cursor.execute(
+                "INSERT INTO path_export_dup (id, bcnt, fingerprint_image) VALUES (2, 0, ?)",
+                [path_a],
+            )
+            cursor.execute(
+                "INSERT INTO path_export_dup (id, bcnt, fingerprint_image) VALUES (3, 1, ?)",
+                [path_b],
+            )
+        source = create_migration_source(
+            name="path export stats",
+            source_table="path_export_dup",
+            source_pk_column="id",
+            blob_column="fingerprint_image",
+            category_id=1,
+            db_alias="default",
+        )
+        from images import blob_migration_service as bms
+
+        bms.invalidate_migration_stats_cache(source.id)
+        stats = count_migration_candidates(source.id, use_cache=False)
+        self.assertEqual(stats["total_with_blob"], 2, stats)
+        self.assertEqual(stats["pending"], 2, stats)
+
     @override_settings(UPLOAD_ROOT=None)
     def test_blob_bytes_falls_back_when_view_cell_is_non_binary(self):
         """Charset/driver may return str for view BLOB cells; use mapped base table."""

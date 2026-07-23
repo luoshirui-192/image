@@ -700,6 +700,60 @@ def _blob_nonempty_sql(conn, blob_quoted: str) -> str:
     return f"({blob_quoted} IS NOT NULL)"
 
 
+def _is_character_column(conn, *, table: str, column: str) -> bool:
+    """True when column is varchar/text (path-export), not binary BLOB."""
+    table = (table or "").strip()
+    column = (column or "").strip()
+    if not table or not column:
+        return False
+    try:
+        if conn.vendor == "mysql":
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT DATA_TYPE
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = %s
+                      AND COLUMN_NAME = %s
+                    LIMIT 1
+                    """,
+                    [table, column],
+                )
+                row = cursor.fetchone()
+            dtype = str((row or [""])[0] or "").lower()
+            return dtype in {
+                "varchar",
+                "char",
+                "tinytext",
+                "text",
+                "mediumtext",
+                "longtext",
+            }
+        if conn.vendor == "sqlite":
+            with conn.cursor() as cursor:
+                cursor.execute(f"PRAGMA table_info({_quote_ident(table)})")
+                for _cid, name, col_type, *_rest in cursor.fetchall():
+                    if str(name) == column:
+                        t = str(col_type or "").upper()
+                        return any(tok in t for tok in ("CHAR", "CLOB", "TEXT"))
+                        # BLOB type stays False
+            return False
+    except Exception:
+        logger.debug(
+            "column type probe failed table=%s column=%s",
+            table,
+            column,
+            exc_info=True,
+        )
+    return False
+
+
+def _path_text_nonempty_sql(conn, col_quoted: str) -> str:
+    if conn.vendor == "sqlite":
+        return f"({col_quoted} IS NOT NULL AND TRIM(CAST({col_quoted} AS TEXT)) != '')"
+    return f"({col_quoted} IS NOT NULL AND TRIM({col_quoted}) <> '')"
+
 def _cursor_candidate_checks(source: BlobMigrationSource, conn) -> list[str]:
     """
     Filters for finding migratable rows without reading BLOB bytes.
@@ -1970,16 +2024,29 @@ def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dic
                     rows_with_keys = int((cursor.fetchone() or [0])[0] or 0)
                 total_with_blob = rows_with_keys * max(1, len(blob_cols))
         else:
+            # Path-export tables (varchar upload/...) often repeat the same path
+            # across many match rows — count DISTINCT paths, not row fan-out.
+            total_with_blob = 0
             where_sql = f" WHERE ({extra})" if extra else ""
-            select_parts = [
-                f"SUM(CASE WHEN {_blob_nonempty_sql(conn, _quote_ident(col))} THEN 1 ELSE 0 END)"
-                for col in blob_cols
-            ]
-            sql = f"SELECT {', '.join(select_parts)} FROM {table}{where_sql}"
             with conn.cursor() as cursor:
-                cursor.execute(sql)
-                row = cursor.fetchone() or ()
-            total_with_blob = sum(int(v or 0) for v in row)
+                for col in blob_cols:
+                    col_q = _quote_ident(col)
+                    if _is_character_column(conn, table=source.source_table, column=col):
+                        pred = _path_text_nonempty_sql(conn, col_q)
+                        sql = f"SELECT COUNT(DISTINCT {col_q}) FROM {table}"
+                        if where_sql:
+                            sql += f"{where_sql} AND {pred}"
+                        else:
+                            sql += f" WHERE {pred}"
+                        cursor.execute(sql)
+                        total_with_blob += int((cursor.fetchone() or [0])[0] or 0)
+                    else:
+                        sql = (
+                            f"SELECT SUM(CASE WHEN {_blob_nonempty_sql(conn, col_q)}"
+                            f" THEN 1 ELSE 0 END) FROM {table}{where_sql}"
+                        )
+                        cursor.execute(sql)
+                        total_with_blob += int((cursor.fetchone() or [0])[0] or 0)
 
     from images.source_map_service import count_live_map_entries_for_source
 
