@@ -1197,7 +1197,11 @@ async function handleSqlExecute() {
     sqlResult.value = res.data
     rebuildSqlTableData()
     await nextTick()
-    selectSqlPreviewRow(sqlTableData.value[0] ?? null, { focusBrowse: true })
+    resetSqlResultScroll()
+    selectSqlPreviewRow(sqlTableData.value[0] ?? null, {
+      focusBrowse: true,
+      scrollIntoView: false,
+    })
     setupSqlTableViewport()
     await nextTick()
     layoutTableRefs()
@@ -1300,9 +1304,8 @@ function focusSqlBrowse() {
 
 function selectSqlPreviewRow(row, { focusPanel = false, focusBrowse = false, scrollIntoView = true } = {}) {
   sqlSelectedRow.value = row
-  if (scrollIntoView) {
-    syncSqlTableCurrentRow(row)
-  }
+  // Always highlight; scroll only when navigating by keyboard / programmatic jumps.
+  syncSqlTableCurrentRow(row, { scroll: scrollIntoView })
   if (focusPanel) {
     nextTick(() => focusWithoutScroll(sqlPreviewPanelRef.value))
   }
@@ -1351,7 +1354,7 @@ function getSqlRowKey(row) {
 function onSqlTableRowClick(row, _column, event) {
   const ev = event?.target ? event : _column
   if (ev?.target?.closest?.('button, a, .el-button')) return
-  // Click already landed on the row — do not focus/scroll the viewport (that jumps to top).
+  // Same as browse: highlight only — do not scroll the SQL result viewport to top.
   selectSqlPreviewRow(row, { focusBrowse: true, scrollIntoView: false })
 }
 
@@ -1487,6 +1490,12 @@ function onSqlVBarScroll(event) {
 function resetSqlHorizontalScroll() {
   if (sqlTableWrapRef.value) sqlTableWrapRef.value.scrollLeft = 0
   if (sqlHBarRef.value) sqlHBarRef.value.scrollLeft = 0
+  // Never touch scrollTop here — vertical position belongs to the result list.
+}
+
+function resetSqlResultScroll() {
+  resetSqlHorizontalScroll()
+  if (sqlTableWrapRef.value) sqlTableWrapRef.value.scrollTop = 0
   if (sqlVBarRef.value) sqlVBarRef.value.scrollTop = 0
 }
 
@@ -1833,12 +1842,16 @@ function syncTableCurrentRow(row) {
   })
 }
 
-function syncSqlTableCurrentRow(row) {
+function syncSqlTableCurrentRow(row, { scroll = true } = {}) {
   const idx = row ? sqlTableData.value.indexOf(row) : -1
   highlightAndScrollTableRow(
     sqlTableRef,
     row,
     (a, b) => a === b || (idx >= 0 && sqlTableData.value.indexOf(a) === idx),
+    {
+      scroll,
+      scrollParent: sqlTableWrapRef.value,
+    },
   )
 }
 
