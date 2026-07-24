@@ -13,6 +13,12 @@ from fingerprints.biz_browse import (
     list_biz_samples,
     parse_biz_connection_params,
 )
+from fingerprints.biz_eval import (
+    BizEvalError,
+    build_eval_report,
+    discover_score_columns,
+    list_eval_meta,
+)
 from fingerprints.job_service import (
     cancel_import_job,
     create_import_job,
@@ -476,6 +482,52 @@ class FingerprintBizPairViewView(APIView):
         except BizBrowseError as exc:
             status = 404 if "未找到" in str(exc) else 400
             return error_response(str(exc), code=4041 if status == 404 else 4001, status=status)
+        return success_response(data)
+
+
+class FingerprintBizEvalMetaView(APIView):
+    """GET /api/fingerprints/biz/eval/meta/ — datasets + usable score columns."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request):
+        try:
+            cfg = _biz_config_from_request(request)
+            dataset_code = (
+                request.query_params.get("dataset_code")
+                or request.query_params.get("data_set_code")
+                or None
+            )
+            data = list_eval_meta(cfg)
+            if dataset_code:
+                data["score_columns"] = discover_score_columns(cfg, dataset_code=dataset_code.strip())
+                data["filter_dataset_code"] = dataset_code.strip()
+        except (BizBrowseError, BizEvalError) as exc:
+            return error_response(str(exc), code=4001, status=400)
+        return success_response(data)
+
+
+class FingerprintBizEvalReportView(APIView):
+    """GET /api/fingerprints/biz/eval/report/ — accuracy tables + chart series."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request):
+        try:
+            cfg = _biz_config_from_request(request)
+            dataset_code = (
+                request.query_params.get("dataset_code")
+                or request.query_params.get("data_set_code")
+                or ""
+            )
+            score_column = request.query_params.get("score_column") or "score"
+            data = build_eval_report(
+                cfg,
+                dataset_code=dataset_code,
+                score_column=score_column,
+            )
+        except (BizBrowseError, BizEvalError) as exc:
+            return error_response(str(exc), code=4001, status=400)
         return success_response(data)
 
 

@@ -15,8 +15,6 @@ t_match_result_image
 
 筛选留意：`t_match_result_image.data_set_code`（与 `T_CAP_FP_DATA.dataset_code` 对应，如 `PK_5W`）。
 
-**本期不做：** 分数 / `sameflag` / 各 `*ms` 等指标展示与评测计算。
-
 ## 功能
 
 1. 导入 batmatch zip（可选路径写回 `T_CAP_FP_DATA` + `T_FEATURE_RECORD`）
@@ -24,6 +22,29 @@ t_match_result_image
    - 配对：左树 `t_match_result_image`；右栏双栏 `image_reg` / `image_match`
    - 单图：左树 `T_CAP_FP_DATA`；右栏单栏叠加
 3. 方向键切换上一项 / 下一项
+4. **评测指标**子页（顶栏「评测指标」）：按 `data_set_code` + 分数列计算 EER/FMR/DET
+
+## 评测指标（子页）
+
+路由：`/fingerprint-eval`（菜单隐藏，从指纹浏览跳转）。
+
+| 字段 | 用途 |
+|------|------|
+| `data_set_code` | 评测单位 |
+| `score`（默认）、`NeuNTms`、`Bionems`、`BioIdms`、`HXms`、`AlgVersion` | 算法分数列；扫描后「Genuine+Impostor 均有数值」才可选 |
+| `sameflag` | `1`=Genuine，`0`=Impostor |
+
+**已实现：** EER（含粗略 CI）、FMR100/1000/10000、ZeroFMR、ZeroFNMR、分数分布、FMR(t)/FNMR(t)、DET。  
+接受规则：`score >= threshold`。
+
+**未实现（表中无对应采集字段）：** REJenroll / REJnga / REJnira、注册/比对耗时、模板大小、内存。
+
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| GET | `/api/fingerprints/biz/eval/meta/` | 数据集列表 + 可用分数列 |
+| GET | `/api/fingerprints/biz/eval/report/` | 准确率表 + 曲线数据 |
+
+查询参数：`connection_id` 或 `db_alias`、`database`、`dataset_code`、`score_column`。
 
 ## API（业务浏览）
 
@@ -33,7 +54,7 @@ t_match_result_image
 | GET | `/api/fingerprints/biz/pairs/` | 配对分页（`dataset_code`/`keyword`） |
 | GET | `/api/fingerprints/biz/pairs/{id}/view/` | `mode=pair`，`panels[reg,match]` |
 
-`pair_meta` 仅含：`id`、`image_reg`、`image_match`、`data_set_code`（不含 score 等指标）。
+`pair_meta` 仅含：`id`、`image_reg`、`image_match`、`data_set_code`（浏览侧不含 score 等指标）。
 
 单样本兼容接口仍保留：`/biz/samples/`、`/biz/samples/{cap}/view/`。
 
@@ -57,6 +78,5 @@ ISO：`setlen=0`，`setang=256`（可按 layer-type 配置）。
 
 ## 非本期
 
-- 指标展示（score / sameflag / *ms）
-- EER/FMR 报表
 - 删除旧 `fingerprint_pair` 导入旁路
+- 效率/内存类指标（缺采集字段）

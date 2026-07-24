@@ -21,6 +21,15 @@ export function fetchFingerprintBizSamplesApi(params = {}) {
   return request.get('/fingerprints/biz/samples/', { params })
 }
 
+/** Biometric eval: EER / FMR / DET from t_match_result_image */
+export function fetchFingerprintBizEvalMetaApi(params = {}) {
+  return request.get('/fingerprints/biz/eval/meta/', { params })
+}
+
+export function fetchFingerprintBizEvalReportApi(params = {}) {
+  return request.get('/fingerprints/biz/eval/report/', { params })
+}
+
 export function fetchFingerprintBizSampleViewApi(capImageId, params = {}) {
   return request.get(`/fingerprints/biz/samples/${encodeURIComponent(capImageId)}/view/`, { params })
 }

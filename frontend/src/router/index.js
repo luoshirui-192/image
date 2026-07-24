@@ -11,6 +11,7 @@ const BlobMigrateView = () => import('@/views/BlobMigrate.vue')
 const BlobTableViewsView = () => import('@/views/BlobTableViews.vue')
 const FingerprintPairsView = () => import('@/views/FingerprintPairs.vue')
 const FingerprintCompareView = () => import('@/views/FingerprintCompare.vue')
+const FingerprintEvalView = () => import('@/views/FingerprintEval.vue')
 const CategoryManageView = () => import('@/views/CategoryManage.vue')
 const LogsView = () => import('@/views/Logs.vue')
 const SettingsView = () => import('@/views/Settings.vue')
@@ -56,6 +57,15 @@ function buildChildRoutes() {
         hiddenInMenu: true,
       },
       props: true,
+    },
+    {
+      path: 'fingerprint-eval',
+      name: 'fingerprint-eval',
+      component: FingerprintEvalView,
+      meta: {
+        title: '指纹评测指标',
+        hiddenInMenu: true,
+      },
     },
     {
       path: 'blob-views',

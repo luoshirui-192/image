@@ -525,6 +525,16 @@ async function switchBrowseMode(mode) {
   await loadSamples()
 }
 
+function goEvalPage() {
+  router.push({
+    name: 'fingerprint-eval',
+    query: {
+      connection: browseConnectionKey.value || undefined,
+      dataset_code: filters.dataset_code || undefined,
+    },
+  })
+}
+
 function loadImage(url) {
   return new Promise((resolve, reject) => {
     const img = new Image()
@@ -892,7 +902,7 @@ onBeforeUnmount(() => {
     <div class="fp-toolbar">
       <div class="fp-title">
         <h2>指纹特征浏览</h2>
-        <p>单图读 T_CAP_FP_DATA；配对读 t_match_result_image（指标稍后）</p>
+        <p>单图读 T_CAP_FP_DATA；配对读 t_match_result_image</p>
       </div>
       <div class="import-actions">
         <el-radio-group :model-value="browseMode" size="default" @change="switchBrowseMode">
@@ -914,6 +924,7 @@ onBeforeUnmount(() => {
             :value="connectionKey(conn)"
           />
         </el-select>
+        <el-button @click="goEvalPage">评测指标</el-button>
         <el-button v-if="auth.isAdmin" @click="openTypeDialog">特征类型</el-button>
         <el-button type="primary" :loading="importing" @click="openImportDialog">导入 zip</el-button>
         <el-button v-if="importing && importJob" @click="onCancelImport">取消导入</el-button>

@@ -791,3 +791,99 @@ class PathWritebackUnitTestCase(TestCase):
             "upload/2026/a.bmp",
         )
         self.assertEqual(normalize_relative_path(""), "")
+
+
+class BizEvalMetricsTestCase(TestCase):
+    """Accuracy metrics from score + sameflag (no enroll/memory)."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        with connection.cursor() as cursor:
+            cursor.executescript(SQLITE_TABLES)
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = SysUser.objects.create(
+            username="evaluser",
+            password=make_password("pass123"),
+            role="user",
+            status=1,
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def _ensure_match_eval_table(self):
+        with connection.cursor() as cursor:
+            cursor.execute("DROP TABLE IF EXISTS t_match_result_image")
+            cursor.execute(
+                """
+                CREATE TABLE t_match_result_image (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    image_reg VARCHAR(200) NULL,
+                    image_match VARCHAR(200) NULL,
+                    score REAL NULL,
+                    NeuNTms REAL NULL,
+                    Bionems REAL NULL,
+                    BioIdms REAL NULL,
+                    HXms REAL NULL,
+                    AlgVersion VARCHAR(50) NULL,
+                    sameflag INTEGER NULL,
+                    data_set_code VARCHAR(255) NULL,
+                    fingerprint_image VARCHAR(500) NOT NULL DEFAULT ''
+                )
+                """
+            )
+
+    def test_compute_report_separates_genuine_impostor(self):
+        from fingerprints.biz_eval import compute_report
+
+        genuine = [0.70, 0.80, 0.85, 0.90, 0.95] * 20
+        impostor = [0.05, 0.10, 0.15, 0.20, 0.25] * 20
+        report = compute_report(genuine, impostor)
+        acc = report["accuracy"]
+        self.assertIsNotNone(acc["eer"])
+        self.assertLess(acc["eer"], 5.0)
+        self.assertEqual(report["counts"]["genuine"], 100)
+        self.assertEqual(report["counts"]["impostor"], 100)
+        self.assertTrue(report["charts"]["score_distribution"]["bin_centers"])
+        self.assertTrue(report["charts"]["fmr_fnmr"])
+        self.assertTrue(report["charts"]["det"])
+
+    def test_eval_api_report(self):
+        self._ensure_match_eval_table()
+        with connection.cursor() as cursor:
+            rows = []
+            for i in range(40):
+                rows.append((i + 1, 0.7 + i * 0.005, 1, "PK_5W", 0.8))
+            for i in range(40):
+                rows.append((i + 100, 0.05 + i * 0.005, 0, "PK_5W", 0.1))
+            cursor.executemany(
+                "INSERT INTO t_match_result_image "
+                "(id, score, sameflag, data_set_code, NeuNTms) VALUES (%s,%s,%s,%s,%s)",
+                rows,
+            )
+
+        meta = self.client.get(
+            "/api/fingerprints/biz/eval/meta/",
+            {"db_alias": "default", "database": "", "dataset_code": "PK_5W"},
+        )
+        self.assertEqual(meta.status_code, 200, meta.data)
+        cols = {c["column"] for c in meta.data["data"]["score_columns"]}
+        self.assertIn("score", cols)
+        self.assertIn("NeuNTms", cols)
+
+        report = self.client.get(
+            "/api/fingerprints/biz/eval/report/",
+            {
+                "db_alias": "default",
+                "database": "",
+                "dataset_code": "PK_5W",
+                "score_column": "score",
+            },
+        )
+        self.assertEqual(report.status_code, 200, report.data)
+        data = report.data["data"]
+        self.assertEqual(data["meta"]["dataset_code"], "PK_5W")
+        self.assertIn("eer", data["accuracy"])
+        self.assertEqual(data["counts"]["genuine"], 40)
+        self.assertEqual(data["counts"]["impostor"], 40)
