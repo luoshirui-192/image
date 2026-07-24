@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, View } from '@element-plus/icons-vue'
 import {
@@ -8,6 +8,7 @@ import {
   listLogsApi,
   LOG_ACTION_TYPES,
 } from '@/api/logs'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 
 const loading = ref(false)
 const logs = ref([])
@@ -96,7 +97,10 @@ function copySql() {
   )
 }
 
-onMounted(loadLogs)
+usePageDataRefresh(loadLogs, {
+  isEmpty: () => !logs.value.length,
+  alwaysRefreshOnVisible: true,
+})
 </script>
 
 <template>

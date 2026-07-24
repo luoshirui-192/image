@@ -75,7 +75,7 @@ function formatSourceColumns(row) {
   return cols.join(', ')
 }
 
-async function loadSources() {
+async function loadSources({ withStats = true } = {}) {
   loadingSources.value = true
   try {
     const res = await callWithRetry(() => listBlobMigrationSourcesApi({ includeStats: false }))
@@ -88,6 +88,9 @@ async function loadSources() {
     ElMessage.error(err.message || '加载迁移配置失败')
   } finally {
     loadingSources.value = false
+  }
+  if (withStats && sources.value.length) {
+    await Promise.allSettled(sources.value.map((s) => refreshSourceStats(s.id)))
   }
 }
 
@@ -540,6 +543,7 @@ usePageDataRefresh(refreshConsole, {
   isEmpty: () => !sources.value.length && !jobHistory.value.length,
   intervalMs: 2500,
   maxEmptyRetries: 6,
+  alwaysRefreshOnVisible: true,
 })
 
 watch(
@@ -551,6 +555,12 @@ watch(
     })
   },
 )
+
+watch(connDialogVisible, (open, wasOpen) => {
+  if (wasOpen && !open) {
+    void refreshConsole()
+  }
+})
 
 onUnmounted(() => {
   stopJobPolling()
@@ -590,7 +600,7 @@ onUnmounted(() => {
         <div class="section-head-row">
           <h3>1. 已保存的迁移源</h3>
           <div>
-            <el-button :loading="loadingSources" @click="loadSources">刷新</el-button>
+            <el-button :loading="loadingSources" @click="refreshConsole">刷新</el-button>
             <el-button type="primary" plain :loading="globalSyncLoading" @click="runGlobalDataSync">
               全局数据同步
             </el-button>
@@ -785,7 +795,7 @@ onUnmounted(() => {
       </section>
     </div>
 
-    <ExternalDbConnectionsDialog v-model="connDialogVisible" />
+    <ExternalDbConnectionsDialog v-model="connDialogVisible" @changed="refreshConsole" />
   </div>
 </template>
 

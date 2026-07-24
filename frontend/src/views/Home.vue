@@ -1,11 +1,12 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Document, UploadFilled, View } from '@element-plus/icons-vue'
 import { healthApi } from '@/api/auth'
 import { APP_VERSION } from '@/config/app'
 import { filterMenuByRole } from '@/config/menu'
 import { useAuthStore } from '@/stores/auth'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -30,7 +31,8 @@ function goToMenu(item) {
   router.push(item.path ? `/${item.path}` : '/')
 }
 
-onMounted(async () => {
+async function loadHealth() {
+  loading.value = true
   try {
     const res = await healthApi()
     health.value = res.data
@@ -39,6 +41,11 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+}
+
+usePageDataRefresh(loadHealth, {
+  isEmpty: () => !health.value,
+  alwaysRefreshOnVisible: true,
 })
 </script>
 

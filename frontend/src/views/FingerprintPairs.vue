@@ -7,6 +7,7 @@ import {
   listBlobCatalogConnectionsApi,
 } from '@/api/images'
 import { useAuthStore } from '@/stores/auth'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 import {
   cancelFingerprintImportJobApi,
   createFingerprintLayerTypeApi,
@@ -94,8 +95,8 @@ function resetWritebackForm() {
   wbConnectionKey.value = ''
 }
 
-async function ensureConnections() {
-  if (wbConnections.value.length) return
+async function ensureConnections({ force = false } = {}) {
+  if (wbConnections.value.length && !force) return
   wbLoading.value = true
   browseLoading.value = true
   try {
@@ -696,12 +697,30 @@ function openImportDialog() {
   importFailOnDuplicates.value = false
   resetWritebackForm()
   importDialogVisible.value = true
-  ensureConnections()
 }
 
 watch(wbEnabled, (on) => {
-  if (on) ensureConnections()
+  if (on) void ensureConnections({ force: true })
 })
+
+watch(importDialogVisible, (open) => {
+  if (open) void ensureConnections({ force: true })
+})
+
+watch(typeDialogVisible, (open) => {
+  if (open) void loadTypeRows()
+})
+
+let filterTimer = null
+watch(
+  () => [filters.keyword, filters.dataset_code],
+  () => {
+    if (filterTimer) clearTimeout(filterTimer)
+    filterTimer = setTimeout(() => {
+      void loadSamples()
+    }, 350)
+  },
+)
 
 function dupTypeLabel(type) {
   const map = {
@@ -809,8 +828,7 @@ async function toggleTypeEnabled(row) {
   }
 }
 
-onMounted(async () => {
-  window.addEventListener('keydown', onPreviewKeydown, true)
+async function bootstrapFingerprintPage() {
   await ensureConnections()
   const modeQ = String(route.query.mode || '').toLowerCase()
   if (modeQ === 'single' || modeQ === 'pair') {
@@ -834,12 +852,38 @@ onMounted(async () => {
     await loadView()
     focusComparePanel()
   }
+}
+
+let fpBootstrapped = false
+usePageDataRefresh(
+  async () => {
+    if (!fpBootstrapped) {
+      await bootstrapFingerprintPage()
+      fpBootstrapped = true
+      return
+    }
+    await ensureConnections({ force: true })
+    await loadMeta()
+    await loadSamples()
+    if (selectedMatchId.value || selectedCapId.value) {
+      await loadView()
+    }
+  },
+  {
+    isEmpty: () => !rows.value.length && !wbConnections.value.length,
+    alwaysRefreshOnVisible: true,
+  },
+)
+
+onMounted(() => {
+  window.addEventListener('keydown', onPreviewKeydown, true)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onPreviewKeydown, true)
   stopPoll()
   revokeUrls()
+  if (filterTimer) clearTimeout(filterTimer)
 })
 </script>
 
@@ -952,8 +996,9 @@ onBeforeUnmount(() => {
             <el-option v-for="c in meta.dataset_codes" :key="c" :label="c" :value="c" />
           </el-select>
           <div class="filter-actions">
-            <el-button type="primary" size="small" @click="onSearch">筛选</el-button>
+            <el-button type="primary" size="small" :loading="loading" @click="onSearch">筛选</el-button>
             <el-button size="small" @click="onReset">重置</el-button>
+            <el-button size="small" :loading="loading" @click="onSearch">刷新</el-button>
           </div>
         </div>
         <div class="tree-wrap">

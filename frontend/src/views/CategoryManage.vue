@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Plus } from '@element-plus/icons-vue'
@@ -10,6 +10,7 @@ import {
   listCategoriesApi,
   updateCategoryApi,
 } from '@/api/images'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 
 const route = useRoute()
 const router = useRouter()
@@ -118,7 +119,10 @@ function goBack() {
   router.push(backTarget.value.path)
 }
 
-onMounted(loadCategories)
+usePageDataRefresh(loadCategories, {
+  isEmpty: () => !categories.value.length,
+  alwaysRefreshOnVisible: true,
+})
 </script>
 
 <template>

@@ -2,15 +2,16 @@
 /**
  * Inline panel for path/simulated export jobs — used on 迁移任务台 (not a floating overlay).
  */
-import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useBackgroundExportStore } from '@/stores/backgroundExport'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 
 const store = useBackgroundExportStore()
 const router = useRouter()
 
-onMounted(() => {
-  void store.syncFromServer()
+usePageDataRefresh(() => store.syncFromServer(), {
+  isEmpty: () => !(store.jobs || []).length,
+  alwaysRefreshOnVisible: true,
 })
 
 function statusLabel(status) {

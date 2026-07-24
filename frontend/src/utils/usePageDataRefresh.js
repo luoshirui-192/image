@@ -1,8 +1,7 @@
 import { onMounted, onUnmounted } from 'vue'
 
 /**
- * Keep page option lists populated: retry while empty and refresh when tab becomes visible.
- * Fixes first-paint / second-page races that leave Element Plus selects showing「无数据」.
+ * Keep page data fresh: load on mount, retry while empty, refresh when tab is visible again.
  *
  * @param {() => Promise<void>|void} refreshFn
  * @param {{
@@ -10,6 +9,7 @@ import { onMounted, onUnmounted } from 'vue'
  *   intervalMs?: number,
  *   maxEmptyRetries?: number,
  *   refreshOnVisible?: boolean,
+ *   alwaysRefreshOnVisible?: boolean,
  * }} [options]
  */
 export function usePageDataRefresh(refreshFn, options = {}) {
@@ -18,6 +18,7 @@ export function usePageDataRefresh(refreshFn, options = {}) {
     intervalMs = 2500,
     maxEmptyRetries = 12,
     refreshOnVisible = true,
+    alwaysRefreshOnVisible = true,
   } = options
 
   let timer = null
@@ -64,11 +65,10 @@ export function usePageDataRefresh(refreshFn, options = {}) {
   function onVisibility() {
     if (!refreshOnVisible) return
     if (document.visibilityState !== 'visible') return
-    if (isEmpty()) {
-      void runRefresh({ force: true }).then(() => {
-        if (isEmpty()) startEmptyPoll()
-      })
-    }
+    if (!alwaysRefreshOnVisible && !isEmpty()) return
+    void runRefresh({ force: true }).then(() => {
+      if (isEmpty()) startEmptyPoll()
+    })
   }
 
   onMounted(() => {

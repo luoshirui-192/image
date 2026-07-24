@@ -823,6 +823,7 @@ async function openMigrateDialog() {
   migrateForm.suffixColumn = ''
   migrateForm.tags = ''
   migrateDialogVisible.value = true
+  void Promise.all([loadMigrationSources(), loadMapStats()]).then(() => refreshSelectionMigrationStats())
 }
 
 async function submitSavedViewMigration() {
@@ -1937,6 +1938,9 @@ watch(rightTab, (tab) => {
         syncTableCurrentRow(selectedRow.value)
       }
     })
+    if (browseReady.value && activeViewId.value) {
+      void refreshActiveView()
+    }
   } else if (tab === 'sql') {
     setupSqlTableViewport()
     nextTick(() => {
@@ -1985,11 +1989,18 @@ usePageDataRefresh(
       return
     }
     await loadViews()
+    if (browseReady.value && activeViewId.value && rightTab.value === 'browse') {
+      await loadRows({ append: false })
+    }
+    if (savedViewForSelection.value) {
+      void refreshSelectionMigrationStats()
+    }
   },
   {
     isEmpty: () => !views.value.length,
     intervalMs: 2500,
     maxEmptyRetries: 10,
+    alwaysRefreshOnVisible: true,
   },
 )
 
@@ -3193,6 +3204,7 @@ onUnmounted(() => {
   border-radius: 4px;
   background: var(--el-border-color);
 }
+
 
 .row-preview-card {
   flex: 0 0 auto;
