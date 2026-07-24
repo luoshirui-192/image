@@ -4,11 +4,17 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from django.contrib.auth.hashers import make_password
-from django.db import connection
+from django.db import connection, connections
+from django.db.backends.base.base import BaseDatabaseWrapper
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from images.external_db_service import external_alias, validate_db_alias_reference
+from images.external_db_service import (
+    SESSION_ALIAS_PREFIX,
+    db_alias_session,
+    external_alias,
+    validate_db_alias_reference,
+)
 from images.models import ExternalDbConnection
 from users.models import SysUser
 
@@ -131,3 +137,38 @@ class ExternalDbConnectionApiTestCase(TestCase):
         self.assertIn("新增 3 个", body["message"])
         self.assertEqual(body["data"]["table_view_provision"], provision)
         mock_provision.assert_called_once()
+
+
+class DbAliasSessionIsolationTestCase(TestCase):
+    """Regression: SQL database switch must not poison global default NAME."""
+
+    def test_database_switch_uses_ephemeral_alias_without_mutating_default(self):
+        original_name = connections.databases["default"]["NAME"]
+        session_alias = None
+        with patch.object(BaseDatabaseWrapper, "ensure_connection", return_value=None):
+            with db_alias_session("default", database="__switched_for_sql__") as alias:
+                session_alias = alias
+                self.assertTrue(alias.startswith(SESSION_ALIAS_PREFIX))
+                self.assertNotEqual(alias, "default")
+                self.assertEqual(connections.databases["default"]["NAME"], original_name)
+                self.assertEqual(connections.databases[alias]["NAME"], "__switched_for_sql__")
+        self.assertEqual(connections.databases["default"]["NAME"], original_name)
+        self.assertIsNotNone(session_alias)
+        self.assertNotIn(session_alias, connections.databases)
+
+    def test_nested_database_switches_do_not_corrupt_default(self):
+        original_name = connections.databases["default"]["NAME"]
+        with patch.object(BaseDatabaseWrapper, "ensure_connection", return_value=None):
+            with db_alias_session("default", database="db_a") as alias_a:
+                with db_alias_session("default", database="db_b") as alias_b:
+                    self.assertEqual(connections.databases["default"]["NAME"], original_name)
+                    self.assertEqual(connections.databases[alias_a]["NAME"], "db_a")
+                    self.assertEqual(connections.databases[alias_b]["NAME"], "db_b")
+                self.assertNotIn(alias_b, connections.databases)
+            self.assertNotIn(alias_a, connections.databases)
+        self.assertEqual(connections.databases["default"]["NAME"], original_name)
+
+    def test_same_database_yields_original_alias(self):
+        original_name = str(connections.databases["default"]["NAME"] or "")
+        with db_alias_session("default", database=original_name or None) as alias:
+            self.assertEqual(alias, "default")

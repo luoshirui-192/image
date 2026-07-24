@@ -84,8 +84,10 @@ def _execute_in_thread(
     db_switch = context.database or None
     executed_sql = sql
     blob_length_columns: frozenset[str] = frozenset()
-    with db_alias_session(context.db_alias, database=db_switch):
-        connection = connections[context.db_alias]
+    # Must use the yielded session alias — switching database creates an ephemeral
+    # alias and must never mutate process-global default/legacy.
+    with db_alias_session(context.db_alias, database=db_switch) as session_alias:
+        connection = connections[session_alias]
         connection.close()
 
         if exclude_blob_star and connection.vendor == "mysql":
