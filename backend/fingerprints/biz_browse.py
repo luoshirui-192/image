@@ -20,7 +20,7 @@ from fingerprints.path_writeback import (
     FEATURE_TABLE,
     normalize_relative_path,
 )
-from images.external_db_service import ExternalDbError, db_alias_session, external_alias
+from images.external_db_service import ExternalDbError, alias_from_connection_config, db_alias_session
 from utils.storage import get_image_storage
 
 logger = logging.getLogger(__name__)
@@ -67,9 +67,7 @@ def parse_biz_connection_params(
 
 
 def _resolve_alias(config: dict) -> str:
-    if config.get("connection_id") is not None:
-        return external_alias(int(config["connection_id"]))
-    return str(config.get("db_alias") or "default")
+    return alias_from_connection_config(config)
 
 
 def decode_path_cell(value: Any) -> str:

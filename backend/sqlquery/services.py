@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from django.conf import settings
-from django.db import connections
+from django.db import close_old_connections, connections
 from django.utils import timezone
 
 from sqlquery.cell_format import format_blob_placeholder, serialize_sql_cell
@@ -84,11 +84,8 @@ def _execute_in_thread(
     db_switch = context.database or None
     executed_sql = sql
     blob_length_columns: frozenset[str] = frozenset()
-    # Must use the yielded session alias — switching database creates an ephemeral
-    # alias and must never mutate process-global default/legacy.
     with db_alias_session(context.db_alias, database=db_switch) as session_alias:
         connection = connections[session_alias]
-        connection.close()
 
         if exclude_blob_star and connection.vendor == "mysql":
             rewrite = rewrite_sql_for_blob_performance(
@@ -216,7 +213,8 @@ def execute_select_sql(
             columns, rows, truncated, executed_sql, _blob_length_cols = future.result(timeout=timeout)
         except FuturesTimeout as exc:
             future.cancel()
-            connections.close_all()
+            # Never connections.close_all() — tears down default for sibling requests.
+            close_old_connections()
             raise SqlExecutionError(f"查询超时（>{timeout}s）") from exc
         except SqlValidationError:
             raise

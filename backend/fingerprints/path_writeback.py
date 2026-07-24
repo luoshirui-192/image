@@ -21,7 +21,7 @@ from django.db import close_old_connections, connections, transaction
 from django.utils import timezone
 
 from images.blob_migration_service import BlobMigrationError, validate_identifier
-from images.external_db_service import ExternalDbError, db_alias_session, external_alias
+from images.external_db_service import ExternalDbError, alias_from_connection_config, db_alias_session, external_alias
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,7 @@ DEFAULT_DATASET_CODE = "PK_5W"
 CAP_TABLE = "T_CAP_FP_DATA"
 FEATURE_TABLE = "T_FEATURE_RECORD"
 
-# Serialize writeback I/O: import workers are parallel and must not
-# register/unregister the same external Django DB alias concurrently.
+# Serialize writeback schema ALTER / column probes across parallel import workers.
 _WRITEBACK_LOCK = threading.Lock()
 _SCHEMA_ENSURED: set[str] = set()
 _SCHEMA_FAILED: dict[str, str] = {}
@@ -143,9 +142,7 @@ def parse_path_writeback_config(raw: Any) -> dict | None:
 
 
 def _resolve_alias(config: dict) -> str:
-    if config.get("connection_id") is not None:
-        return external_alias(int(config["connection_id"]))
-    return str(config.get("db_alias") or "default")
+    return alias_from_connection_config(config)
 
 
 def _new_feature_id() -> str:

@@ -111,7 +111,8 @@ def _load_view(view_id: int) -> BlobTableView:
 
 def _fetch_remote_columns(conn, table: str) -> list[VirtualColumn]:
     table = validate_identifier(table, label="源表名")
-    cache_key = (getattr(conn, "alias", None), conn.vendor, table)
+    db_name = str((getattr(conn, "settings_dict", None) or {}).get("NAME") or "")
+    cache_key = (getattr(conn, "alias", None), db_name, conn.vendor, table)
     cached = _REMOTE_COLUMNS_CACHE.get(cache_key)
     now = time.monotonic()
     if cached and (now - cached[0]) < _REMOTE_COLUMNS_TTL_SEC:

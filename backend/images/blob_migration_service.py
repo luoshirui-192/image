@@ -91,9 +91,8 @@ class MigrationRunResult:
 
 
 def _close_worker_connections() -> None:
-    """Release Django default and dynamically registered external DB connections."""
+    """Drop stale thread-local handles. Never close_all() — that kills sibling requests."""
     close_old_connections()
-    connections.close_all()
 
 
 def _upload_workers() -> int:

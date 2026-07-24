@@ -411,7 +411,7 @@ def _warm_thumbnails_after_job(job_id: int) -> None:
 
 
 def _run_warm_thumbnails_worker(job_id: int) -> None:
-    from django.db import close_old_connections, connections
+    from django.db import close_old_connections
 
     close_old_connections()
     try:
@@ -420,7 +420,6 @@ def _run_warm_thumbnails_worker(job_id: int) -> None:
         logger.exception("warm thumbnails worker failed job_id=%s", job_id)
     finally:
         close_old_connections()
-        connections.close_all()
 
 
 def _kick_warm_thumbnails_async(job_id: int) -> None:
@@ -529,7 +528,7 @@ def _refresh_job_estimate_for_ui(job: BlobMigrationJob, *, touch_message: bool =
 
 
 def _run_job_estimate_worker(job_id: int) -> None:
-    from django.db import close_old_connections, connections
+    from django.db import close_old_connections
 
     close_old_connections()
     try:
@@ -541,7 +540,6 @@ def _run_job_estimate_worker(job_id: int) -> None:
         logger.warning("async job estimate failed job_id=%s", job_id, exc_info=True)
     finally:
         close_old_connections()
-        connections.close_all()
 
 
 def _kick_job_estimate_async(job_id: int) -> None:
@@ -684,7 +682,7 @@ def process_pending_migration_jobs(*, max_jobs: int = 1, job_id: int | None = No
 
 
 def _run_migration_worker(job_id: int) -> None:
-    from django.db import close_old_connections, connections
+    from django.db import close_old_connections
 
     close_old_connections()
     try:
@@ -693,7 +691,6 @@ def _run_migration_worker(job_id: int) -> None:
         logger.exception("migration worker failed job_id=%s", job_id)
     finally:
         close_old_connections()
-        connections.close_all()
 
 
 def _kick_migration_thread(job_id: int) -> None:
