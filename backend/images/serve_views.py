@@ -1,6 +1,8 @@
 """Image file serving API — Step 14."""
 from __future__ import annotations
 
+import logging
+
 from django.http import FileResponse, HttpResponse
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -23,6 +25,8 @@ from utils.storage import get_image_storage
 from utils.file_security import AccessDeniedError, PathSecurityError
 from utils.permissions import IsActiveAccount
 from utils.responses import error_response, success_response
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_optional_int(value) -> int | None:
@@ -119,6 +123,9 @@ class _BaseImageServeView(APIView):
             return error_response(str(exc), code=4003, status=403)
         except AccessDeniedError as exc:
             return error_response(str(exc), code=4001, status=403)
+        except Exception as exc:
+            logger.exception("image serve failed")
+            return error_response(f"图片读取失败: {exc}", code=5001, status=500)
 
 
 @extend_schema(

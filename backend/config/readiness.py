@@ -104,11 +104,75 @@ def check_secrets() -> tuple[bool, list[str]]:
     return len(issues) == 0, issues
 
 
+# Skip frontend_dist in Docker backend image (frontend lives in nginx container).
 def check_frontend_dist() -> tuple[bool, str]:
+    from pathlib import Path as _Path
+
+    if _Path("/.dockerenv").exists():
+        return True, "skipped-in-backend-container"
     dist = settings.PROJECT_ROOT / "frontend" / "dist" / "index.html"
     if dist.is_file():
         return True, str(dist.parent)
     return False, str(dist.parent)
+
+
+def check_image_probe() -> dict:
+    """Sample one live ImageInfo row and verify DB path + object storage."""
+    from images.external_db_service import ensure_system_database_names
+    from images.models import ImageInfo
+    from utils.file_security import PathSecurityError, assert_safe_relative_path
+
+    ensure_system_database_names()
+    result: dict = {
+        "ok": False,
+        "image_info_count": 0,
+        "sample_id": None,
+        "sample_path": None,
+        "path_ok": False,
+        "storage_exists": False,
+        "storage_read_ok": False,
+        "detail": "",
+    }
+    try:
+        result["image_info_count"] = ImageInfo.objects.filter(is_delete=0).count()
+        sample = (
+            ImageInfo.objects.filter(is_delete=0)
+            .exclude(image_path="")
+            .order_by("-id")
+            .only("id", "image_path")
+            .first()
+        )
+        if sample is None:
+            result["detail"] = "image_info 无可用记录"
+            return result
+
+        result["sample_id"] = sample.id
+        result["sample_path"] = sample.image_path
+        try:
+            safe = assert_safe_relative_path(sample.image_path)
+            result["path_ok"] = True
+        except PathSecurityError as exc:
+            result["detail"] = f"路径校验失败: {exc}"
+            return result
+
+        storage = get_image_storage()
+        result["storage_backend"] = storage.backend_name
+        if storage.backend_name == "minio":
+            result["storage_key"] = storage._object_key(safe)  # noqa: SLF001 — diagnostic only
+        exists = storage.exists(safe)
+        result["storage_exists"] = bool(exists)
+        if not exists:
+            result["detail"] = "对象存储中不存在该文件"
+            return result
+        data = storage.read_bytes(safe)
+        result["storage_read_ok"] = bool(data)
+        result["sample_bytes"] = len(data)
+        result["ok"] = True
+        result["detail"] = "ok"
+        return result
+    except Exception as exc:
+        result["detail"] = str(exc)
+        return result
 
 
 def collect_readiness() -> dict:
@@ -117,6 +181,7 @@ def collect_readiness() -> dict:
     thumb_ok, thumb_detail = check_thumb_cache_writable()
     secrets_ok, secret_issues = check_secrets()
     dist_ok, dist_detail = check_frontend_dist()
+    image_probe = check_image_probe()
 
     checks = {
         "debug": settings.DEBUG,
@@ -126,7 +191,9 @@ def collect_readiness() -> dict:
         "thumb_cache_writable": {"ok": thumb_ok, "path": thumb_detail},
         "secrets": {"ok": secrets_ok, "issues": secret_issues},
         "frontend_dist": {"ok": dist_ok, "path": dist_detail},
+        "image_probe": image_probe,
     }
+    image_ok = bool(image_probe.get("ok")) or int(image_probe.get("image_info_count") or 0) == 0
     checks["ready"] = (
         not settings.DEBUG
         and db_ok
@@ -134,5 +201,6 @@ def collect_readiness() -> dict:
         and thumb_ok
         and secrets_ok
         and dist_ok
+        and image_ok
     )
     return checks

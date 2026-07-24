@@ -55,12 +55,14 @@ PY
 fi
 
 echo ""
-echo "========== 7. 健康检查 + 默认库身份 =========="
-curl -s http://127.0.0.1/api/health/ 2>/dev/null | head -c 2000 || echo "无法访问 /api/health/"
+echo "========== 7. 健康检查 + 图片探针 =========="
+curl -s http://127.0.0.1/api/health/ 2>/dev/null | python3 -m json.tool 2>/dev/null | head -n 80 \
+  || curl -s http://127.0.0.1/api/health/ 2>/dev/null | head -c 3000 \
+  || echo "无法访问 /api/health/"
 echo ""
 
 echo ""
-echo "========== 8. Django default.NAME（进程内）=========="
+echo "========== 8. Django default.NAME + 抽样读图 =========="
 docker compose "${COMPOSE_ARGS[@]}" exec -T backend python - <<'PY' 2>/dev/null || echo "无法检查"
 import os
 import django
@@ -68,23 +70,23 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 django.setup()
 from django.db import connections
 from images.external_db_service import ensure_system_database_names, expected_system_db_name
+from config.readiness import check_image_probe
 print("env DB_NAME=", os.getenv("DB_NAME"))
 print("expected=", expected_system_db_name("default"))
-print("before=", connections.databases["default"].get("NAME"))
+print("live NAME=", connections.databases["default"].get("NAME"))
 print("repaired=", ensure_system_database_names())
-print("after=", connections.databases["default"].get("NAME"))
-from images.models import ImageInfo
-print("image_info live rows=", ImageInfo.objects.filter(is_delete=0).count())
+print("image_probe=", check_image_probe())
 PY
 
 echo ""
 echo "========== 结论 =========="
 if [ "$DB_HOST" = "db" ]; then
   echo "❌ backend 连的是 compose 内置 db（多为空库）→ 表数据会「已加载 0」"
-  echo "   修复: .env 设 DB_HOST=host.docker.internal，然后 ./start-app.sh"
+  echo "   修复: .env 设 DB_HOST=host.docker.internal，然后 bash start-app.sh"
 elif [ "$DB_HOST" = "host.docker.internal" ]; then
   echo "✓ backend 指向宿主机 MySQL"
 else
   echo "? DB_HOST=$DB_HOST"
 fi
-echo "若图片全挂：必须 ./start-app.sh（含 --build）重建 backend，旧容器不会自动吃到新代码。"
+echo "看 image_probe: path_ok / storage_exists / detail"
+echo "若刚 pull：必须 bash start-app.sh 重建；仅 restart 不会更新代码。"
