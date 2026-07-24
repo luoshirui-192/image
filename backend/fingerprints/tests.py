@@ -887,3 +887,25 @@ class BizEvalMetricsTestCase(TestCase):
         self.assertIn("eer", data["accuracy"])
         self.assertEqual(data["counts"]["genuine"], 40)
         self.assertEqual(data["counts"]["impostor"], 40)
+
+    def test_eval_meta_lists_genuine_only_column(self):
+        """Picker shows columns with data even if Impostor=0 (metrics_ready=false)."""
+        self._ensure_match_eval_table()
+        with connection.cursor() as cursor:
+            rows = [(i + 1, 0.7 + i * 0.01, 1, "ONLY_G", 0.8) for i in range(10)]
+            cursor.executemany(
+                "INSERT INTO t_match_result_image "
+                "(id, score, sameflag, data_set_code, NeuNTms) VALUES (%s,%s,%s,%s,%s)",
+                rows,
+            )
+
+        meta = self.client.get(
+            "/api/fingerprints/biz/eval/meta/",
+            {"db_alias": "default", "database": "", "dataset_code": "ONLY_G"},
+        )
+        self.assertEqual(meta.status_code, 200, meta.data)
+        cols = {c["column"]: c for c in meta.data["data"]["score_columns"]}
+        self.assertIn("score", cols)
+        self.assertFalse(cols["score"]["metrics_ready"])
+        self.assertEqual(cols["score"]["genuine_count"], 10)
+        self.assertEqual(cols["score"]["impostor_count"], 0)

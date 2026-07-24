@@ -33,7 +33,10 @@ SCORE_COLUMN_CANDIDATES: tuple[tuple[str, str], ...] = (
 )
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MIN_PAIR_COUNT = 2  # at least some genuine + impostor rows to offer a column
+_MIN_PAIR_COUNT = 2  # both sides needed to *compute* EER/FMR
+# Offer a score column in the picker when it has any usable numeric rows.
+_MIN_LIST_COUNT = 1
+_NUMERIC_RE_MYSQL = r"^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$"
 
 
 class BizEvalError(BizBrowseError):
@@ -87,20 +90,39 @@ def _table_columns(cursor) -> set[str]:
     return {str(r[1]) for r in cursor.fetchall()}
 
 
+def _resolve_column(existing: set[str], wanted: str) -> str | None:
+    """Match candidate name case-insensitively to actual table column."""
+    if wanted in existing:
+        return wanted
+    lower_map = {c.lower(): c for c in existing}
+    return lower_map.get(wanted.lower())
+
+
 def _count_usable(cursor, column: str, *, dataset_code: str | None = None) -> dict[str, int]:
     col = _quote_ident(column)
-    where = [f"{col} IS NOT NULL", "`sameflag` IN (0, 1)"]
+    vendor = _db_vendor(cursor)
     params: list[Any] = []
+    if vendor == "mysql":
+        # sameflag may be int or char '0'/'1'; scores may be varchar.
+        where = [
+            f"{col} IS NOT NULL",
+            f"TRIM(CAST({col} AS CHAR)) <> ''",
+            "CAST(`sameflag` AS SIGNED) IN (0, 1)",
+            f"TRIM(CAST({col} AS CHAR)) REGEXP '{_NUMERIC_RE_MYSQL}'",
+        ]
+        flag_g = "CAST(`sameflag` AS SIGNED)=1"
+        flag_i = "CAST(`sameflag` AS SIGNED)=0"
+    else:
+        where = [f"{col} IS NOT NULL", "`sameflag` IN (0, 1)"]
+        flag_g = "`sameflag`=1"
+        flag_i = "`sameflag`=0"
     if dataset_code:
         where.append("`data_set_code` = %s")
         params.append(dataset_code)
-    # Numeric-only rows (AlgVersion may be varchar)
-    if _db_vendor(cursor) == "mysql":
-        where.append(f"CAST({col} AS CHAR) REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'")
     sql = (
         f"SELECT "
-        f"SUM(CASE WHEN `sameflag`=1 THEN 1 ELSE 0 END), "
-        f"SUM(CASE WHEN `sameflag`=0 THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN {flag_g} THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN {flag_i} THEN 1 ELSE 0 END), "
         f"COUNT(*) "
         f"FROM `{MATCH_TABLE}` WHERE " + " AND ".join(where)
     )
@@ -113,7 +135,7 @@ def _count_usable(cursor, column: str, *, dataset_code: str | None = None) -> di
 
 
 def discover_score_columns(config: dict, *, dataset_code: str | None = None) -> list[dict]:
-    """Return score columns that have genuine+impostor numeric data."""
+    """Return score columns that have numeric data (list even if only G or only I)."""
     try:
         with _with_eval_cursor(config) as session_alias:
             conn = connections[session_alias]
@@ -121,23 +143,29 @@ def discover_score_columns(config: dict, *, dataset_code: str | None = None) -> 
                 existing = _table_columns(cursor)
                 items: list[dict] = []
                 for col, label in SCORE_COLUMN_CANDIDATES:
-                    if col not in existing:
+                    actual = _resolve_column(existing, col)
+                    if not actual:
                         continue
                     try:
-                        counts = _count_usable(cursor, col, dataset_code=dataset_code)
+                        counts = _count_usable(cursor, actual, dataset_code=dataset_code)
                     except Exception:
                         logger.warning("score column scan failed col=%s", col, exc_info=True)
                         continue
-                    if counts["genuine"] < _MIN_PAIR_COUNT or counts["impostor"] < _MIN_PAIR_COUNT:
+                    if counts["total"] < _MIN_LIST_COUNT:
                         continue
+                    metrics_ready = (
+                        counts["genuine"] >= _MIN_PAIR_COUNT
+                        and counts["impostor"] >= _MIN_PAIR_COUNT
+                    )
                     items.append(
                         {
-                            "column": col,
+                            "column": actual,
                             "label": label,
                             "genuine_count": counts["genuine"],
                             "impostor_count": counts["impostor"],
                             "total_count": counts["total"],
-                            "is_default": col == "score",
+                            "is_default": col.lower() == "score",
+                            "metrics_ready": metrics_ready,
                         }
                     )
                 return items
@@ -203,10 +231,11 @@ def _fetch_scores(
     col = _quote_ident(column)
     if _db_vendor(cursor) == "mysql":
         sql = (
-            f"SELECT CAST({col} AS DECIMAL(24,10)), `sameflag` "
+            f"SELECT CAST({col} AS DECIMAL(24,10)), CAST(`sameflag` AS SIGNED) "
             f"FROM `{MATCH_TABLE}` "
-            f"WHERE `data_set_code`=%s AND `sameflag` IN (0,1) AND {col} IS NOT NULL "
-            f"AND CAST({col} AS CHAR) REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'"
+            f"WHERE `data_set_code`=%s AND CAST(`sameflag` AS SIGNED) IN (0,1) "
+            f"AND {col} IS NOT NULL "
+            f"AND TRIM(CAST({col} AS CHAR)) REGEXP '{_NUMERIC_RE_MYSQL}'"
         )
     else:
         sql = (
@@ -224,9 +253,13 @@ def _fetch_scores(
             continue
         if not math.isfinite(value):
             continue
-        if int(flag) == 1:
+        try:
+            flag_i = int(flag)
+        except (TypeError, ValueError):
+            continue
+        if flag_i == 1:
             genuine.append(value)
-        else:
+        elif flag_i == 0:
             impostor.append(value)
     return genuine, impostor
 
@@ -421,8 +454,9 @@ def build_eval_report(config: dict, *, dataset_code: str, score_column: str) -> 
     score_column = (score_column or "score").strip()
     if not dataset_code:
         raise BizEvalError("请选择 data_set_code")
-    allowed = {c for c, _ in SCORE_COLUMN_CANDIDATES}
-    if score_column not in allowed:
+    allowed_lower = {c.lower(): c for c, _ in SCORE_COLUMN_CANDIDATES}
+    canonical = allowed_lower.get(score_column.lower())
+    if not canonical:
         raise BizEvalError(f"不支持的分数列: {score_column}")
     if len(dataset_code) > 255:
         raise BizEvalError("data_set_code 过长")
@@ -432,10 +466,13 @@ def build_eval_report(config: dict, *, dataset_code: str, score_column: str) -> 
             conn = connections[session_alias]
             with conn.cursor() as cursor:
                 existing = _table_columns(cursor)
-                if score_column not in existing:
+                actual = _resolve_column(existing, score_column) or _resolve_column(
+                    existing, canonical
+                )
+                if not actual:
                     raise BizEvalError(f"表中不存在列: {score_column}")
                 genuine, impostor = _fetch_scores(
-                    cursor, dataset_code=dataset_code, column=score_column
+                    cursor, dataset_code=dataset_code, column=actual
                 )
     except BizEvalError:
         raise
@@ -446,13 +483,14 @@ def build_eval_report(config: dict, *, dataset_code: str, score_column: str) -> 
         raise BizEvalError(f"读取比对分数失败: {exc}") from exc
 
     report = compute_report(genuine, impostor)
-    labels = dict(SCORE_COLUMN_CANDIDATES)
+    labels = {c.lower(): label for c, label in SCORE_COLUMN_CANDIDATES}
+    score_label = labels.get(actual.lower(), labels.get(canonical.lower(), actual))
     report["meta"] = {
         "dataset_code": dataset_code,
-        "score_column": score_column,
-        "score_label": labels.get(score_column, score_column),
+        "score_column": actual,
+        "score_label": score_label,
         "match_table": MATCH_TABLE,
-        "algorithm_title": f"{labels.get(score_column, score_column)} on {dataset_code}",
+        "algorithm_title": f"{score_label} on {dataset_code}",
     }
     return report
 

@@ -52,6 +52,15 @@ const selectedConnection = computed(
   () => connections.value.find((c) => connectionKeyOf(c) === connectionKey.value) || null,
 )
 
+const selectedScoreCol = computed(
+  () => scoreColumns.value.find((c) => c.column === filters.score_column) || null,
+)
+
+function scoreColumnLabel(c) {
+  const ready = c.metrics_ready ? '' : ' · 缺G或I'
+  return `${c.label}（G${c.genuine_count}/I${c.impostor_count}${ready}）`
+}
+
 const reportTitle = computed(() => {
   const m = report.value?.meta
   if (!m) return 'Result of algorithm —'
@@ -456,13 +465,13 @@ onBeforeUnmount(() => {
           v-model="filters.score_column"
           filterable
           placeholder="算法分数列"
-          style="width: 180px"
+          style="width: 220px"
           :loading="loadingMeta"
         >
           <el-option
             v-for="c in scoreColumns"
             :key="c.column"
-            :label="`${c.label}（G${c.genuine_count}/I${c.impostor_count}）`"
+            :label="scoreColumnLabel(c)"
             :value="c.column"
           />
         </el-select>
@@ -471,6 +480,17 @@ onBeforeUnmount(() => {
         </el-button>
       </div>
     </div>
+
+    <p v-if="!loadingMeta && scoreColumns.length === 0" class="hint-warn">
+      当前连接/数据集下未扫到有数值的分数列（score、NeuNTms、Bionems、BioIdms、HXms、AlgVersion）。
+    </p>
+    <p
+      v-else-if="selectedScoreCol && selectedScoreCol.metrics_ready === false"
+      class="hint-warn"
+    >
+      当前列 Genuine={{ selectedScoreCol.genuine_count }}、Impostor={{ selectedScoreCol.impostor_count }}；
+      完整 EER/FMR 需要两边都有样本（sameflag=0 与 1）。
+    </p>
 
     <el-empty
       v-if="!report && !loadingReport"
@@ -564,6 +584,15 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+.hint-warn {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: #b26a00;
+  background: #fff8e6;
+  border: 1px solid #f0d9a0;
+  padding: 8px 10px;
+  border-radius: 4px;
 }
 .report-h {
   margin: 0 0 12px;
