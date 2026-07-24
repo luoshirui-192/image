@@ -55,8 +55,27 @@ PY
 fi
 
 echo ""
-echo "========== 7. 健康检查 =========="
-curl -s -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1/api/health/ 2>/dev/null || echo "无法访问 /api/health/"
+echo "========== 7. 健康检查 + 默认库身份 =========="
+curl -s http://127.0.0.1/api/health/ 2>/dev/null | head -c 2000 || echo "无法访问 /api/health/"
+echo ""
+
+echo ""
+echo "========== 8. Django default.NAME（进程内）=========="
+docker compose "${COMPOSE_ARGS[@]}" exec -T backend python - <<'PY' 2>/dev/null || echo "无法检查"
+import os
+import django
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+django.setup()
+from django.db import connections
+from images.external_db_service import ensure_system_database_names, expected_system_db_name
+print("env DB_NAME=", os.getenv("DB_NAME"))
+print("expected=", expected_system_db_name("default"))
+print("before=", connections.databases["default"].get("NAME"))
+print("repaired=", ensure_system_database_names())
+print("after=", connections.databases["default"].get("NAME"))
+from images.models import ImageInfo
+print("image_info live rows=", ImageInfo.objects.filter(is_delete=0).count())
+PY
 
 echo ""
 echo "========== 结论 =========="
@@ -68,3 +87,4 @@ elif [ "$DB_HOST" = "host.docker.internal" ]; then
 else
   echo "? DB_HOST=$DB_HOST"
 fi
+echo "若图片全挂：必须 ./start-app.sh（含 --build）重建 backend，旧容器不会自动吃到新代码。"

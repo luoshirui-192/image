@@ -4,7 +4,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
 import re
+import sys
 import threading
 import uuid
 from contextlib import contextmanager
@@ -26,6 +28,63 @@ PORT_MIN = 1
 PORT_MAX = 65535
 CONNECT_TIMEOUT = 10
 _SESSION_ALIAS_LOCK = threading.Lock()
+# Env-derived expected NAME for system aliases (survives in-process corruption).
+_SYSTEM_DB_EXPECTED: dict[str, str] = {}
+
+
+def _running_tests() -> bool:
+    return "test" in sys.argv or getattr(settings, "DB_ENGINE", "mysql") == "sqlite"
+
+
+def expected_system_db_name(alias: str) -> str | None:
+    """Return the configured NAME for default/legacy from env (not live connections)."""
+    value = (alias or "").strip()
+    if value == "default":
+        if _running_tests():
+            return None
+        return os.getenv("DB_NAME") or os.getenv("MYSQL_DATABASE") or "image_db"
+    if value == "legacy":
+        return os.getenv("LEGACY_DB_NAME") or None
+    return None
+
+
+def ensure_system_database_names() -> list[str]:
+    """
+    Repair process-local corruption of default/legacy DATABASE NAME.
+
+    Older SQL/catalog code could leave default pointing at a catalog schema;
+    image serve and migration stats then fail until the worker restarts.
+    """
+    if _running_tests():
+        return []
+
+    repaired: list[str] = []
+    expectations = {
+        "default": os.getenv("DB_NAME") or os.getenv("MYSQL_DATABASE") or "",
+        "legacy": os.getenv("LEGACY_DB_NAME") or "",
+    }
+    for alias, expected in expectations.items():
+        expected = (expected or "").strip()
+        if not expected or alias not in connections.databases:
+            continue
+        _SYSTEM_DB_EXPECTED.setdefault(alias, expected)
+        cfg = connections.databases[alias]
+        current = str(cfg.get("NAME") or "")
+        if current == expected:
+            continue
+        logger.error(
+            "Repairing poisoned system DB alias %s NAME %r -> %r",
+            alias,
+            current,
+            expected,
+        )
+        cfg["NAME"] = expected
+        try:
+            connections[alias].close()
+        except Exception:
+            logger.warning("close after DB NAME repair failed alias=%s", alias, exc_info=True)
+        repaired.append(alias)
+    return repaired
 
 
 def _running_in_docker() -> bool:
@@ -319,6 +378,7 @@ def db_alias_session(alias: str, *, database: str | None = None):
     Never mutates process-global default/legacy NAME. External connections and
     database switches use ephemeral session_* aliases only.
     """
+    ensure_system_database_names()
     value = validate_db_alias_reference(alias)
     db_name = (database or "").strip() or None
     settings_dict = _session_settings(value, database=db_name)

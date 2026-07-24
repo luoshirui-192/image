@@ -17,10 +17,32 @@ def check_database() -> tuple[bool, str]:
     if settings.DB_ENGINE == "sqlite":
         return False, "生产环境应使用 DB_ENGINE=mysql"
     try:
+        from images.external_db_service import ensure_system_database_names, expected_system_db_name
+
+        repaired = ensure_system_database_names()
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
             cursor.fetchone()
-        return True, "ok"
+            current_db = ""
+            if connection.vendor == "mysql":
+                cursor.execute("SELECT DATABASE()")
+                row = cursor.fetchone()
+                current_db = str(row[0] or "") if row else ""
+                expected = expected_system_db_name("default") or ""
+                if expected and current_db and current_db != expected:
+                    return False, f"当前库={current_db} 期望={expected}"
+                cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_schema = DATABASE() AND table_name = 'image_info'"
+                )
+                if int(cursor.fetchone()[0] or 0) < 1:
+                    return False, f"当前库 {current_db or '?'} 缺少 image_info"
+        detail = "ok"
+        if current_db:
+            detail = f"ok ({current_db})"
+        if repaired:
+            detail = f"{detail}; repaired={','.join(repaired)}"
+        return True, detail
     except Exception as exc:
         return False, str(exc)
 

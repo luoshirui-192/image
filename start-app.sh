@@ -69,7 +69,7 @@ docker compose "${COMPOSE_ARGS[@]}" up -d --build
 
 echo ""
 echo "=========================================="
-echo " 机器 A 已启动"
+echo " 机器 A 已启动（已 --build，代码变更必须重建镜像）"
 PUBLIC_URL="$(grep '^PUBLIC_URL=' .env | cut -d= -f2- | tr -d '\r')"
 echo " 浏览器: ${PUBLIC_URL:-http://localhost}"
 if [ "$DB_HOST_VAL" != "db" ]; then

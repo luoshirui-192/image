@@ -33,6 +33,9 @@ class ImageResolveError(Exception):
 
 
 def lookup_image_record(*, path: str | None = None, image_id: int | None = None) -> ImageInfo | None:
+    from images.external_db_service import ensure_system_database_names
+
+    ensure_system_database_names()
     if image_id is not None:
         try:
             return ImageInfo.objects.get(pk=image_id, is_delete=0)

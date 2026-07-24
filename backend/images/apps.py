@@ -8,8 +8,10 @@ class ImagesConfig(AppConfig):
 
     def ready(self) -> None:
         from images.category_service import ensure_default_category
+        from images.external_db_service import ensure_system_database_names
         from images.schema_ensure import ensure_file_hash_column, ensure_migration_tables
 
+        ensure_system_database_names()
         ensure_file_hash_column()
         ensure_migration_tables()
         try:

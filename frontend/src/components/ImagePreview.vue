@@ -84,9 +84,10 @@ async function loadPreview() {
     if (signal.aborted) return
     objectUrl = URL.createObjectURL(blob)
     src.value = objectUrl
-  } catch {
+  } catch (err) {
     if (signal.aborted) return
     failed.value = true
+    console.warn('[ImagePreview]', err?.message || err)
   } finally {
     if (!signal.aborted) {
       loading.value = false
