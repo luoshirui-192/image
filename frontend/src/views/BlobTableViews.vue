@@ -1580,21 +1580,27 @@ function restoreBrowseUiState() {
   }
 }
 
+let viewsLoadSeq = 0
+
 async function loadViews() {
+  const seq = ++viewsLoadSeq
   loadingViews.value = true
   try {
     const res = await callWithRetry(() => listBlobTableViewsApi())
+    if (seq !== viewsLoadSeq) return
     views.value = res.data || []
     if (activeViewId.value && !views.value.some((v) => v.id === activeViewId.value)) {
       activeViewId.value = null
     }
     await loadMigrationSources()
+    if (seq !== viewsLoadSeq) return
     await loadMapStats()
   } catch (err) {
-    views.value = []
+    if (seq !== viewsLoadSeq) return
+    // Keep previous views so a failed refresh cannot blank the whole browse page.
     ElMessage.error(err.message || '加载配置失败')
   } finally {
-    loadingViews.value = false
+    if (seq === viewsLoadSeq) loadingViews.value = false
   }
 }
 
@@ -1689,8 +1695,7 @@ async function loadRows({ append = false } = {}) {
     void loadRowTotal(seq)
   } catch (err) {
     if (seq !== rowsLoadSeq) return
-    columns.value = []
-    tableRows.value = []
+    // Keep last good rows/columns on transient refresh failures.
     ElMessage.error(err.message || '加载数据失败')
   } finally {
     if (seq === rowsLoadSeq) {

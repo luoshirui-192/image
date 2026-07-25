@@ -85,6 +85,11 @@ function fmtEer(acc) {
   return fmtPct(acc.eer)
 }
 
+let hydrating = false
+let suppressDatasetWatch = false
+let metaLoadSeq = 0
+let reportLoadSeq = 0
+
 async function loadConnections() {
   try {
     const res = await listBlobCatalogConnectionsApi()
@@ -92,7 +97,7 @@ async function loadConnections() {
     const fromQuery = String(route.query.connection || '')
     if (fromQuery && connections.value.some((c) => connectionKeyOf(c) === fromQuery)) {
       connectionKey.value = fromQuery
-    } else {
+    } else if (!connectionKey.value) {
       const preferred = connections.value.find((c) =>
         String(c.label || c.alias || '').toLowerCase().includes('ara'),
       )
@@ -107,17 +112,24 @@ async function loadMeta() {
   const conn = selectedConnection.value
   const params = connectionQueryParams(conn)
   if (!params) return
+  const seq = ++metaLoadSeq
   loadingMeta.value = true
   try {
     const q = { ...params }
     if (filters.dataset_code) q.dataset_code = filters.dataset_code
     const res = await fetchFingerprintBizEvalMetaApi(q)
+    if (seq !== metaLoadSeq) return
     const data = res.data || {}
     datasets.value = data.datasets || []
     scoreColumns.value = data.score_columns || []
     if (!filters.dataset_code && datasets.value.length) {
       const prefer = datasets.value.find((d) => d === 'PK_5W') || datasets.value[0]
-      filters.dataset_code = prefer
+      suppressDatasetWatch = true
+      try {
+        filters.dataset_code = prefer
+      } finally {
+        suppressDatasetWatch = false
+      }
     }
     const cols = scoreColumns.value
     if (cols.length) {
@@ -128,41 +140,42 @@ async function loadMeta() {
       }
     }
   } catch (err) {
-    datasets.value = []
-    scoreColumns.value = []
+    if (seq !== metaLoadSeq) return
     ElMessage.error(err.message || '加载评测元数据失败')
   } finally {
-    loadingMeta.value = false
+    if (seq === metaLoadSeq) loadingMeta.value = false
   }
 }
 
-async function loadReport() {
+async function loadReport({ quiet = false } = {}) {
   const conn = selectedConnection.value
   const params = connectionQueryParams(conn)
   if (!params) return
   if (!filters.dataset_code) {
-    ElMessage.warning('请选择 data_set_code')
+    if (!quiet) ElMessage.warning('请选择 data_set_code')
     return
   }
   if (!filters.score_column) {
-    ElMessage.warning('请选择算法分数列')
+    if (!quiet) ElMessage.warning('请选择算法分数列')
     return
   }
+  const seq = ++reportLoadSeq
   loadingReport.value = true
-  report.value = null
   try {
     const res = await fetchFingerprintBizEvalReportApi({
       ...params,
       dataset_code: filters.dataset_code,
       score_column: filters.score_column,
     })
+    if (seq !== reportLoadSeq) return
     report.value = res.data || null
     await nextTick()
     drawCharts()
   } catch (err) {
+    if (seq !== reportLoadSeq) return
     ElMessage.error(err.message || '计算评测报告失败')
   } finally {
-    loadingReport.value = false
+    if (seq === reportLoadSeq) loadingReport.value = false
   }
 }
 
@@ -506,7 +519,7 @@ function onResize() {
 }
 
 watch(connectionKey, async () => {
-  filters.dataset_code = String(route.query.dataset_code || '')
+  if (hydrating) return
   await loadMeta()
   syncQuery()
 })
@@ -514,17 +527,28 @@ watch(connectionKey, async () => {
 watch(
   () => filters.dataset_code,
   async () => {
+    if (hydrating || suppressDatasetWatch) return
     await loadMeta()
   },
 )
 
 onMounted(async () => {
-  filters.dataset_code = String(route.query.dataset_code || '')
-  filters.score_column = String(route.query.score_column || 'score')
-  await loadConnections()
-  await loadMeta()
-  if (filters.dataset_code && filters.score_column) {
-    await loadReport()
+  hydrating = true
+  try {
+    filters.dataset_code = String(route.query.dataset_code || '')
+    filters.score_column = String(route.query.score_column || 'score')
+    await loadConnections()
+    await loadMeta()
+    // If dataset was auto-picked inside loadMeta, rescan columns for that dataset once.
+    if (filters.dataset_code) {
+      await loadMeta()
+    }
+    if (filters.dataset_code && filters.score_column) {
+      await loadReport({ quiet: true })
+    }
+    syncQuery()
+  } finally {
+    hydrating = false
   }
   window.addEventListener('resize', onResize)
 })

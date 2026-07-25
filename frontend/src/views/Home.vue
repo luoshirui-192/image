@@ -37,7 +37,7 @@ async function loadHealth() {
     const res = await healthApi()
     health.value = res.data
   } catch {
-    health.value = null
+    // Keep last successful health payload so tab switches don't flash empty.
   } finally {
     loading.value = false
   }

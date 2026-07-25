@@ -95,6 +95,8 @@ function resetWritebackForm() {
   wbConnectionKey.value = ''
 }
 
+let suppressConnWatch = false
+
 async function ensureConnections({ force = false } = {}) {
   if (wbConnections.value.length && !force) return
   wbLoading.value = true
@@ -109,8 +111,14 @@ async function ensureConnections({ force = false } = {}) {
     const fallback = preferred || wbConnections.value[0]
     if (fallback) {
       const key = connectionKey(fallback)
-      if (!browseConnectionKey.value) browseConnectionKey.value = key
-      if (!wbConnectionKey.value) wbConnectionKey.value = key
+      // Avoid watch(browseConnectionKey) double-fetch while bootstrapping keys.
+      suppressConnWatch = true
+      try {
+        if (!browseConnectionKey.value) browseConnectionKey.value = key
+        if (!wbConnectionKey.value) wbConnectionKey.value = key
+      } finally {
+        suppressConnWatch = false
+      }
     }
   } catch (err) {
     ElMessage.error(err.message || '加载数据库连接失败')
@@ -270,11 +278,7 @@ function setCanvasRef(idx, el) {
 async function loadMeta() {
   const conn = selectedBrowseConnection.value
   const params = connectionQueryParams(conn)
-  if (!params) {
-    meta.dataset_codes = []
-    meta.layer_types = []
-    return
-  }
+  if (!params) return
   try {
     const res = await fetchFingerprintBizMetaApi(params)
     meta.dataset_codes = res.data.dataset_codes || []
@@ -284,14 +288,13 @@ async function loadMeta() {
   }
 }
 
+let samplesLoadSeq = 0
+
 async function loadSamples() {
   const conn = selectedBrowseConnection.value
   const params = connectionQueryParams(conn)
-  if (!params) {
-    rows.value = []
-    total.value = 0
-    return
-  }
+  if (!params) return
+  const seq = ++samplesLoadSeq
   loading.value = true
   try {
     const q = {
@@ -303,6 +306,7 @@ async function loadSamples() {
     if (filters.dataset_code) q.dataset_code = filters.dataset_code
     if (isPairMode.value) {
       const res = await fetchFingerprintBizPairsApi(q)
+      if (seq !== samplesLoadSeq) return
       rows.value = res.data.items || []
       total.value = res.data.total || 0
       if (selectedMatchId.value != null && !rows.value.some((r) => r.id === selectedMatchId.value)) {
@@ -311,6 +315,7 @@ async function loadSamples() {
       }
     } else {
       const res = await fetchFingerprintBizSamplesApi(q)
+      if (seq !== samplesLoadSeq) return
       rows.value = res.data.items || []
       total.value = res.data.total || 0
       if (selectedCapId.value && !rows.value.some((r) => r.cap_image_id === selectedCapId.value)) {
@@ -319,11 +324,11 @@ async function loadSamples() {
       }
     }
   } catch (err) {
+    if (seq !== samplesLoadSeq) return
+    // Keep previous list on transient errors (visibility refresh races).
     ElMessage.error(err.message || (isPairMode.value ? '加载配对列表失败' : '加载样本列表失败'))
-    rows.value = []
-    total.value = 0
   } finally {
-    loading.value = false
+    if (seq === samplesLoadSeq) loading.value = false
   }
 }
 
@@ -616,6 +621,7 @@ watch([panelTypes, showLabels, zoom], async () => {
 })
 
 watch(browseConnectionKey, async () => {
+  if (suppressConnWatch) return
   clearView()
   selectedMatchId.value = null
   selectedCapId.value = null
@@ -872,7 +878,9 @@ usePageDataRefresh(
       fpBootstrapped = true
       return
     }
-    await ensureConnections({ force: true })
+    // Reuse cached connections unless empty; force-refreshing every focus races loadSamples.
+    await ensureConnections({ force: !wbConnections.value.length })
+    if (!browseConnectionKey.value) return
     await loadMeta()
     await loadSamples()
     if (selectedMatchId.value || selectedCapId.value) {

@@ -84,7 +84,6 @@ async function loadSources({ withStats = true } = {}) {
       runOptions.sourceId = sources.value[0].id
     }
   } catch (err) {
-    sources.value = []
     ElMessage.error(err.message || '加载迁移配置失败')
   } finally {
     loadingSources.value = false
@@ -125,7 +124,7 @@ async function loadJobHistoryList() {
     const res = await listBlobMigrationJobsApi()
     jobHistory.value = res.data || []
   } catch {
-    jobHistory.value = []
+    // Keep previous history on transient errors (tab focus / overlapping refresh).
   }
 }
 
