@@ -574,7 +574,7 @@ class BlobTableViewTestCase(TestCase):
             blob_column="",
             blob_columns=[],
         )
-        payload = fetch_view_rows(plain_view.id, offset=0, limit=10)
+        payload = fetch_view_rows(plain_view.id, offset=0, limit=10, include_total=True)
         self.assertEqual(payload["total"], 1)
         self.assertEqual(payload["rows"][0]["code"], "A001")
         self.assertEqual(payload["rows"][0]["title"], "hello")
