@@ -90,9 +90,12 @@ def map_queryset_for_uid(
     lookup_tables: list[str] | None = None,
     source_ids: list[str] | None = None,
     columns: list[str] | None = None,
+    require_live_image: bool = True,
 ) -> QuerySet[ImageSourceMap]:
     uid = normalize_source_uid(source_uid)
-    qs = ImageSourceMap.objects.filter(image_info_id__in=_live_image_subquery())
+    qs = ImageSourceMap.objects.all()
+    if require_live_image:
+        qs = qs.filter(image_info_id__in=_live_image_subquery())
     if is_valid_source_uid(uid):
         # Prefer uid-scoped maps, but also keep legacy rows for the same lookup
         # tables. Otherwise a view that inherited a source_uid can miss older maps

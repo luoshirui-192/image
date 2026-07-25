@@ -7,6 +7,12 @@ from typing import Any
 from django.db import connections
 
 from images.blob_migration_service import BLOB_TYPES_MYSQL, BlobMigrationError, validate_identifier
+from images.blob_path_columns import (
+    column_name_suggests_path,
+    detect_path_columns_by_sample,
+    is_path_value_type,
+    merge_image_columns,
+)
 from images.blob_schema_helpers import OBJECT_TYPE_TABLE, OBJECT_TYPE_VIEW
 from images.external_db_service import (
     ExternalDbError,
@@ -154,12 +160,46 @@ def list_database_objects(
             )
             blob_rows = cursor.fetchall()
 
+            # Path-column candidates (string types + name hint) for tree badges; detail samples values.
+            cursor.execute(
+                """
+                SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = %s
+                ORDER BY TABLE_NAME, ORDINAL_POSITION
+                """,
+                [db_name],
+            )
+            all_col_rows = cursor.fetchall()
+
     blob_by_table: dict[str, list[dict[str, Any]]] = {}
     for table_name, column_name, data_type in blob_rows:
         blob_by_table.setdefault(table_name, []).append(
             {
                 "column": column_name,
                 "data_type": (data_type or "").lower(),
+                "role": "blob",
+            }
+        )
+
+    path_hint_by_table: dict[str, list[dict[str, Any]]] = {}
+    blob_names_by_table = {
+        table: {item["column"] for item in cols} for table, cols in blob_by_table.items()
+    }
+    for table_name, column_name, data_type in all_col_rows:
+        dtype = (data_type or "").lower()
+        if not is_path_value_type(dtype):
+            continue
+        if column_name in blob_names_by_table.get(table_name, set()):
+            continue
+        if not column_name_suggests_path(column_name):
+            continue
+        path_hint_by_table.setdefault(table_name, []).append(
+            {
+                "column": column_name,
+                "data_type": dtype,
+                "role": "path",
+                "detected_by": "name_hint",
             }
         )
 
@@ -168,11 +208,15 @@ def list_database_objects(
         obj_type = OBJECT_TYPE_VIEW if table_type == "VIEW" else OBJECT_TYPE_TABLE
         if type_filter and obj_type != type_filter:
             continue
+        blob_cols = blob_by_table.get(table_name, [])
+        path_cols = path_hint_by_table.get(table_name, [])
         objects.append(
             {
                 "name": table_name,
                 "object_type": obj_type,
-                "blob_columns": blob_by_table.get(table_name, []),
+                "blob_columns": blob_cols,
+                "path_columns": path_cols,
+                "image_columns": merge_image_columns(blob_cols, path_cols),
             }
         )
 
@@ -227,25 +271,31 @@ def get_database_object_detail(
             )
             column_rows = cursor.fetchall()
 
-    table_type = table_row[0]
-    obj_type = OBJECT_TYPE_VIEW if table_type == "VIEW" else OBJECT_TYPE_TABLE
-    columns: list[dict[str, Any]] = []
-    blob_columns: list[dict[str, Any]] = []
-    for col_name, data_type, column_type, is_nullable, column_key, extra in column_rows:
-        normalized_type = (data_type or "").lower()
-        is_blob = normalized_type in BLOB_TYPES_MYSQL
-        item = {
-            "name": col_name,
-            "data_type": normalized_type,
-            "column_type": column_type,
-            "is_nullable": is_nullable == "YES",
-            "column_key": column_key or "",
-            "extra": extra or "",
-            "is_blob": is_blob,
-        }
-        columns.append(item)
-        if is_blob:
-            blob_columns.append({"column": col_name, "data_type": normalized_type})
+        table_type = table_row[0]
+        obj_type = OBJECT_TYPE_VIEW if table_type == "VIEW" else OBJECT_TYPE_TABLE
+        columns: list[dict[str, Any]] = []
+        blob_columns: list[dict[str, Any]] = []
+        for col_name, data_type, column_type, is_nullable, column_key, extra in column_rows:
+            normalized_type = (data_type or "").lower()
+            is_blob = normalized_type in BLOB_TYPES_MYSQL
+            item = {
+                "name": col_name,
+                "data_type": normalized_type,
+                "column_type": column_type,
+                "is_nullable": is_nullable == "YES",
+                "column_key": column_key or "",
+                "extra": extra or "",
+                "is_blob": is_blob,
+            }
+            columns.append(item)
+            if is_blob:
+                blob_columns.append(
+                    {"column": col_name, "data_type": normalized_type, "role": "blob"}
+                )
+
+        path_columns = detect_path_columns_by_sample(
+            conn, table=table_name, columns=columns
+        )
 
     return {
         "connection_id": ext_id,
@@ -257,4 +307,6 @@ def get_database_object_detail(
         "object_type": obj_type,
         "columns": columns,
         "blob_columns": blob_columns,
+        "path_columns": path_columns,
+        "image_columns": merge_image_columns(blob_columns, path_columns),
     }

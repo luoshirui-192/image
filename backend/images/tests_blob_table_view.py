@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS blob_table_view (
     where_clause VARCHAR(500) NOT NULL DEFAULT '',
     remark VARCHAR(500) NOT NULL DEFAULT '',
     last_viewed_at DATETIME NULL,
+    source_uid VARCHAR(36) NOT NULL DEFAULT '',
     create_time DATETIME NULL,
     update_time DATETIME NULL
 );
@@ -89,6 +90,8 @@ CREATE TABLE IF NOT EXISTS image_source_map (
     last_checked_at DATETIME NULL,
     sync_status VARCHAR(20) NOT NULL DEFAULT 'unknown',
     last_sync_error VARCHAR(500) NOT NULL DEFAULT '',
+    source_uid VARCHAR(36) NOT NULL DEFAULT '',
+    migration_source_id INTEGER NULL,
     UNIQUE(source_table, source_id, source_column)
 );
 CREATE TABLE IF NOT EXISTS legacy_photos (
@@ -123,6 +126,36 @@ CREATE TABLE IF NOT EXISTS external_db_connection (
     create_time DATETIME NULL,
     update_time DATETIME NULL
 );
+CREATE TABLE IF NOT EXISTS blob_migration_source (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name VARCHAR(100) NOT NULL DEFAULT '',
+    source_table VARCHAR(64) NOT NULL,
+    source_pk_column VARCHAR(64) NOT NULL DEFAULT 'id',
+    blob_column VARCHAR(64) NOT NULL,
+    blob_columns TEXT NOT NULL DEFAULT '',
+    source_object_type VARCHAR(20) NOT NULL DEFAULT 'table',
+    path_lookup_table VARCHAR(64) NOT NULL DEFAULT '',
+    blob_column_path_mappings TEXT NOT NULL DEFAULT '',
+    name_column VARCHAR(64) NOT NULL DEFAULT '',
+    suffix_column VARCHAR(64) NOT NULL DEFAULT '',
+    category_id INTEGER NOT NULL DEFAULT 1,
+    upload_user VARCHAR(100) NOT NULL DEFAULT 'migration',
+    tags VARCHAR(500) NOT NULL DEFAULT '',
+    where_clause VARCHAR(500) NOT NULL DEFAULT '',
+    db_alias VARCHAR(32) NOT NULL DEFAULT 'default',
+    database_name VARCHAR(64) NOT NULL DEFAULT '',
+    enabled SMALLINT NOT NULL DEFAULT 1,
+    last_run_at DATETIME NULL,
+    auto_sync_enabled SMALLINT NOT NULL DEFAULT 1,
+    sync_interval_minutes INTEGER NOT NULL DEFAULT 60,
+    sync_batch_size INTEGER NOT NULL DEFAULT 200,
+    sync_last_run_at DATETIME NULL,
+    sync_last_checked_map_id INTEGER NOT NULL DEFAULT 0,
+    change_track_column VARCHAR(64) NOT NULL DEFAULT '',
+    change_track_mode VARCHAR(20) NOT NULL DEFAULT 'hash',
+    source_uid VARCHAR(36) NOT NULL DEFAULT '',
+    create_time DATETIME NULL
+);
 """
 
 
@@ -133,6 +166,9 @@ def make_png_bytes() -> bytes:
 
 
 class BlobTableViewTestCase(TestCase):
+    # Ephemeral db_alias_session aliases are created at runtime.
+    databases = "__all__"
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -283,7 +319,7 @@ class BlobTableViewTestCase(TestCase):
         self.assertTrue(presence[0]["photo"])
 
     def test_empty_blob_shows_no_data(self):
-        payload = fetch_view_rows(self.view.id, offset=0, limit=10)
+        payload = fetch_view_rows(self.view.id, offset=0, limit=10, skip_blob_presence=False)
         row3 = next(row for row in payload["rows"] if str(row["id"]) == "3")
         self.assertEqual(row3["photo"]["status"], "no_data")
         self.assertEqual(row3["photo"]["display"], "无数据")
@@ -347,7 +383,7 @@ class BlobTableViewTestCase(TestCase):
             create_time=timezone.now(),
             update_time=timezone.now(),
         )
-        payload = fetch_view_rows(join_view.id, offset=0, limit=10)
+        payload = fetch_view_rows(join_view.id, offset=0, limit=10, skip_blob_presence=False)
         by_id = {str(row["id"]): row for row in payload["rows"]}
         self.assertEqual(by_id["1"]["src_image_data"]["status"], "no_data")
         self.assertEqual(by_id["1"]["src_image_data"]["display"], "无数据")
@@ -524,24 +560,47 @@ class BlobTableViewTestCase(TestCase):
         )
         self.assertEqual(pk, "code")
 
-    def test_create_and_fetch_plain_table_view_without_blob(self):
-        with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM legacy_plain")
-            cursor.execute(
-                "INSERT INTO legacy_plain (code, title) VALUES ('A001', 'hello')"
+    def test_create_plain_table_view_without_image_columns_rejected(self):
+        from images.blob_table_view_service import BlobTableViewError
+
+        with self.assertRaises(BlobTableViewError):
+            create_table_view(
+                name="plain",
+                db_alias="default",
+                source_table="legacy_plain",
+                source_pk_column="code",
+                blob_column="",
+                blob_columns=[],
             )
-        plain_view = create_table_view(
-            name="plain",
+
+    def test_create_and_fetch_path_column_view(self):
+        """Path-export style varchar column can be configured and previewed."""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS legacy_path_photos (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    title VARCHAR(100) NOT NULL DEFAULT '',
+                    photo VARCHAR(500) NOT NULL DEFAULT ''
+                )
+                """
+            )
+            cursor.execute("DELETE FROM legacy_path_photos")
+            cursor.execute(
+                "INSERT INTO legacy_path_photos (id, title, photo) VALUES "
+                "(1, 'a', 'upload/20260725/1/550e8400-e29b-41d4-a716-446655440001.jpg')"
+            )
+        path_view = create_table_view(
+            name="path photos",
             db_alias="default",
-            source_table="legacy_plain",
-            source_pk_column="missing_pk",
-            blob_column="",
-            blob_columns=[],
+            source_table="legacy_path_photos",
+            source_pk_column="id",
+            blob_columns=["photo"],
         )
-        payload = fetch_view_rows(plain_view.id, offset=0, limit=10)
-        self.assertEqual(payload["total"], 1)
-        self.assertEqual(payload["rows"][0]["code"], "A001")
-        self.assertEqual(payload["rows"][0]["title"], "hello")
+        payload = fetch_view_rows(path_view.id, offset=0, limit=10)
+        cell = payload["rows"][0]["photo"]
+        self.assertEqual(cell["status"], "migrated")
+        self.assertTrue(str(cell["path"]).startswith("upload/"))
 
     def test_auto_provision_table_views_for_connection(self):
         now = timezone.now()
@@ -569,6 +628,8 @@ class BlobTableViewTestCase(TestCase):
                 {"name": "photo", "column_key": ""},
             ],
             "blob_columns": [{"column": "photo", "data_type": "blob"}],
+            "path_columns": [],
+            "image_columns": [{"column": "photo", "data_type": "blob", "role": "blob"}],
         }
         plain_detail = {
             "columns": [
@@ -576,9 +637,12 @@ class BlobTableViewTestCase(TestCase):
                 {"name": "title", "column_key": ""},
             ],
             "blob_columns": [],
+            "path_columns": [],
+            "image_columns": [],
         }
 
         def _fake_create(**kwargs):
+            cols = kwargs.get("blob_columns") or []
             return BlobTableView.objects.create(
                 name=kwargs.get("name") or "",
                 db_alias=kwargs["db_alias"],
@@ -589,7 +653,7 @@ class BlobTableViewTestCase(TestCase):
                 blob_column_path_mappings="",
                 source_pk_column=kwargs["source_pk_column"],
                 blob_column=kwargs.get("blob_column") or "",
-                blob_columns=kwargs.get("blob_columns") and '["photo"]' if kwargs.get("blob_columns") else "",
+                blob_columns='["photo"]' if cols else "",
                 display_columns="",
                 where_clause="",
                 remark=kwargs.get("remark") or "",
@@ -603,13 +667,12 @@ class BlobTableViewTestCase(TestCase):
         ), patch("images.blob_table_view_service.create_table_view", side_effect=_fake_create):
             result = auto_provision_table_views_for_connection(record)
 
-        self.assertEqual(result["created"], 2)
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["skipped"], 1)
         self.assertEqual(result["failed"], 0)
         views = BlobTableView.objects.filter(db_alias=f"external_{record.id}").order_by("source_table")
-        self.assertEqual(views.count(), 2)
-        plain = views.get(source_table="legacy_plain")
-        self.assertEqual(plain.source_pk_column, "code")
-        self.assertEqual(plain.blob_column, "")
+        self.assertEqual(views.count(), 1)
+        self.assertEqual(views[0].source_table, "legacy_photos")
 
     def test_api_blob_browse_alias_list(self):
         self.client.force_authenticate(user=self.admin)

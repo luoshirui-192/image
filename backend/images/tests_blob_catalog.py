@@ -125,6 +125,15 @@ class BlobCatalogObjectsListTest(SimpleTestCase):
             [
                 ("v_photos", "image_blob", "blob"),
             ],
+            [
+                ("users", "id", "int"),
+                ("users", "name", "varchar"),
+                ("v_photos", "id", "int"),
+                ("v_photos", "image_blob", "blob"),
+                ("v_photos", "image_path", "varchar"),
+                ("logs", "id", "int"),
+                ("logs", "msg", "varchar"),
+            ],
         ]
         mock_conn = MagicMock()
         mock_conn.vendor = "mysql"
@@ -152,5 +161,10 @@ class BlobCatalogObjectsListTest(SimpleTestCase):
         self.assertEqual(by_name["v_photos"]["object_type"], "view")
         self.assertEqual(
             by_name["v_photos"]["blob_columns"],
-            [{"column": "image_blob", "data_type": "blob"}],
+            [{"column": "image_blob", "data_type": "blob", "role": "blob"}],
         )
+        self.assertEqual(
+            by_name["v_photos"]["path_columns"],
+            [{"column": "image_path", "data_type": "varchar", "role": "path", "detected_by": "name_hint"}],
+        )
+        self.assertEqual(len(by_name["v_photos"]["image_columns"]), 2)

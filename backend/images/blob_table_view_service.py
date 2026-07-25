@@ -209,7 +209,7 @@ def _resolve_display_columns(view: BlobTableView, remote_cols: list[VirtualColum
 
     for blob_col in blob_cols:
         if blob_col not in col_map:
-            raise BlobTableViewError(f"源对象缺少 BLOB 列: {blob_col}")
+            raise BlobTableViewError(f"源对象缺少图片列: {blob_col}")
 
     requested = _parse_display_columns(view.display_columns)
     if requested:
@@ -659,7 +659,18 @@ def _build_path_cell(
 
 def _path_cell_from_stored_path(path_value: Any) -> dict:
     """Build a path cell from a varchar path column (path-export tables)."""
-    path = str(path_value or "").strip()
+    from images.blob_path_columns import looks_like_storage_path
+    from utils.path_builder import normalize_relative_path
+
+    if isinstance(path_value, memoryview):
+        path_value = path_value.tobytes()
+    if isinstance(path_value, (bytes, bytearray)):
+        try:
+            path = bytes(path_value).decode("utf-8").strip()
+        except UnicodeDecodeError:
+            path = ""
+    else:
+        path = str(path_value or "").strip()
     if not path:
         return {
             "display": "无数据",
@@ -667,25 +678,33 @@ def _path_cell_from_stored_path(path_value: Any) -> dict:
             "image_info_id": None,
             "status": PATH_STATUS_NO_DATA,
         }
+    path = normalize_relative_path(path)
     image = (
         ImageInfo.objects.filter(image_path=path, is_delete=0)
         .order_by("-id")
         .only("id", "image_path")
         .first()
     )
-    if image is None:
-        # Path string exists but image_info is gone / not found.
+    if image is not None:
+        return {
+            "display": path,
+            "path": path,
+            "image_info_id": image.id,
+            "status": PATH_STATUS_MIGRATED,
+        }
+    # Path is the global image identity — still previewable via storage even without image_info.
+    if looks_like_storage_path(path):
         return {
             "display": path,
             "path": path,
             "image_info_id": None,
-            "status": PATH_STATUS_DELETED,
+            "status": PATH_STATUS_MIGRATED,
         }
     return {
         "display": path,
         "path": path,
-        "image_info_id": image.id,
-        "status": PATH_STATUS_MIGRATED,
+        "image_info_id": None,
+        "status": PATH_STATUS_DELETED,
     }
 
 
@@ -704,13 +723,16 @@ def _stored_path_blob_columns(
 
 
 def _merge_path_cell_prefer_preview(map_cell: dict, stored_cell: dict) -> dict:
-    """Prefer map cell when it already has preview id; else use stored path cell."""
+    """Path-first: stored path string is the cross-DB image identity."""
+    if stored_cell.get("path"):
+        merged = dict(stored_cell)
+        if not merged.get("image_info_id") and map_cell.get("image_info_id"):
+            merged["image_info_id"] = map_cell["image_info_id"]
+            if merged.get("status") != PATH_STATUS_MIGRATED:
+                merged["status"] = PATH_STATUS_MIGRATED
+        return merged
     if map_cell.get("image_info_id"):
-        if not map_cell.get("path") and stored_cell.get("path"):
-            return {**map_cell, "path": stored_cell["path"], "display": stored_cell["path"]}
         return map_cell
-    if stored_cell.get("image_info_id") or stored_cell.get("path"):
-        return stored_cell
     return map_cell
 
 
@@ -732,6 +754,8 @@ def _load_path_map(
         lookup_tables=[lookup_table],
         source_ids=source_ids,
         columns=blob_columns,
+        # Browse must see soft-deleted images so UI can show "已删除".
+        require_live_image=False,
     )
     image_ids = [m.image_info_id for m in mappings]
     images = {
@@ -1109,9 +1133,9 @@ def build_ephemeral_table_view(
     validate_db_alias(db_alias)
     table = validate_identifier(source_table, label="源表名")
     pk = validate_identifier(source_pk_column or "id", label="主键列")
-    cols = [validate_identifier(c, label="BLOB 列") for c in blob_columns if (c or "").strip()]
+    cols = [validate_identifier(c, label="图片列") for c in blob_columns if (c or "").strip()]
     if not cols:
-        raise BlobTableViewError("至少需要一个 BLOB 列")
+        raise BlobTableViewError("至少需要一个图片列（BLOB 或路径列）")
 
     initial_db = (database_name or "").strip()
     with db_alias_session(db_alias, database=initial_db or None) as alias:
@@ -1178,6 +1202,13 @@ def create_table_view(
     where = validate_where_clause(where_clause)
     display_json = _serialize_display_columns(display_columns)
 
+    requested_cols = parse_blob_columns(
+        serialize_blob_columns(blob_columns) if blob_columns else None,
+        blob_column or None,
+    )
+    if not requested_cols:
+        raise BlobTableViewError("至少选择一个图片列（BLOB 或路径列）")
+
     initial_db = (database_name or "").strip()
     with db_alias_session(db_alias, database=initial_db or None) as alias:
         conn = connections[alias]
@@ -1194,6 +1225,9 @@ def create_table_view(
             )
         except BlobViewPathError as exc:
             raise BlobTableViewError(str(exc)) from exc
+
+        if not meta.get("blob_columns"):
+            raise BlobTableViewError("至少选择一个图片列（BLOB 或路径列）")
 
         remote_cols = _fetch_remote_columns(conn, table)
         temp = BlobTableView(
@@ -1270,11 +1304,14 @@ def update_table_view(view_id: int, **fields) -> BlobTableView:
     if any(k in fields for k in ("db_alias", "source_table", "source_pk_column", "blob_column")):
         raise BlobTableViewError("源表与连接配置创建后不可修改，请删除后重建")
 
-    validate_db_alias(view.db_alias)
-    with _view_db_session(view) as alias:
-        conn = connections[alias]
-        remote_cols = _fetch_remote_columns(conn, view.source_table)
-        _resolve_display_columns(view, remote_cols)
+    # Re-validate remote schema only when projection/filter may change.
+    needs_schema_check = any(k in fields for k in ("where_clause", "display_columns"))
+    if needs_schema_check:
+        validate_db_alias(view.db_alias)
+        with _view_db_session(view) as alias:
+            conn = connections[alias]
+            remote_cols = _fetch_remote_columns(conn, view.source_table)
+            _resolve_display_columns(view, remote_cols)
 
     view.update_time = timezone.now()
     view.save()
@@ -1329,11 +1366,15 @@ def auto_provision_table_views_for_connection(record) -> dict[str, int | list[st
             detail = get_database_object_detail(database, obj_name, db_alias=db_alias)
             columns = detail.get("columns") or []
             pk = infer_pk_column_from_detail(columns)
-            blob_cols = [
+            image_cols = [
                 str(item.get("column") or "").strip()
-                for item in (detail.get("blob_columns") or [])
+                for item in (detail.get("image_columns") or [])
                 if str(item.get("column") or "").strip()
             ]
+            if not image_cols:
+                # No BLOB and no path column — skip empty browse configs.
+                skipped += 1
+                continue
             create_table_view(
                 name=obj_name,
                 db_alias=db_alias,
@@ -1341,8 +1382,8 @@ def auto_provision_table_views_for_connection(record) -> dict[str, int | list[st
                 source_table=obj_name,
                 source_object_type=obj_type,
                 source_pk_column=pk,
-                blob_columns=blob_cols or None,
-                blob_column=blob_cols[0] if blob_cols else "",
+                blob_columns=image_cols,
+                blob_column=image_cols[0],
                 remark="连接建立时自动生成",
             )
             created += 1

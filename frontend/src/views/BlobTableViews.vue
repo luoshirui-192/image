@@ -287,7 +287,7 @@ const sqlSimulateContext = computed(() => {
       ...base,
       sourceTable: obj.label,
       sourcePkColumn: 'id',
-      blobColumns: (obj.blobColumns || []).map((c) => c.column),
+      blobColumns: catalogImageColumns(obj).map((c) => c.column),
       sourceObjectType: obj.objectType === 'view' ? 'view' : 'table',
     }
   }
@@ -533,7 +533,7 @@ function blobColumnsFromView(view) {
 
 function objectHasMigratableBlob(catalogData, view) {
   if (blobColumnsFromView(view).length) return true
-  return !!(catalogData?.blobColumns?.length)
+  return !!(catalogData?.imageColumns?.length || catalogData?.blobColumns?.length || catalogData?.pathColumns?.length)
 }
 
 function mapLookupTables(view, catalogData) {
@@ -689,6 +689,11 @@ async function loadCatalogTree(root, resolve) {
           database: data.database,
           objectType: obj.object_type,
           blobColumns: obj.blob_columns || [],
+          pathColumns: obj.path_columns || [],
+          imageColumns: obj.image_columns || [
+            ...(obj.blob_columns || []).map((c) => ({ ...c, role: c.role || 'blob' })),
+            ...(obj.path_columns || []).map((c) => ({ ...c, role: c.role || 'path' })),
+          ],
           leaf: true,
         })),
       )
@@ -1054,12 +1059,38 @@ function onConnectionsChanged() {
   void loadViews()
 }
 
+function catalogImageColumns(obj, detail = null) {
+  if (detail?.image_columns?.length) return detail.image_columns
+  if (obj?.imageColumns?.length) return obj.imageColumns
+  const blob = (detail?.blob_columns || obj?.blobColumns || []).map((c) => ({
+    column: c.column,
+    data_type: c.data_type,
+    role: c.role || 'blob',
+  }))
+  const path = (detail?.path_columns || obj?.pathColumns || []).map((c) => ({
+    column: c.column,
+    data_type: c.data_type,
+    role: c.role || 'path',
+  }))
+  const seen = new Set()
+  return [...blob, ...path].filter((c) => {
+    if (!c.column || seen.has(c.column)) return false
+    seen.add(c.column)
+    return true
+  })
+}
+
+const createViewImageOptions = computed(() => {
+  const obj = selectedCatalogObject.value
+  return catalogImageColumns(obj)
+})
+
 async function openCreateViewDialog() {
   if (!selectedCatalogObject.value) return
   const obj = selectedCatalogObject.value
   const conn = obj.connection || {}
   createViewForm.name = obj.label
-  createViewForm.blobColumns = (obj.blobColumns || []).map((item) => item.column)
+  createViewForm.blobColumns = catalogImageColumns(obj).map((item) => item.column)
   createViewForm.whereClause = ''
   createViewForm.sourcePkColumn = 'id'
   createViewForm.alsoMigrate = false
@@ -1077,9 +1108,14 @@ async function openCreateViewDialog() {
     const pkCol = detail.columns?.find((col) => col.column_key === 'PRI')?.name
       || detail.columns?.find((col) => col.name === 'id')?.name
     if (pkCol) createViewForm.sourcePkColumn = pkCol
-    if (!createViewForm.blobColumns.length && detail.blob_columns?.length) {
-      createViewForm.blobColumns = detail.blob_columns.map((item) => item.column)
+    const images = catalogImageColumns(obj, detail)
+    selectedCatalogObject.value = {
+      ...obj,
+      blobColumns: detail.blob_columns || obj.blobColumns || [],
+      pathColumns: detail.path_columns || obj.pathColumns || [],
+      imageColumns: images,
     }
+    createViewForm.blobColumns = images.map((item) => item.column)
   } catch {
     // keep defaults from tree node
   }
@@ -1089,7 +1125,7 @@ async function openCreateViewDialog() {
 async function submitCreateView() {
   if (!selectedCatalogObject.value) return
   if (!createViewForm.blobColumns.length) {
-    ElMessage.warning('请至少选择一个 BLOB 列')
+    ElMessage.warning('请至少选择一个图片列（BLOB 或路径列）')
     return
   }
   const obj = selectedCatalogObject.value
@@ -1371,22 +1407,25 @@ function rowPreviewCells(row) {
   return blobColumnNames()
     .map((col) => {
       const cell = pathCell(row, col)
+      if (!cell || cell.status !== 'migrated') return null
       const imageId = cell?.image_info_id
-      if (imageId == null || imageId === '' || cell?.status !== 'migrated') return null
+      const path = String(cell?.path || '').trim()
+      if ((imageId == null || imageId === '') && !path) return null
       return {
         column: col,
         cell: {
           ...cell,
-          image_info_id: Number(imageId),
+          image_info_id: imageId == null || imageId === '' ? null : Number(imageId),
+          path,
         },
-        title: cell.path || cell.display || col,
+        title: path || cell.display || col,
       }
     })
     .filter(Boolean)
 }
 
 function openPreview(pathCellValue, row) {
-  if (!pathCellValue?.image_info_id) return
+  if (!pathCellValue?.image_info_id && !pathCellValue?.path) return
   if (rightTab.value === 'sql') {
     selectSqlPreviewRow(row, { focusBrowse: true })
     return
@@ -2238,7 +2277,7 @@ onUnmounted(() => {
                       >
                         <div class="row-preview-label">{{ item.column }}</div>
                         <ImagePreview
-                          :key="`${item.cell.image_info_id}-${item.column}`"
+                          :key="`${item.cell.image_info_id || item.cell.path}-${item.column}`"
                           :image-id="item.cell.image_info_id"
                           :image-path="item.cell.path"
                           :size="112"
@@ -2251,7 +2290,7 @@ onUnmounted(() => {
                       </div>
                     </div>
                     <div v-else class="row-preview-empty">
-                      点击表格行切换选中；已迁移的图片会显示在下方（无图/未迁移行仅高亮表格行）
+                      点击表格行切换选中；已有路径/已迁移的图片会显示在下方（无图行仅高亮表格行）
                     </div>
                   </div>
                 </div>
@@ -2426,22 +2465,29 @@ onUnmounted(() => {
         <el-form-item label="主键列">
           <el-input v-model="createViewForm.sourcePkColumn" maxlength="64" />
         </el-form-item>
-        <el-form-item label="BLOB 列" required>
-          <el-select v-model="createViewForm.blobColumns" multiple collapse-tags style="width: 100%">
+        <el-form-item label="图片列" required>
+          <el-select
+            v-model="createViewForm.blobColumns"
+            multiple
+            collapse-tags
+            style="width: 100%"
+            placeholder="BLOB 列或 upload/… 路径列"
+          >
             <el-option
-              v-for="col in selectedCatalogObject?.blobColumns || []"
+              v-for="col in createViewImageOptions"
               :key="col.column"
-              :label="col.column"
+              :label="`${col.column}${col.role === 'path' ? '（路径）' : '（BLOB）'}`"
               :value="col.column"
             />
           </el-select>
+          <div class="field-hint">路径列可跨库预览同一张 MinIO 图；无图片列不可创建</div>
         </el-form-item>
         <el-form-item v-if="selectedCatalogObject?.objectType === 'view'" label="路径映射">
           <el-alert
             type="info"
             :closable="false"
             show-icon
-            title="JOIN 视图会根据建视图 SQL 自动推断每个 BLOB 列对应的基表与关联键"
+            title="JOIN 视图会根据建视图 SQL 自动推断每个图片列对应的基表与关联键"
           />
         </el-form-item>
         <el-form-item label="WHERE">
