@@ -1134,8 +1134,6 @@ def build_ephemeral_table_view(
     table = validate_identifier(source_table, label="源表名")
     pk = validate_identifier(source_pk_column or "id", label="主键列")
     cols = [validate_identifier(c, label="图片列") for c in blob_columns if (c or "").strip()]
-    if not cols:
-        raise BlobTableViewError("至少需要一个图片列（BLOB 或路径列）")
 
     initial_db = (database_name or "").strip()
     with db_alias_session(db_alias, database=initial_db or None) as alias:
@@ -1202,13 +1200,6 @@ def create_table_view(
     where = validate_where_clause(where_clause)
     display_json = _serialize_display_columns(display_columns)
 
-    requested_cols = parse_blob_columns(
-        serialize_blob_columns(blob_columns) if blob_columns else None,
-        blob_column or None,
-    )
-    if not requested_cols:
-        raise BlobTableViewError("至少选择一个图片列（BLOB 或路径列）")
-
     initial_db = (database_name or "").strip()
     with db_alias_session(db_alias, database=initial_db or None) as alias:
         conn = connections[alias]
@@ -1225,9 +1216,6 @@ def create_table_view(
             )
         except BlobViewPathError as exc:
             raise BlobTableViewError(str(exc)) from exc
-
-        if not meta.get("blob_columns"):
-            raise BlobTableViewError("至少选择一个图片列（BLOB 或路径列）")
 
         remote_cols = _fetch_remote_columns(conn, table)
         temp = BlobTableView(
@@ -1366,15 +1354,12 @@ def auto_provision_table_views_for_connection(record) -> dict[str, int | list[st
             detail = get_database_object_detail(database, obj_name, db_alias=db_alias)
             columns = detail.get("columns") or []
             pk = infer_pk_column_from_detail(columns)
+            # Prefer detected image columns (BLOB + path); still create config when none.
             image_cols = [
                 str(item.get("column") or "").strip()
                 for item in (detail.get("image_columns") or [])
                 if str(item.get("column") or "").strip()
             ]
-            if not image_cols:
-                # No BLOB and no path column — skip empty browse configs.
-                skipped += 1
-                continue
             create_table_view(
                 name=obj_name,
                 db_alias=db_alias,
@@ -1382,8 +1367,8 @@ def auto_provision_table_views_for_connection(record) -> dict[str, int | list[st
                 source_table=obj_name,
                 source_object_type=obj_type,
                 source_pk_column=pk,
-                blob_columns=image_cols,
-                blob_column=image_cols[0],
+                blob_columns=image_cols or None,
+                blob_column=image_cols[0] if image_cols else "",
                 remark="连接建立时自动生成",
             )
             created += 1

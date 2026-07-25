@@ -560,18 +560,24 @@ class BlobTableViewTestCase(TestCase):
         )
         self.assertEqual(pk, "code")
 
-    def test_create_plain_table_view_without_image_columns_rejected(self):
-        from images.blob_table_view_service import BlobTableViewError
-
-        with self.assertRaises(BlobTableViewError):
-            create_table_view(
-                name="plain",
-                db_alias="default",
-                source_table="legacy_plain",
-                source_pk_column="code",
-                blob_column="",
-                blob_columns=[],
+    def test_create_and_fetch_plain_table_view_without_blob(self):
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM legacy_plain")
+            cursor.execute(
+                "INSERT INTO legacy_plain (code, title) VALUES ('A001', 'hello')"
             )
+        plain_view = create_table_view(
+            name="plain",
+            db_alias="default",
+            source_table="legacy_plain",
+            source_pk_column="missing_pk",
+            blob_column="",
+            blob_columns=[],
+        )
+        payload = fetch_view_rows(plain_view.id, offset=0, limit=10)
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["rows"][0]["code"], "A001")
+        self.assertEqual(payload["rows"][0]["title"], "hello")
 
     def test_create_and_fetch_path_column_view(self):
         """Path-export style varchar column can be configured and previewed."""
@@ -667,12 +673,13 @@ class BlobTableViewTestCase(TestCase):
         ), patch("images.blob_table_view_service.create_table_view", side_effect=_fake_create):
             result = auto_provision_table_views_for_connection(record)
 
-        self.assertEqual(result["created"], 1)
-        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["created"], 2)
         self.assertEqual(result["failed"], 0)
         views = BlobTableView.objects.filter(db_alias=f"external_{record.id}").order_by("source_table")
-        self.assertEqual(views.count(), 1)
-        self.assertEqual(views[0].source_table, "legacy_photos")
+        self.assertEqual(views.count(), 2)
+        plain = views.get(source_table="legacy_plain")
+        self.assertEqual(plain.source_pk_column, "code")
+        self.assertEqual(plain.blob_column, "")
 
     def test_api_blob_browse_alias_list(self):
         self.client.force_authenticate(user=self.admin)

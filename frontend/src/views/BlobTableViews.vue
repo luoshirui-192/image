@@ -1124,10 +1124,6 @@ async function openCreateViewDialog() {
 
 async function submitCreateView() {
   if (!selectedCatalogObject.value) return
-  if (!createViewForm.blobColumns.length) {
-    ElMessage.warning('请至少选择一个图片列（BLOB 或路径列）')
-    return
-  }
   const obj = selectedCatalogObject.value
   const conn = obj.connection || {}
   const sharedPayload = {
@@ -2465,13 +2461,14 @@ onUnmounted(() => {
         <el-form-item label="主键列">
           <el-input v-model="createViewForm.sourcePkColumn" maxlength="64" />
         </el-form-item>
-        <el-form-item label="图片列" required>
+        <el-form-item label="图片列">
           <el-select
             v-model="createViewForm.blobColumns"
             multiple
             collapse-tags
+            clearable
             style="width: 100%"
-            placeholder="BLOB 列或 upload/… 路径列"
+            placeholder="可选：BLOB 列或 upload/… 路径列（无图列也可建配置）"
           >
             <el-option
               v-for="col in createViewImageOptions"
@@ -2480,7 +2477,7 @@ onUnmounted(() => {
               :value="col.column"
             />
           </el-select>
-          <div class="field-hint">路径列可跨库预览同一张 MinIO 图；无图片列不可创建</div>
+          <div class="field-hint">有路径/BLOB 列时勾选即可预览；纯业务表可不选，仍可创建配置</div>
         </el-form-item>
         <el-form-item v-if="selectedCatalogObject?.objectType === 'view'" label="路径映射">
           <el-alert

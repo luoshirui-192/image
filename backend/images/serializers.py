@@ -299,13 +299,8 @@ class BlobTableViewCreateSerializer(serializers.Serializer):
         blob_columns = attrs.get("blob_columns") or []
         if blob_column and not blob_columns:
             attrs["blob_column"] = blob_column
-            blob_columns = [blob_column]
         elif blob_columns and not blob_column:
             attrs["blob_column"] = blob_columns[0]
-        cleaned = [str(c).strip() for c in blob_columns if str(c).strip()]
-        if not cleaned:
-            raise serializers.ValidationError("至少选择一个图片列（BLOB 或路径列）")
-        attrs["blob_columns"] = cleaned
         return attrs
 
     def to_representation(self, instance):
