@@ -845,9 +845,16 @@ class BizEvalMetricsTestCase(TestCase):
         self.assertLess(acc["eer"], 5.0)
         self.assertEqual(report["counts"]["genuine"], 100)
         self.assertEqual(report["counts"]["impostor"], 100)
-        self.assertTrue(report["charts"]["score_distribution"]["bin_centers"])
+        dist = report["charts"]["score_distribution"]
+        self.assertTrue(dist["x"])
+        self.assertEqual(len(dist["x"]), len(dist["genuine_density"]))
+        self.assertEqual(dist["x_min"], 0.0)
+        self.assertEqual(dist["x_max"], 1.0)
         self.assertTrue(report["charts"]["fmr_fnmr"])
+        self.assertAlmostEqual(report["charts"]["fmr_fnmr"][0]["threshold"], 0.0)
+        self.assertAlmostEqual(report["charts"]["fmr_fnmr"][-1]["threshold"], 1.0)
         self.assertTrue(report["charts"]["det"])
+        self.assertIn("fmr_min", report["charts"]["det_axis"])
 
     def test_eval_api_report(self):
         self._ensure_match_eval_table()

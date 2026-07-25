@@ -181,7 +181,7 @@ function goBack() {
   router.push({ name: 'fingerprint-pairs' })
 }
 
-/* —— canvas charts —— */
+/* —— Hisign-style canvas charts —— */
 function clearCanvas(canvas) {
   if (!canvas) return
   const ctx = canvas.getContext('2d')
@@ -192,7 +192,7 @@ function sizeCanvas(canvas) {
   if (!canvas) return { ctx: null, w: 0, h: 0, dpr: 1 }
   const parent = canvas.parentElement
   const cssW = Math.max(280, parent?.clientWidth || 320)
-  const cssH = 220
+  const cssH = 240
   const dpr = window.devicePixelRatio || 1
   canvas.width = Math.round(cssW * dpr)
   canvas.height = Math.round(cssH * dpr)
@@ -200,72 +200,137 @@ function sizeCanvas(canvas) {
   canvas.style.height = `${cssH}px`
   const ctx = canvas.getContext('2d')
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.fillStyle = '#fff'
+  ctx.fillRect(0, 0, cssW, cssH)
   return { ctx, w: cssW, h: cssH, dpr }
 }
 
-function drawAxes(ctx, pad, w, h, { xLabel, yLabel }) {
-  ctx.strokeStyle = '#888'
+function drawFrame(ctx, pad, w, h) {
+  ctx.strokeStyle = '#666'
   ctx.lineWidth = 1
-  ctx.beginPath()
-  ctx.moveTo(pad.l, pad.t)
-  ctx.lineTo(pad.l, h - pad.b)
-  ctx.lineTo(w - pad.r, h - pad.b)
-  ctx.stroke()
+  ctx.strokeRect(pad.l, pad.t, w - pad.l - pad.r, h - pad.t - pad.b)
+}
+
+function drawLinearTicks(ctx, pad, w, h, {
+  xMin, xMax, yMin, yMax, xTicks = 5, yTicks = 5, xLabel, yLabel, fmtX, fmtY,
+}) {
+  const plotW = w - pad.l - pad.r
+  const plotH = h - pad.t - pad.b
+  const xOf = (x) => pad.l + ((x - xMin) / (xMax - xMin || 1)) * plotW
+  const yOf = (y) => pad.t + plotH - ((y - yMin) / (yMax - yMin || 1)) * plotH
   ctx.fillStyle = '#444'
-  ctx.font = '11px sans-serif'
+  ctx.font = '10px sans-serif'
   ctx.textAlign = 'center'
-  ctx.fillText(xLabel, (pad.l + w - pad.r) / 2, h - 6)
-  ctx.save()
-  ctx.translate(12, (pad.t + h - pad.b) / 2)
-  ctx.rotate(-Math.PI / 2)
-  ctx.fillText(yLabel, 0, 0)
-  ctx.restore()
+  ctx.textBaseline = 'top'
+  for (let i = 0; i <= xTicks; i++) {
+    const xv = xMin + ((xMax - xMin) * i) / xTicks
+    const x = xOf(xv)
+    ctx.strokeStyle = '#ddd'
+    ctx.beginPath()
+    ctx.moveTo(x, pad.t)
+    ctx.lineTo(x, h - pad.b)
+    ctx.stroke()
+    ctx.strokeStyle = '#666'
+    ctx.beginPath()
+    ctx.moveTo(x, h - pad.b)
+    ctx.lineTo(x, h - pad.b + 4)
+    ctx.stroke()
+    ctx.fillText(fmtX ? fmtX(xv) : String(xv), x, h - pad.b + 5)
+  }
+  ctx.textAlign = 'right'
+  ctx.textBaseline = 'middle'
+  for (let i = 0; i <= yTicks; i++) {
+    const yv = yMin + ((yMax - yMin) * i) / yTicks
+    const y = yOf(yv)
+    ctx.strokeStyle = '#eee'
+    ctx.beginPath()
+    ctx.moveTo(pad.l, y)
+    ctx.lineTo(w - pad.r, y)
+    ctx.stroke()
+    ctx.strokeStyle = '#666'
+    ctx.beginPath()
+    ctx.moveTo(pad.l - 4, y)
+    ctx.lineTo(pad.l, y)
+    ctx.stroke()
+    ctx.fillText(fmtY ? fmtY(yv) : String(yv), pad.l - 6, y)
+  }
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'bottom'
+  ctx.font = '11px sans-serif'
+  ctx.fillText(xLabel, pad.l + plotW / 2, h - 2)
+  if (yLabel) {
+    ctx.save()
+    ctx.translate(11, pad.t + plotH / 2)
+    ctx.rotate(-Math.PI / 2)
+    ctx.textBaseline = 'top'
+    ctx.fillText(yLabel, 0, 0)
+    ctx.restore()
+  }
+  return { xOf, yOf, plotW, plotH }
+}
+
+function fillUnderCurve(ctx, pts, yBase, color) {
+  if (pts.length < 2) return
+  ctx.beginPath()
+  ctx.moveTo(pts[0][0], yBase)
+  pts.forEach(([x, y]) => ctx.lineTo(x, y))
+  ctx.lineTo(pts[pts.length - 1][0], yBase)
+  ctx.closePath()
+  ctx.fillStyle = color
+  ctx.fill()
+}
+
+function strokeCurve(ctx, pts, color, width = 1.5) {
+  if (pts.length < 2) return
+  ctx.beginPath()
+  pts.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)))
+  ctx.strokeStyle = color
+  ctx.lineWidth = width
+  ctx.stroke()
 }
 
 function drawHist() {
   const canvas = histCanvas.value
   const dist = report.value?.charts?.score_distribution
-  if (!canvas || !dist?.bin_centers?.length) {
+  const xs = dist?.x || dist?.bin_centers
+  const gDens = dist?.genuine_density
+  const iDens = dist?.impostor_density
+  if (!canvas || !xs?.length || !gDens?.length || !iDens?.length) {
     clearCanvas(canvas)
     return
   }
   const { ctx, w, h } = sizeCanvas(canvas)
   if (!ctx) return
-  const pad = { l: 40, r: 12, t: 16, b: 28 }
-  const centers = dist.bin_centers
-  const g = dist.genuine
-  const imp = dist.impostor
-  const maxY = Math.max(1, ...g, ...imp)
-  const x0 = centers[0]
-  const x1 = centers[centers.length - 1]
-  const span = x1 - x0 || 1
-  const barW = Math.max(1, ((w - pad.l - pad.r) / centers.length) * 0.9)
+  const pad = { l: 36, r: 10, t: 28, b: 34 }
+  const maxY = Math.max(1e-6, ...gDens, ...iDens) * 1.08
+  drawFrame(ctx, pad, w, h)
+  const { xOf, yOf } = drawLinearTicks(ctx, pad, w, h, {
+    xMin: 0,
+    xMax: 1,
+    yMin: 0,
+    yMax: maxY,
+    xTicks: 5,
+    yTicks: 4,
+    xLabel: 'threshold',
+    yLabel: '',
+    fmtX: (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1)),
+    fmtY: () => '',
+  })
 
-  drawAxes(ctx, pad, w, h, { xLabel: 'threshold', yLabel: 'count' })
+  const gPts = xs.map((x, i) => [xOf(x), yOf(gDens[i] || 0)])
+  const iPts = xs.map((x, i) => [xOf(x), yOf(iDens[i] || 0)])
+  const yBase = yOf(0)
+  fillUnderCurve(ctx, iPts, yBase, 'rgba(220, 40, 40, 0.45)')
+  fillUnderCurve(ctx, gPts, yBase, 'rgba(40, 170, 70, 0.40)')
+  strokeCurve(ctx, iPts, '#c0392b', 1.2)
+  strokeCurve(ctx, gPts, '#1e8449', 1.2)
 
-  const xOf = (x) => pad.l + ((x - x0) / span) * (w - pad.l - pad.r)
-  const yOf = (y) => h - pad.b - (y / maxY) * (h - pad.t - pad.b)
-
-  for (let i = 0; i < centers.length; i++) {
-    const x = xOf(centers[i]) - barW / 2
-    ctx.fillStyle = 'rgba(220, 60, 60, 0.55)'
-    const ih = h - pad.b - yOf(imp[i] || 0)
-    ctx.fillRect(x, yOf(imp[i] || 0), barW, ih)
-    ctx.fillStyle = 'rgba(40, 160, 70, 0.55)'
-    const gh = h - pad.b - yOf(g[i] || 0)
-    ctx.fillRect(x, yOf(g[i] || 0), barW, gh)
-  }
-
+  ctx.font = '11px sans-serif'
   ctx.fillStyle = '#c0392b'
-  ctx.fillRect(w - 110, 8, 12, 8)
-  ctx.fillStyle = '#333'
-  ctx.font = '10px sans-serif'
   ctx.textAlign = 'left'
-  ctx.fillText('Impostors', w - 94, 16)
-  ctx.fillStyle = '#27ae60'
-  ctx.fillRect(w - 110, 22, 12, 8)
-  ctx.fillStyle = '#333'
-  ctx.fillText('Genuines', w - 94, 30)
+  ctx.fillText('Impostors', pad.l + 8, pad.t + 14)
+  ctx.fillStyle = '#1e8449'
+  ctx.fillText('Genuines', pad.l + 8, pad.t + 28)
 }
 
 function drawFmrFnmr() {
@@ -277,114 +342,157 @@ function drawFmrFnmr() {
   }
   const { ctx, w, h } = sizeCanvas(canvas)
   if (!ctx) return
-  const pad = { l: 44, r: 12, t: 16, b: 28 }
-  drawAxes(ctx, pad, w, h, { xLabel: 'threshold', yLabel: '%' })
-
-  const xs = series.map((p) => p.threshold)
-  const x0 = Math.min(...xs)
-  const x1 = Math.max(...xs)
-  const span = x1 - x0 || 1
-  const xOf = (x) => pad.l + ((x - x0) / span) * (w - pad.l - pad.r)
-  const yOf = (pct) => h - pad.b - (Math.min(100, Math.max(0, pct)) / 100) * (h - pad.t - pad.b)
-
-  ctx.strokeStyle = '#c0392b'
-  ctx.lineWidth = 1.5
-  ctx.beginPath()
-  series.forEach((p, i) => {
-    const x = xOf(p.threshold)
-    const y = yOf(p.fmr_pct)
-    if (i === 0) ctx.moveTo(x, y)
-    else ctx.lineTo(x, y)
+  const pad = { l: 42, r: 10, t: 22, b: 34 }
+  drawFrame(ctx, pad, w, h)
+  const { xOf, yOf } = drawLinearTicks(ctx, pad, w, h, {
+    xMin: 0,
+    xMax: 1,
+    yMin: 0,
+    yMax: 100,
+    xTicks: 5,
+    yTicks: 5,
+    xLabel: 'threshold',
+    yLabel: '',
+    fmtX: (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1)),
+    fmtY: (v) => `${Math.round(v)}%`,
   })
-  ctx.stroke()
 
-  ctx.strokeStyle = '#27ae60'
-  ctx.beginPath()
-  series.forEach((p, i) => {
-    const x = xOf(p.threshold)
-    const y = yOf(p.fnmr_pct)
-    if (i === 0) ctx.moveTo(x, y)
-    else ctx.lineTo(x, y)
-  })
-  ctx.stroke()
+  const fmrPts = series.map((p) => [xOf(p.threshold), yOf(Math.min(100, Math.max(0, p.fmr_pct ?? p.fmr * 100)))])
+  const fnmrPts = series.map((p) => [xOf(p.threshold), yOf(Math.min(100, Math.max(0, p.fnmr_pct ?? p.fnmr * 100)))])
+  strokeCurve(ctx, fmrPts, '#c0392b', 1.6)
+  strokeCurve(ctx, fnmrPts, '#27ae60', 1.6)
 
-  ctx.font = '10px sans-serif'
+  ctx.font = '11px sans-serif'
+  ctx.textAlign = 'left'
   ctx.fillStyle = '#c0392b'
-  ctx.fillText('FMR', w - 50, 14)
+  ctx.fillText('FMR', pad.l + 8, pad.t + 12)
   ctx.fillStyle = '#27ae60'
-  ctx.fillText('FNMR', w - 50, 28)
+  ctx.fillText('FNMR', pad.l + 8, pad.t + 26)
 }
 
 function drawDet() {
   const canvas = detCanvas.value
   const series = report.value?.charts?.det
+  const axis = report.value?.charts?.det_axis || {}
   if (!canvas || !series?.length) {
     clearCanvas(canvas)
     return
   }
   const { ctx, w, h } = sizeCanvas(canvas)
   if (!ctx) return
-  const pad = { l: 48, r: 12, t: 16, b: 28 }
-  drawAxes(ctx, pad, w, h, { xLabel: 'FMR (log)', yLabel: 'FNMR (log)' })
-
-  const eps = 1e-6
-  const fmrs = series.map((p) => Math.max(eps, p.fmr))
-  const fnmrs = series.map((p) => Math.max(eps, p.fnmr))
-  const logMinX = Math.log10(Math.min(...fmrs))
-  const logMaxX = Math.log10(Math.max(...fmrs))
-  const logMinY = Math.log10(Math.min(...fnmrs))
-  const logMaxY = Math.log10(Math.max(...fnmrs))
-  const spanX = logMaxX - logMinX || 1
-  const spanY = logMaxY - logMinY || 1
-  const xOf = (fmr) => pad.l + ((Math.log10(Math.max(eps, fmr)) - logMinX) / spanX) * (w - pad.l - pad.r)
-  const yOf = (fnmr) => h - pad.b - ((Math.log10(Math.max(eps, fnmr)) - logMinY) / spanY) * (h - pad.t - pad.b)
-
-  // EER diagonal (FMR == FNMR) where in range
-  ctx.strokeStyle = '#999'
-  ctx.setLineDash([4, 3])
-  ctx.beginPath()
-  const diagPts = []
-  for (let i = 0; i <= 40; i++) {
-    const t = i / 40
-    const v = 10 ** (logMinX + t * spanX)
-    if (v >= 10 ** logMinY && v <= 10 ** logMaxY) diagPts.push([xOf(v), yOf(v)])
+  const pad = { l: 48, r: 12, t: 22, b: 36 }
+  const fmrMin = axis.fmr_min ?? 1e-4
+  const fmrMax = axis.fmr_max ?? 1
+  const fnmrMin = axis.fnmr_min ?? 1e-4
+  const fnmrMax = axis.fnmr_max ?? 1
+  const logX0 = Math.log10(fmrMin)
+  const logX1 = Math.log10(fmrMax)
+  const logY0 = Math.log10(fnmrMin)
+  const logY1 = Math.log10(fnmrMax)
+  const plotW = w - pad.l - pad.r
+  const plotH = h - pad.t - pad.b
+  const xOf = (fmr) => {
+    const v = Math.min(fmrMax, Math.max(fmrMin, Math.max(fmr, fmrMin * 0.5)))
+    return pad.l + ((Math.log10(v) - logX0) / (logX1 - logX0)) * plotW
   }
-  diagPts.forEach(([x, y], i) => {
-    if (i === 0) ctx.moveTo(x, y)
-    else ctx.lineTo(x, y)
-  })
-  ctx.stroke()
-  ctx.setLineDash([])
+  const yOf = (fnmr) => {
+    const v = Math.min(fnmrMax, Math.max(fnmrMin, Math.max(fnmr, fnmrMin * 0.5)))
+    return pad.t + plotH - ((Math.log10(v) - logY0) / (logY1 - logY0)) * plotH
+  }
 
-  // FMR reference lines
-  const refs = [
-    { fmr: 0.01, label: 'FMR100' },
-    { fmr: 0.001, label: 'FMR1000' },
-    { fmr: 0.0001, label: 'FMR10000' },
-  ]
-  ctx.strokeStyle = '#bbb'
+  drawFrame(ctx, pad, w, h)
+
+  // decade grid + ticks
+  const decades = []
+  for (let e = Math.ceil(logX0); e <= Math.floor(logX1); e++) decades.push(10 ** e)
   ctx.font = '9px sans-serif'
-  ctx.fillStyle = '#666'
-  refs.forEach(({ fmr, label }) => {
-    if (fmr < 10 ** logMinX || fmr > 10 ** logMaxX) return
-    const x = xOf(fmr)
+  ctx.fillStyle = '#444'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'top'
+  decades.forEach((v) => {
+    const x = xOf(v)
+    ctx.strokeStyle = '#e0e0e0'
     ctx.beginPath()
     ctx.moveTo(x, pad.t)
     ctx.lineTo(x, h - pad.b)
     ctx.stroke()
-    ctx.fillText(label, x + 2, pad.t + 10)
+    ctx.fillText(v >= 1 ? '1' : `10^${Math.round(Math.log10(v))}`, x, h - pad.b + 4)
+  })
+  const yDecades = []
+  for (let e = Math.ceil(logY0); e <= Math.floor(logY1); e++) yDecades.push(10 ** e)
+  ctx.textAlign = 'right'
+  ctx.textBaseline = 'middle'
+  yDecades.forEach((v) => {
+    const y = yOf(v)
+    ctx.strokeStyle = '#e0e0e0'
+    ctx.beginPath()
+    ctx.moveTo(pad.l, y)
+    ctx.lineTo(w - pad.r, y)
+    ctx.stroke()
+    ctx.fillText(v >= 1 ? '1' : `10^${Math.round(Math.log10(v))}`, pad.l - 5, y)
   })
 
-  ctx.strokeStyle = '#2471a3'
-  ctx.lineWidth = 1.8
+  // EER line (FMR = FNMR)
+  ctx.setLineDash([5, 4])
+  ctx.strokeStyle = '#888'
+  ctx.lineWidth = 1
   ctx.beginPath()
-  series.forEach((p, i) => {
-    const x = xOf(p.fmr)
-    const y = yOf(p.fnmr)
-    if (i === 0) ctx.moveTo(x, y)
-    else ctx.lineTo(x, y)
-  })
+  const eerLo = Math.max(fmrMin, fnmrMin)
+  const eerHi = Math.min(fmrMax, fnmrMax)
+  ctx.moveTo(xOf(eerLo), yOf(eerLo))
+  ctx.lineTo(xOf(eerHi), yOf(eerHi))
   ctx.stroke()
+  ctx.setLineDash([])
+  ctx.fillStyle = '#555'
+  ctx.font = '10px sans-serif'
+  ctx.textAlign = 'left'
+  const mid = Math.sqrt(eerLo * eerHi)
+  ctx.fillText('EER line', xOf(mid) + 4, yOf(mid) - 6)
+
+  // vertical refs
+  const refs = [
+    { fmr: 0.0001, label: 'FMR10000' },
+    { fmr: 0.001, label: 'FMR1000' },
+    { fmr: 0.01, label: 'FMR100' },
+  ]
+  ctx.font = '9px sans-serif'
+  refs.forEach(({ fmr, label }) => {
+    if (fmr < fmrMin || fmr > fmrMax) return
+    const x = xOf(fmr)
+    ctx.strokeStyle = '#aaa'
+    ctx.setLineDash([3, 3])
+    ctx.beginPath()
+    ctx.moveTo(x, pad.t)
+    ctx.lineTo(x, h - pad.b)
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.save()
+    ctx.translate(x + 3, pad.t + 4)
+    ctx.rotate(-Math.PI / 2)
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'top'
+    ctx.fillStyle = '#666'
+    ctx.fillText(label, 0, 0)
+    ctx.restore()
+  })
+
+  // stepped DET curve
+  const pts = series
+    .map((p) => [xOf(Math.max(p.fmr, fmrMin * 0.999)), yOf(Math.max(p.fnmr, fnmrMin * 0.999))])
+    .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y))
+  strokeCurve(ctx, pts, '#1a5276', 1.8)
+
+  ctx.fillStyle = '#444'
+  ctx.font = '11px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'bottom'
+  ctx.fillText('FMR', pad.l + plotW / 2, h - 2)
+  ctx.save()
+  ctx.translate(12, pad.t + plotH / 2)
+  ctx.rotate(-Math.PI / 2)
+  ctx.textBaseline = 'top'
+  ctx.fillText('FNMR', 0, 0)
+  ctx.restore()
 }
 
 function drawCharts() {
@@ -535,11 +643,11 @@ onBeforeUnmount(() => {
           <canvas ref="histCanvas" />
         </div>
         <div class="chart-box">
-          <div class="chart-title">FMR(t) and FNMR(t)</div>
+          <div class="chart-title">FMR(t) and FNMR(t) graphs</div>
           <canvas ref="fmrCanvas" />
         </div>
         <div class="chart-box">
-          <div class="chart-title">DET</div>
+          <div class="chart-title">DET graph</div>
           <canvas ref="detCanvas" />
         </div>
       </div>
@@ -635,20 +743,24 @@ onBeforeUnmount(() => {
 .charts-row {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
+  gap: 8px;
   border: 1px solid #d4c4a0;
   border-top: none;
-  padding: 12px;
-  background: #fafafa;
+  padding: 10px 8px 12px;
+  background: #fff;
 }
 .chart-box {
   min-width: 0;
+  border: 1px solid #e5e5e5;
+  padding: 4px 2px 2px;
+  background: #fff;
 }
 .chart-title {
   text-align: center;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
+  color: #222;
 }
 .desc-body {
   margin: 0;

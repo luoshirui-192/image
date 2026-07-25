@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 from typing import Any
 
 from django.db import close_old_connections, connections
@@ -383,6 +383,124 @@ def _pct(value: float | None) -> float | None:
     return round(value * 100.0, 6)
 
 
+def _scores_for_unit_axis(
+    genuine: list[float], impostor: list[float]
+) -> tuple[list[float], list[float], bool]:
+    """Map scores onto [0,1] for Hisign-style charts (metrics stay on raw scores)."""
+    all_scores = genuine + impostor
+    lo = min(all_scores)
+    hi = max(all_scores)
+    if lo >= -1e-9 and hi <= 1.0 + 1e-9:
+        return list(genuine), list(impostor), False
+    span = hi - lo
+    if span <= 0:
+        return [0.5] * len(genuine), [0.5] * len(impostor), True
+    g = [(x - lo) / span for x in genuine]
+    i = [(x - lo) / span for x in impostor]
+    return g, i, True
+
+
+def _gaussian_kde(samples: list[float], xs: list[float]) -> list[float]:
+    n = len(samples)
+    if n == 0:
+        return [0.0] * len(xs)
+    mean = sum(samples) / n
+    var = sum((x - mean) ** 2 for x in samples) / max(n - 1, 1)
+    std = math.sqrt(var) if var > 0 else 0.05
+    # Silverman's rule of thumb; floor so small samples still look smooth
+    bw = max(1.06 * std * (n ** (-0.2)), 0.02)
+    inv = 1.0 / (bw * math.sqrt(2.0 * math.pi))
+    dens: list[float] = []
+    for x in xs:
+        s = 0.0
+        for v in samples:
+            u = (x - v) / bw
+            s += math.exp(-0.5 * u * u)
+        dens.append(inv * s / n)
+    return dens
+
+
+def _score_density_chart(genuine: list[float], impostor: list[float], *, n: int = 200) -> dict:
+    g, i, normalized = _scores_for_unit_axis(genuine, impostor)
+    xs = [k / (n - 1) for k in range(n)]
+    g_d = _gaussian_kde(g, xs)
+    i_d = _gaussian_kde(i, xs)
+    peak = max(max(g_d, default=0.0), max(i_d, default=0.0), 1e-12)
+    # Normalize peak to 1 for stable drawing (relative shape only)
+    g_n = [v / peak for v in g_d]
+    i_n = [v / peak for v in i_d]
+    return {
+        "x": xs,
+        "genuine_density": g_n,
+        "impostor_density": i_n,
+        "x_min": 0.0,
+        "x_max": 1.0,
+        "normalized": normalized,
+        # keep hist for debugging / older clients
+        "bin_centers": xs[:: max(1, n // 40)],
+        "genuine": [],
+        "impostor": [],
+    }
+
+
+def _unit_threshold_curve(
+    genuine: list[float], impostor: list[float], *, n: int = 201
+) -> list[dict]:
+    """FMR/FNMR vs threshold on fixed [0,1] axis (Hisign middle chart)."""
+    g, i, _ = _scores_for_unit_axis(genuine, impostor)
+    gs = sorted(g)
+    iss = sorted(i)
+    points: list[dict] = []
+    for k in range(n):
+        t = k / (n - 1)
+        fmr, fnmr = _fmr_fnmr_at(t, gs, iss)
+        points.append(
+            {
+                "threshold": t,
+                "fmr": fmr,
+                "fnmr": fnmr,
+                "fmr_pct": _pct(fmr),
+                "fnmr_pct": _pct(fnmr),
+            }
+        )
+    return points
+
+
+def _det_step_points(curve: list[dict]) -> list[dict]:
+    """Build DET staircase (FMR↓, FNMR↑) like Neurotechnology / Hisign plots."""
+    raw = [
+        {"fmr": float(p["fmr"]), "fnmr": float(p["fnmr"]), "threshold": float(p["threshold"])}
+        for p in curve
+        if p["fmr"] is not None and p["fnmr"] is not None
+    ]
+    if not raw:
+        return []
+    # Prefer decreasing FMR order (threshold rising)
+    raw.sort(key=lambda p: (-p["fmr"], p["fnmr"], p["threshold"]))
+    # Deduplicate nearly-identical FMR
+    uniq: list[dict] = []
+    for p in raw:
+        if uniq and abs(uniq[-1]["fmr"] - p["fmr"]) < 1e-15 and abs(uniq[-1]["fnmr"] - p["fnmr"]) < 1e-15:
+            continue
+        uniq.append(p)
+    # Expand to step corners: horizontal then vertical
+    stepped: list[dict] = []
+    for idx, p in enumerate(uniq):
+        if idx == 0:
+            stepped.append(p)
+            continue
+        prev = stepped[-1]
+        # horizontal to new FMR at old FNMR, then vertical to new FNMR
+        if abs(prev["fmr"] - p["fmr"]) > 1e-15:
+            stepped.append({"fmr": p["fmr"], "fnmr": prev["fnmr"], "threshold": p["threshold"]})
+        if abs(prev["fnmr"] - p["fnmr"]) > 1e-15 or abs(prev["fmr"] - p["fmr"]) <= 1e-15:
+            stepped.append({"fmr": p["fmr"], "fnmr": p["fnmr"], "threshold": p["threshold"]})
+    for p in stepped:
+        p["fmr_pct"] = _pct(p["fmr"])
+        p["fnmr_pct"] = _pct(p["fnmr"])
+    return stepped
+
+
 def compute_report(genuine: list[float], impostor: list[float]) -> dict:
     n_g = len(genuine)
     n_i = len(impostor)
@@ -407,44 +525,28 @@ def compute_report(genuine: list[float], impostor: list[float]) -> dict:
         "zero_fnmr": _pct(_zero_fnmr(genuine, impostor)),
     }
 
-    # Downsample curve for charts
-    chart_curve = curve
-    if len(chart_curve) > 120:
-        step = max(1, len(chart_curve) // 120)
-        chart_curve = chart_curve[::step]
-
-    det = [
-        {
-            "fmr": p["fmr"],
-            "fnmr": p["fnmr"],
-            "fmr_pct": _pct(p["fmr"]),
-            "fnmr_pct": _pct(p["fnmr"]),
-            "threshold": p["threshold"],
-        }
-        for p in chart_curve
-    ]
-
-    fmr_fnmr = [
-        {
-            "threshold": p["threshold"],
-            "fmr_pct": _pct(p["fmr"]),
-            "fnmr_pct": _pct(p["fnmr"]),
-        }
-        for p in chart_curve
-    ]
+    unit_curve = _unit_threshold_curve(genuine, impostor)
+    det_steps = _det_step_points(unit_curve)
 
     return {
         "counts": {"genuine": n_g, "impostor": n_i, "total": n_g + n_i},
         "accuracy": accuracy,
         "charts": {
-            "score_distribution": _histogram(genuine, impostor),
-            "fmr_fnmr": fmr_fnmr,
-            "det": det,
+            "score_distribution": _score_density_chart(genuine, impostor),
+            "fmr_fnmr": unit_curve,
+            "det": det_steps,
+            "det_axis": {
+                "fmr_min": 1e-4,
+                "fmr_max": 1.0,
+                "fnmr_min": 1e-4,
+                "fnmr_max": 1.0,
+            },
         },
         "notes": {
             "accept_rule": "score >= threshold",
             "sameflag": "1=Genuine, 0=Impostor",
             "units": "accuracy values are percentages",
+            "chart_style": "hisign",
         },
     }
 
