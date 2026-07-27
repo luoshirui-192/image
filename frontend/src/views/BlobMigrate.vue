@@ -541,9 +541,10 @@ async function refreshConsole() {
 
 usePageDataRefresh(refreshConsole, {
   isEmpty: () => !sources.value.length && !jobHistory.value.length,
-  intervalMs: 2500,
-  maxEmptyRetries: 6,
+  intervalMs: 1500,
+  maxEmptyRetries: 10,
   alwaysRefreshOnVisible: true,
+  mountRetryDelaysMs: [200, 600, 1500, 3000],
 })
 
 watch(

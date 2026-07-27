@@ -2087,10 +2087,11 @@ usePageDataRefresh(
     }
   },
   {
-    isEmpty: () => !views.value.length,
-    intervalMs: 2500,
-    maxEmptyRetries: 10,
+    isEmpty: () => !views.value.length && !browseReady.value,
+    intervalMs: 1500,
+    maxEmptyRetries: 12,
     alwaysRefreshOnVisible: true,
+    mountRetryDelaysMs: [200, 600, 1500, 3000],
   },
 )
 

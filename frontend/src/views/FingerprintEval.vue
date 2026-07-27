@@ -7,6 +7,7 @@ import {
   fetchFingerprintBizEvalMetaApi,
   fetchFingerprintBizEvalReportApi,
 } from '@/api/fingerprints'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 
 const route = useRoute()
 const router = useRouter()
@@ -169,11 +170,12 @@ async function loadReport({ quiet = false } = {}) {
     })
     if (seq !== reportLoadSeq) return
     report.value = res.data || null
-    await nextTick()
-    drawCharts()
+    await drawChartsWhenReady()
+    scheduleChartRedraws()
   } catch (err) {
     if (seq !== reportLoadSeq) return
-    ElMessage.error(err.message || '计算评测报告失败')
+    // Keep last good report on transient errors (visibility / race refreshes).
+    if (!quiet) ElMessage.error(err.message || '计算评测报告失败')
   } finally {
     if (seq === reportLoadSeq) loadingReport.value = false
   }
@@ -514,6 +516,33 @@ function drawCharts() {
   drawDet()
 }
 
+function canvasLayoutReady() {
+  const el = histCanvas.value
+  if (!el || !fmrCanvas.value || !detCanvas.value) return false
+  // Router fade-slide leaves 0-width parents on first paint; wait for real layout.
+  return (el.parentElement?.clientWidth || 0) > 40
+}
+
+async function drawChartsWhenReady(tries = 24) {
+  await nextTick()
+  if (canvasLayoutReady()) {
+    drawCharts()
+    return
+  }
+  if (tries <= 0 || !report.value) return
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  await drawChartsWhenReady(tries - 1)
+}
+
+/** Extra redraws after route transition (~150ms) settles. */
+function scheduleChartRedraws() {
+  for (const delay of [180, 400, 900]) {
+    setTimeout(() => {
+      if (report.value && canvasLayoutReady()) drawCharts()
+    }, delay)
+  }
+}
+
 function onResize() {
   if (report.value) drawCharts()
 }
@@ -521,6 +550,9 @@ function onResize() {
 watch(connectionKey, async () => {
   if (hydrating) return
   await loadMeta()
+  if (filters.dataset_code && filters.score_column) {
+    await loadReport({ quiet: true })
+  }
   syncQuery()
 })
 
@@ -529,27 +561,77 @@ watch(
   async () => {
     if (hydrating || suppressDatasetWatch) return
     await loadMeta()
-  },
-)
-
-onMounted(async () => {
-  hydrating = true
-  try {
-    filters.dataset_code = String(route.query.dataset_code || '')
-    filters.score_column = String(route.query.score_column || 'score')
-    await loadConnections()
-    await loadMeta()
-    // If dataset was auto-picked inside loadMeta, rescan columns for that dataset once.
-    if (filters.dataset_code) {
-      await loadMeta()
-    }
     if (filters.dataset_code && filters.score_column) {
       await loadReport({ quiet: true })
     }
     syncQuery()
-  } finally {
-    hydrating = false
+  },
+)
+
+watch(
+  () => filters.score_column,
+  async () => {
+    if (hydrating || suppressDatasetWatch) return
+    if (filters.dataset_code && filters.score_column) {
+      await loadReport({ quiet: true })
+    }
+    syncQuery()
+  },
+)
+
+let evalBootstrapped = false
+
+async function refreshEvalPage() {
+  if (!evalBootstrapped) {
+    hydrating = true
+    try {
+      if (!filters.dataset_code) {
+        filters.dataset_code = String(route.query.dataset_code || '')
+      }
+      if (!filters.score_column) {
+        filters.score_column = String(route.query.score_column || 'score')
+      }
+      await loadConnections()
+      await loadMeta()
+      if (filters.dataset_code) {
+        await loadMeta()
+      }
+      if (filters.dataset_code && filters.score_column) {
+        await loadReport({ quiet: true })
+      }
+      syncQuery()
+    } finally {
+      hydrating = false
+      evalBootstrapped = true
+    }
+    return
   }
+  if (!connections.value.length || !connectionKey.value) {
+    await loadConnections()
+  }
+  await loadMeta()
+  if (filters.dataset_code && filters.score_column) {
+    await loadReport({ quiet: true })
+  }
+}
+
+usePageDataRefresh(refreshEvalPage, {
+  // Retry while connections/meta missing, or filters ready but report not yet loaded.
+  isEmpty: () => {
+    if (!connections.value.length) return true
+    if (!datasets.value.length) return true
+    // Meta settled with no score columns — stop polling (not a transient race).
+    if (!scoreColumns.value.length) return false
+    if (filters.dataset_code && filters.score_column) return !report.value
+    return false
+  },
+  alwaysRefreshOnVisible: true,
+  intervalMs: 1500,
+  maxEmptyRetries: 12,
+  mountRetryDelaysMs: [200, 600, 1500, 3000],
+})
+
+onMounted(() => {
   window.addEventListener('resize', onResize)
 })
 

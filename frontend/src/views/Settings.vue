@@ -1,8 +1,9 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { fetchStorageStatsApi, formatFileSize } from '@/api/logs'
 import { getSystemConfigApi, updateSystemConfigApi } from '@/api/config'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 
 const loading = ref(false)
 const saving = ref(false)
@@ -68,8 +69,16 @@ async function handleSave() {
   }
 }
 
-onMounted(async () => {
+async function refreshSettingsPage() {
   await Promise.all([loadConfig(), loadStats()])
+}
+
+usePageDataRefresh(refreshSettingsPage, {
+  isEmpty: () => !configMeta.value?.editable || Object.keys(configMeta.value.editable || {}).length === 0,
+  alwaysRefreshOnVisible: true,
+  intervalMs: 1500,
+  maxEmptyRetries: 10,
+  mountRetryDelaysMs: [200, 600, 1500, 3000],
 })
 </script>
 

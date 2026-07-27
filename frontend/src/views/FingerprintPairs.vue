@@ -341,6 +341,7 @@ async function loadSamples() {
       if (seq !== samplesLoadSeq) return
       rows.value = res.data.items || []
       total.value = res.data.total || 0
+      fpListLoadedOnce = true
       if (selectedMatchId.value != null && !rows.value.some((r) => r.id === selectedMatchId.value)) {
         selectedMatchId.value = null
         selectedPairCaps.value = null
@@ -351,6 +352,7 @@ async function loadSamples() {
       if (seq !== samplesLoadSeq) return
       rows.value = res.data.items || []
       total.value = res.data.total || 0
+      fpListLoadedOnce = true
       if (selectedCapId.value && !rows.value.some((r) => r.cap_image_id === selectedCapId.value)) {
         selectedCapId.value = null
         clearView()
@@ -853,6 +855,7 @@ let filterTimer = null
 watch(
   () => [filters.keyword, filters.dataset_code],
   () => {
+    if (isSqlListMode.value) return
     if (filterTimer) clearTimeout(filterTimer)
     filterTimer = setTimeout(() => {
       void loadSamples()
@@ -955,6 +958,7 @@ async function bootstrapFingerprintPage() {
 }
 
 let fpBootstrapped = false
+let fpListLoadedOnce = false
 usePageDataRefresh(
   async () => {
     if (!fpBootstrapped) {
@@ -966,14 +970,22 @@ usePageDataRefresh(
     await ensureConnections({ force: !wbConnections.value.length })
     if (!browseConnectionKey.value) return
     await loadMeta()
-    if (!isSqlListMode.value) await loadSamples()
+    if (!isSqlListMode.value) {
+      await loadSamples()
+    }
     if (selectedMatchId.value || selectedPairCaps.value || selectedCapId.value) {
       await loadView()
     }
   },
   {
-    isEmpty: () => !rows.value.length && !wbConnections.value.length,
+    // Retry while connections missing, or filter-mode list never successfully loaded.
+    isEmpty: () =>
+      !wbConnections.value.length ||
+      (!isSqlListMode.value && !fpListLoadedOnce),
     alwaysRefreshOnVisible: true,
+    intervalMs: 1500,
+    maxEmptyRetries: 12,
+    mountRetryDelaysMs: [200, 600, 1500, 3000],
   },
 )
 

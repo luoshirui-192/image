@@ -14,6 +14,7 @@ import { onMounted, onUnmounted } from 'vue'
  *   refreshOnVisible?: boolean,
  *   alwaysRefreshOnVisible?: boolean,
  *   visibleDebounceMs?: number,
+ *   mountRetryDelaysMs?: number[],
  * }} [options]
  */
 export function usePageDataRefresh(refreshFn, options = {}) {
@@ -25,6 +26,8 @@ export function usePageDataRefresh(refreshFn, options = {}) {
     // Prefer refreshing when empty; full reload on every focus is opt-in per page.
     alwaysRefreshOnVisible = false,
     visibleDebounceMs = 350,
+    // Extra one-shot retries after mount (covers router transition / first paint races).
+    mountRetryDelaysMs = [300, 1000, 2500],
   } = options
 
   let timer = null
@@ -33,6 +36,8 @@ export function usePageDataRefresh(refreshFn, options = {}) {
   let pending = false
   let visibleTimer = null
   let disposed = false
+  /** @type {ReturnType<typeof setTimeout>[]} */
+  const mountRetryTimers = []
 
   async function runRefresh({ force = false } = {}) {
     if (disposed) return false
@@ -110,10 +115,27 @@ export function usePageDataRefresh(refreshFn, options = {}) {
     scheduleVisibleRefresh()
   }
 
+  function scheduleMountRetries() {
+    for (const delay of mountRetryDelaysMs) {
+      const id = setTimeout(() => {
+        if (disposed) return
+        if (!isEmpty()) return
+        void runRefresh({ force: true }).then(() => {
+          if (isEmpty()) startEmptyPoll()
+        })
+      }, delay)
+      mountRetryTimers.push(id)
+    }
+  }
+
   onMounted(() => {
     document.addEventListener('visibilitychange', onVisibility)
+    // Kick immediately, then always arm short mount retries (they no-op once non-empty).
+    // Covers router out-in + fade-slide first-paint races without requiring a manual refresh.
     void runRefresh({ force: true }).then(() => {
+      if (disposed) return
       if (isEmpty()) startEmptyPoll()
+      scheduleMountRetries()
     })
   })
 
@@ -125,6 +147,8 @@ export function usePageDataRefresh(refreshFn, options = {}) {
       clearTimeout(visibleTimer)
       visibleTimer = null
     }
+    for (const id of mountRetryTimers) clearTimeout(id)
+    mountRetryTimers.length = 0
   })
 
   return {

@@ -100,6 +100,9 @@ function copySql() {
 usePageDataRefresh(loadLogs, {
   isEmpty: () => !logs.value.length,
   alwaysRefreshOnVisible: true,
+  intervalMs: 1500,
+  maxEmptyRetries: 10,
+  mountRetryDelaysMs: [200, 600, 1500, 3000],
 })
 </script>
 
