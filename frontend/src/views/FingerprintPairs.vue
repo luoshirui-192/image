@@ -29,11 +29,11 @@ import {
   pairSqlKey,
 } from '@/utils/fingerprintSqlBrowse'
 import {
-import { showRequestError } from '@/utils/showRequestError'
   connectionKey,
   connectionQueryParams,
   pickPreferredConnection,
 } from '@/utils/dbConnection'
+import { showRequestError } from '@/utils/showRequestError'
 
 const route = useRoute()
 const router = useRouter()

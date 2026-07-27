@@ -9,11 +9,11 @@ import {
 } from '@/api/fingerprints'
 import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 import {
-import { showRequestError } from '@/utils/showRequestError'
   connectionKey as connectionKeyOf,
   connectionQueryParams,
   pickPreferredConnection,
 } from '@/utils/dbConnection'
+import { showRequestError } from '@/utils/showRequestError'
 
 const route = useRoute()
 const router = useRouter()
