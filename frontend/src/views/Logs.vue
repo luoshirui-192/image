@@ -4,10 +4,10 @@ import { ElMessage } from 'element-plus'
 import { Search, View } from '@element-plus/icons-vue'
 import {
   actionTypeLabel,
-  formatDateTime,
   listLogsApi,
   LOG_ACTION_TYPES,
 } from '@/api/logs'
+import { formatDateTime } from '@/utils/format'
 import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 
 const loading = ref(false)

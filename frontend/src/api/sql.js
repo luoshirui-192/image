@@ -22,14 +22,6 @@ export function validateSqlApi(sql, context = {}) {
   return request.post('/sql/validate/', appendSimulateContext({ sql }, context))
 }
 
-export function listSqlTemplatesApi() {
-  return request.get('/sql/templates/')
-}
-
-export function saveSqlTemplateApi(name, sql) {
-  return request.post('/sql/templates/', { name, sql })
-}
-
 /** Column names that hold image storage paths. */
 export const PATH_COLUMN_NAMES = [
   'image_path',

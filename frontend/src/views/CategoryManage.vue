@@ -6,10 +6,10 @@ import { ArrowLeft, Plus } from '@element-plus/icons-vue'
 import {
   createCategoryApi,
   deleteCategoryApi,
-  formatDateTime,
   listCategoriesApi,
   updateCategoryApi,
 } from '@/api/images'
+import { formatDateTime } from '@/utils/format'
 import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 
 const route = useRoute()

@@ -14,49 +14,8 @@ from rest_framework.test import APIClient
 
 from images.models import ImageInfo
 from logs.models import OperateLog
+from tests_support.sqlite_schema import CORE_WITH_LOG_SQLITE_TABLES as SQLITE_TABLES
 from users.models import SysUser
-
-SQLITE_TABLES = """
-CREATE TABLE IF NOT EXISTS sys_user (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    password VARCHAR(128) NOT NULL,
-    username VARCHAR(100) NOT NULL UNIQUE,
-    role VARCHAR(20) NOT NULL DEFAULT 'user',
-    status SMALLINT NOT NULL DEFAULT 1,
-    create_time DATETIME NULL
-);
-CREATE TABLE IF NOT EXISTS operate_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NULL,
-    username VARCHAR(100) NOT NULL DEFAULT '',
-    action_type VARCHAR(20) NOT NULL DEFAULT '',
-    sql_content TEXT NULL,
-    detail VARCHAR(500) NOT NULL DEFAULT '',
-    ip VARCHAR(50) NOT NULL DEFAULT '',
-    create_time DATETIME NULL
-);
-CREATE TABLE IF NOT EXISTS image_info (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    image_name VARCHAR(255) NOT NULL DEFAULT '',
-    image_path VARCHAR(500) NOT NULL DEFAULT '',
-    image_width INTEGER NOT NULL DEFAULT 0,
-    image_height INTEGER NOT NULL DEFAULT 0,
-    file_size INTEGER NOT NULL DEFAULT 0,
-    file_suffix VARCHAR(20) NOT NULL DEFAULT '',
-    upload_time DATETIME NOT NULL,
-    update_time DATETIME NOT NULL,
-    upload_user VARCHAR(100) NOT NULL DEFAULT '',
-    is_delete SMALLINT NOT NULL DEFAULT 0,
-    category_id INTEGER NULL,
-    tags VARCHAR(500) NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS image_category (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    category_name VARCHAR(100) NOT NULL DEFAULT '',
-    sort INTEGER NOT NULL DEFAULT 0,
-    create_time DATETIME NULL
-);
-"""
 
 
 class LogsAPITestCase(TestCase):

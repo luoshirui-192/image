@@ -42,6 +42,7 @@ import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 import { readBrowseUiState, writeBrowseUiState } from '@/utils/browseUiState'
 import { useBackgroundExportStore } from '@/stores/backgroundExport'
 import ExternalDbConnectionsDialog from '@/components/ExternalDbConnectionsDialog.vue'
+import { showRequestError } from '@/utils/showRequestError'
 
 const route = useRoute()
 const router = useRouter()
@@ -735,7 +736,7 @@ async function loadCatalogTree(root, resolve) {
 
     resolve([])
   } catch (err) {
-    ElMessage.error(err.message || '加载目录失败')
+    showRequestError(err, '加载目录失败')
     resolve([])
   } finally {
     loadingCatalog.value = false
@@ -908,7 +909,7 @@ async function submitSavedViewMigration() {
       }
     }
   } catch (err) {
-    ElMessage.error(err.message || '启动迁移失败')
+    showRequestError(err, '启动迁移失败')
   } finally {
     migrateSaving.value = false
   }
@@ -985,7 +986,7 @@ async function loadExportDatabasesForTarget(target) {
     }
   } catch (err) {
     if (!exportDatabases.value.length) {
-      ElMessage.error(err.message || '加载目标库列表失败')
+      showRequestError(err, '加载目标库列表失败')
     }
   } finally {
     loadingExportDatabases.value = false
@@ -1236,7 +1237,7 @@ async function submitCreateView() {
       rightTab.value = 'browse'
     }
   } catch (err) {
-    ElMessage.error(err.message || '创建失败')
+    showRequestError(err, '创建失败')
   } finally {
     createViewSaving.value = false
   }
@@ -1676,7 +1677,7 @@ async function loadViews() {
   } catch (err) {
     if (seq !== viewsLoadSeq) return
     // Keep previous views so a failed refresh cannot blank the whole browse page.
-    ElMessage.error(err.message || '加载配置失败')
+    showRequestError(err, '加载配置失败')
   } finally {
     if (seq === viewsLoadSeq) loadingViews.value = false
   }
@@ -1722,7 +1723,7 @@ async function loadRows({ append = false } = {}) {
       applyAppendedRows(pageRows, more, cursor)
     } catch (err) {
       if (seq !== rowsLoadSeq) return
-      ElMessage.error(err.message || '加载数据失败')
+      showRequestError(err, '加载数据失败')
     } finally {
       if (seq === rowsLoadSeq) loadingMore.value = false
     }
@@ -1774,7 +1775,7 @@ async function loadRows({ append = false } = {}) {
   } catch (err) {
     if (seq !== rowsLoadSeq) return
     // Keep last good rows/columns on transient refresh failures.
-    ElMessage.error(err.message || '加载数据失败')
+    showRequestError(err, '加载数据失败')
   } finally {
     if (seq === rowsLoadSeq) {
       loadingRows.value = false

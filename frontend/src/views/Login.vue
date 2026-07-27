@@ -13,6 +13,7 @@ import { APP_NAME } from '@/config/app'
 import { REMEMBER_USERNAME_KEY } from '@/config/app'
 
 import { useAuthStore } from '@/stores/auth'
+import { showRequestError } from '@/utils/showRequestError'
 
 
 
@@ -92,7 +93,7 @@ async function onSubmit() {
 
   } catch (err) {
 
-    ElMessage.error(err.message || '登录失败')
+    showRequestError(err, '登录失败')
 
   } finally {
 

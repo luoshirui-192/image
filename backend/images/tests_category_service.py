@@ -7,15 +7,7 @@ from django.utils import timezone
 
 from images.category_service import DEFAULT_CATEGORY_NAMES, ensure_default_category, resolve_category_id
 from images.models import ImageCategory
-
-SQLITE_TABLES = """
-CREATE TABLE IF NOT EXISTS image_category (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    category_name VARCHAR(100) NOT NULL DEFAULT '',
-    sort INTEGER NOT NULL DEFAULT 0,
-    create_time DATETIME NULL
-);
-"""
+from tests_support.sqlite_schema import IMAGE_CATEGORY_TABLE as SQLITE_TABLES
 
 
 class DefaultCategoryServiceTests(TestCase):

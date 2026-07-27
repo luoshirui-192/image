@@ -32,6 +32,7 @@ import BackgroundExportDock from '@/components/BackgroundExportDock.vue'
 import FingerprintImportDock from '@/components/FingerprintImportDock.vue'
 import { useBackgroundExportStore } from '@/stores/backgroundExport'
 import { useFingerprintImportStore } from '@/stores/fingerprintImport'
+import { showRequestError } from '@/utils/showRequestError'
 
 const router = useRouter()
 const route = useRoute()
@@ -89,7 +90,7 @@ async function loadSources({ withStats = true } = {}) {
       runOptions.sourceId = sources.value[0].id
     }
   } catch (err) {
-    ElMessage.error(err.message || '加载迁移配置失败')
+    showRequestError(err, '加载迁移配置失败')
   } finally {
     loadingSources.value = false
   }
@@ -347,7 +348,7 @@ async function startFullMigration() {
     await loadJobHistory()
   } catch (err) {
     running.value = false
-    ElMessage.error(err.message || '创建任务失败')
+    showRequestError(err, '创建任务失败')
   }
 }
 
@@ -361,7 +362,7 @@ async function cancelActiveJob() {
     ElMessage.success('迁移任务已取消')
     await loadJobHistory()
   } catch (err) {
-    ElMessage.error(err.message || '取消失败')
+    showRequestError(err, '取消失败')
   }
 }
 
@@ -377,7 +378,7 @@ async function pauseActiveJob() {
     ElMessage.success(res.message || '已请求暂停')
     await loadJobHistory()
   } catch (err) {
-    ElMessage.error(err.message || '暂停失败')
+    showRequestError(err, '暂停失败')
   }
 }
 
@@ -391,7 +392,7 @@ async function resumePausedJob(job) {
     startJobPolling(job.id)
     await loadJobHistory()
   } catch (err) {
-    ElMessage.error(err.message || '继续失败')
+    showRequestError(err, '继续失败')
   }
 }
 
@@ -452,7 +453,7 @@ async function retryFailedJob(job) {
     startJobPolling(res.data.id)
     await loadJobHistory()
   } catch (err) {
-    ElMessage.error(err.message || '创建重试任务失败')
+    showRequestError(err, '创建重试任务失败')
   }
 }
 
@@ -472,7 +473,7 @@ function downloadJobErrors(job) {
       link.click()
       URL.revokeObjectURL(link.href)
     })
-    .catch((err) => ElMessage.error(err.message || '导出失败'))
+    .catch((err) => showRequestError(err, '导出失败'))
 }
 
 async function runGlobalDataSync() {
@@ -481,7 +482,7 @@ async function runGlobalDataSync() {
     const res = await runGlobalDataSyncApi({ batch_size: 200 })
     ElMessage.success(res.message || '全局数据同步完成')
   } catch (err) {
-    ElMessage.error(err.message || '全局数据同步失败')
+    showRequestError(err, '全局数据同步失败')
   } finally {
     globalSyncLoading.value = false
   }
@@ -506,7 +507,7 @@ async function executeMigration() {
     await loadSources()
   } catch (err) {
     if (err.data) runResult.value = err.data
-    ElMessage.error(err.message || '执行失败')
+    showRequestError(err, '执行失败')
   } finally {
     running.value = false
   }

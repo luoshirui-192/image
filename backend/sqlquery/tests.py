@@ -9,24 +9,8 @@ from rest_framework.test import APIClient
 from sqlquery.cell_format import serialize_sql_cell
 from sqlquery.exceptions import SqlExecutionError
 from sqlquery.services import execute_select_sql, resolve_sql_connection_context
+from tests_support.sqlite_schema import CORE_SQLITE_TABLES as SQLITE_TABLES
 from users.models import SysUser
-
-SQLITE_TABLES = """
-CREATE TABLE IF NOT EXISTS sys_user (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    password VARCHAR(128) NOT NULL,
-    username VARCHAR(100) NOT NULL UNIQUE,
-    role VARCHAR(20) NOT NULL DEFAULT 'user',
-    status SMALLINT NOT NULL DEFAULT 1,
-    create_time DATETIME NULL
-);
-CREATE TABLE IF NOT EXISTS image_info (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    image_name VARCHAR(255) NOT NULL DEFAULT '',
-    image_path VARCHAR(500) NOT NULL DEFAULT '',
-    is_delete SMALLINT NOT NULL DEFAULT 0
-);
-"""
 
 
 class SqlQueryServiceTestCase(TestCase):

@@ -1,7 +1,8 @@
 <script setup>
 import { computed, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { fetchStorageStatsApi, formatFileSize } from '@/api/logs'
+import { fetchStorageStatsApi } from '@/api/logs'
+import { formatFileSize } from '@/utils/format'
 import { getSystemConfigApi, updateSystemConfigApi } from '@/api/config'
 import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 

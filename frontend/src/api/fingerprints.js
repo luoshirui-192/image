@@ -1,9 +1,5 @@
 import request from './request'
 
-export function fetchFingerprintMetaApi() {
-  return request.get('/fingerprints/meta/')
-}
-
 /** Business-table browse: t_match_result_image + T_CAP_FP_DATA + T_FEATURE_RECORD */
 export function fetchFingerprintBizMetaApi(params = {}) {
   return request.get('/fingerprints/biz/meta/', { params })
@@ -51,22 +47,6 @@ export function updateFingerprintLayerTypeApi(id, data) {
   return request.patch(`/fingerprints/layer-types/${id}/`, data)
 }
 
-export function fetchFingerprintPairsApi(params = {}) {
-  return request.get('/fingerprints/pairs/', { params })
-}
-
-export function fetchFingerprintPairApi(id) {
-  return request.get(`/fingerprints/pairs/${id}/`)
-}
-
-export function deleteFingerprintPairApi(id) {
-  return request.delete(`/fingerprints/pairs/${id}/`)
-}
-
-export function fetchFingerprintCompareApi(id, params = {}) {
-  return request.get(`/fingerprints/pairs/${id}/compare/`, { params })
-}
-
 export function importFingerprintZipApi(
   file,
   {
@@ -106,18 +86,4 @@ export function fetchFingerprintImportJobsApi(params = {}) {
 
 export function cancelFingerprintImportJobApi(id) {
   return request.post(`/fingerprints/import-jobs/${id}/`, { action: 'cancel' })
-}
-
-export function importFingerprintFilesApi(
-  files,
-  { batch_name, match_score, tags, algo_version, category_id } = {},
-) {
-  const form = new FormData()
-  files.forEach((f) => form.append('files', f))
-  if (batch_name) form.append('batch_name', batch_name)
-  if (match_score != null && match_score !== '') form.append('match_score', String(match_score))
-  if (tags) form.append('tags', tags)
-  if (algo_version) form.append('algo_version', algo_version)
-  if (category_id != null) form.append('category_id', String(category_id))
-  return request.post('/fingerprints/pairs/import/', form, { timeout: 300000 })
 }

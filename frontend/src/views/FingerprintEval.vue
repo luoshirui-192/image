@@ -9,6 +9,7 @@ import {
 } from '@/api/fingerprints'
 import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 import {
+import { showRequestError } from '@/utils/showRequestError'
   connectionKey as connectionKeyOf,
   connectionQueryParams,
   pickPreferredConnection,
@@ -88,7 +89,7 @@ async function loadConnections() {
       connectionKey.value = connectionKeyOf(preferred)
     }
   } catch (err) {
-    ElMessage.error(err.message || '加载数据库连接失败')
+    showRequestError(err, '加载数据库连接失败')
   }
 }
 
@@ -125,7 +126,7 @@ async function loadMeta() {
     }
   } catch (err) {
     if (seq !== metaLoadSeq) return
-    ElMessage.error(err.message || '加载评测元数据失败')
+    showRequestError(err, '加载评测元数据失败')
   } finally {
     if (seq === metaLoadSeq) loadingMeta.value = false
   }
@@ -158,7 +159,7 @@ async function loadReport({ quiet = false } = {}) {
   } catch (err) {
     if (seq !== reportLoadSeq) return
     // Keep last good report on transient errors (visibility / race refreshes).
-    if (!quiet) ElMessage.error(err.message || '计算评测报告失败')
+    if (!quiet) showRequestError(err, '计算评测报告失败')
   } finally {
     if (seq === reportLoadSeq) loadingReport.value = false
   }

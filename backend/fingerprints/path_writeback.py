@@ -22,6 +22,7 @@ from django.utils import timezone
 
 from images.blob_migration_service import BlobMigrationError, validate_identifier
 from images.external_db_service import ExternalDbError, alias_from_connection_config, db_alias_session, external_alias
+from utils.path_builder import normalize_relative_path as _normalize_storage_path
 
 logger = logging.getLogger(__name__)
 
@@ -155,16 +156,13 @@ def _as_blob_path(path: str) -> bytes:
 
 
 def normalize_relative_path(path: str | None, *, expect_prefix: str | None = None) -> str:
-    """Strip accidental bucket/prefix noise; keep upload/... or templates/..."""
-    p = str(path or "").strip().replace("\\", "/")
-    if not p:
-        return ""
-    while p.startswith("/"):
-        p = p[1:]
-    for junk in ("data/image_db/", "image_db/", "minio/", "bucket/"):
-        if p.lower().startswith(junk):
-            p = p[len(junk) :]
-    if expect_prefix and not p.startswith(expect_prefix):
+    """Strip accidental bucket/prefix noise; keep upload/... or templates/...
+
+    ``expect_prefix`` is accepted for call-site clarity; paths that already include
+    date folders under the prefix are returned as-is after junk stripping.
+    """
+    p = _normalize_storage_path(str(path or "").strip())
+    if expect_prefix and p and not p.startswith(expect_prefix):
         # still accept; callers may pass full relative paths with date folders
         pass
     return p

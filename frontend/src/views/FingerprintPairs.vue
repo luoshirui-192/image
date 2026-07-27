@@ -29,6 +29,7 @@ import {
   pairSqlKey,
 } from '@/utils/fingerprintSqlBrowse'
 import {
+import { showRequestError } from '@/utils/showRequestError'
   connectionKey,
   connectionQueryParams,
   pickPreferredConnection,
@@ -62,7 +63,6 @@ const treeRef = ref(null)
 const importDialogVisible = ref(false)
 
 const wbConnections = ref([])
-const wbConnectionKey = ref('')
 
 /** Browse connection (same catalog as writeback). */
 const browseConnectionKey = ref('')
@@ -89,13 +89,12 @@ async function ensureConnections({ force = false } = {}) {
       suppressConnWatch = true
       try {
         if (!browseConnectionKey.value) browseConnectionKey.value = key
-        if (!wbConnectionKey.value) wbConnectionKey.value = key
       } finally {
         suppressConnWatch = false
       }
     }
   } catch (err) {
-    ElMessage.error(err.message || '加载数据库连接失败')
+    showRequestError(err, '加载数据库连接失败')
   } finally {
     browseLoading.value = false
   }
@@ -291,7 +290,7 @@ async function loadMeta() {
     meta.dataset_codes = res.data.dataset_codes || []
     meta.layer_types = res.data.layer_types || []
   } catch (err) {
-    ElMessage.error(err.message || '加载业务表元数据失败')
+    showRequestError(err, '加载业务表元数据失败')
   }
 }
 
@@ -340,7 +339,7 @@ async function loadSamples() {
     }
   } catch (err) {
     if (seq !== samplesLoadSeq) return
-    ElMessage.error(err.message || (isPairMode.value ? '加载配对列表失败' : '加载样本列表失败'))
+    showRequestError(err, isPairMode.value ? '加载配对列表失败' : '加载样本列表失败')
   } finally {
     if (seq === samplesLoadSeq) loading.value = false
   }
@@ -383,7 +382,7 @@ async function runBrowseSql() {
       ElMessage.success(sqlHint.value)
     }
   } catch (err) {
-    ElMessage.error(err.message || 'SQL 执行失败')
+    showRequestError(err, 'SQL 执行失败')
   } finally {
     sqlRunning.value = false
     loading.value = false
@@ -669,7 +668,7 @@ async function loadView() {
         urls.push(URL.createObjectURL(blob))
       } catch (err) {
         urls.push('')
-        ElMessage.error(err.message || `加载图像失败: ${path}`)
+        showRequestError(err, `加载图像失败: ${path}`)
       }
     }
     panelUrls.value = urls
@@ -677,7 +676,7 @@ async function loadView() {
     await drawPanels()
   } catch (err) {
     clearView()
-    ElMessage.error(err.message || (isPairMode.value ? '加载配对失败' : '加载样本失败'))
+    showRequestError(err, isPairMode.value ? '加载配对失败' : '加载样本失败')
   } finally {
     compareLoading.value = false
   }
@@ -864,7 +863,7 @@ async function loadTypeRows() {
     const res = await fetchFingerprintLayerTypesApi({ enabled_only: '0' })
     typeRows.value = res.data.items || []
   } catch (err) {
-    ElMessage.error(err.message || '加载特征类型失败')
+    showRequestError(err, '加载特征类型失败')
   } finally {
     typeLoading.value = false
   }
@@ -884,7 +883,7 @@ async function submitNewType() {
     await loadTypeRows()
     await loadMeta()
   } catch (err) {
-    ElMessage.error(err.message || '新增失败')
+    showRequestError(err, '新增失败')
   }
 }
 
@@ -894,7 +893,7 @@ async function toggleTypeEnabled(row) {
     await loadTypeRows()
     await loadMeta()
   } catch (err) {
-    ElMessage.error(err.message || '更新失败')
+    showRequestError(err, '更新失败')
   }
 }
 

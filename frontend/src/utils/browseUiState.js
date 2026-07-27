@@ -16,7 +16,3 @@ export function writeBrowseUiState(state) {
     // ignore quota / private mode
   }
 }
-
-export function clearBrowseUiState() {
-  sessionStorage.removeItem(BROWSE_UI_KEY)
-}

@@ -538,6 +538,8 @@ def _recover_image_bytes(content: bytes) -> bytes:
 
 def _as_storage_path_text(value: Any) -> str | None:
     """Detect path-export style values such as ``upload/20260630/1/uuid.jpg``."""
+    from utils.path_builder import normalize_relative_path
+
     if value is None:
         return None
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -559,11 +561,15 @@ def _as_storage_path_text(value: Any) -> str | None:
     if not text or len(text) > 500:
         return None
     if text.startswith(("upload/", "templates/")):
-        return text
+        return normalize_relative_path(text)
     for marker in ("/upload/", "/templates/"):
         idx = text.find(marker)
         if idx >= 0:
-            return text[idx + 1 :]
+            return normalize_relative_path(text[idx + 1 :])
+    # data/image_db/upload/... → upload/...
+    normalized = normalize_relative_path(text)
+    if normalized.startswith(("upload/", "templates/")):
+        return normalized
     return None
 
 

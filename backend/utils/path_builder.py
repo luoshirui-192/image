@@ -173,8 +173,18 @@ def ensure_parent_dir(upload_root: Path | str, relative_path: str) -> Path:
 
 
 def normalize_relative_path(path: str) -> str:
-    """Normalize slashes and strip leading slash."""
-    return path.replace("\\", "/").lstrip("/")
+    """Normalize slashes, strip leading slash, and drop accidental bucket/prefix noise."""
+    p = str(path or "").replace("\\", "/").lstrip("/")
+    if not p:
+        return ""
+    # Common accidental prefixes from MinIO keys / copied absolute-ish paths.
+    lowered = p.lower()
+    for junk in ("data/image_db/", "image_db/", "minio/", "bucket/"):
+        if lowered.startswith(junk):
+            p = p[len(junk) :]
+            lowered = p.lower()
+            break
+    return p
 
 
 def is_valid_relative_path(relative_path: str) -> bool:

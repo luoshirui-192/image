@@ -10,7 +10,6 @@ const UploadView = () => import('@/views/Upload.vue')
 const BlobMigrateView = () => import('@/views/BlobMigrate.vue')
 const BlobTableViewsView = () => import('@/views/BlobTableViews.vue')
 const FingerprintPairsView = () => import('@/views/FingerprintPairs.vue')
-const FingerprintCompareView = () => import('@/views/FingerprintCompare.vue')
 const FingerprintEvalView = () => import('@/views/FingerprintEval.vue')
 const CategoryManageView = () => import('@/views/CategoryManage.vue')
 const LogsView = () => import('@/views/Logs.vue')
@@ -51,12 +50,14 @@ function buildChildRoutes() {
     {
       path: 'fingerprint-pairs/:id/compare',
       name: 'fingerprint-compare',
-      component: FingerprintCompareView,
+      redirect: (to) => ({
+        name: 'fingerprint-pairs',
+        query: { id: String(to.params.id || ''), ...to.query },
+      }),
       meta: {
         title: '指纹对比详情',
         hiddenInMenu: true,
       },
-      props: true,
     },
     {
       path: 'fingerprint-eval',

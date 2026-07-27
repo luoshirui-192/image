@@ -73,11 +73,6 @@ export async function fetchImageBlob(path, { id, thumb = true, signal } = {}) {
   }
 }
 
-export function clearImageBlobCache() {
-  blobCache.clear()
-  inflight.clear()
-}
-
 export function listCategoriesApi() {
   return request.get('/images/categories/')
 }
@@ -99,10 +94,6 @@ export function uploadImagesApi(files, { categoryId, tags, overwrite = false } =
 
 export function listBlobMigrationDatabasesApi() {
   return request.get('/images/blob-migration/databases/')
-}
-
-export function discoverBlobTablesApi({ dbAlias = 'default' } = {}) {
-  return request.post('/images/blob-migration/discover/', { db_alias: dbAlias }, { timeout: 120000 })
 }
 
 export function listBlobMigrationSourcesApi({ includeStats = false } = {}) {
@@ -352,61 +343,6 @@ export function pauseBlobSimulatedExportJobApi(jobId) {
 
 export function resumeBlobSimulatedExportJobApi(jobId) {
   return request.post(`/images/blob-browse/export-jobs/${jobId}/`, { action: 'resume' })
-}
-
-export function getBlobTableViewSchemaApi(id) {
-  return request.get(`/images/blob-migration/table-views/${id}/schema/`)
-}
-
-export function previewBlobTableViewSchemaApi(data) {
-  return request.post('/images/blob-migration/table-views/preview-schema/', data)
-}
-
-export function formatFileSize(bytes) {
-  if (bytes == null || bytes === 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let size = Number(bytes)
-  let i = 0
-  while (size >= 1024 && i < units.length - 1) {
-    size /= 1024
-    i += 1
-  }
-  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
-}
-
-export function formatDateTime(value) {
-  if (!value) return '—'
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return String(value)
-  return d.toLocaleString('zh-CN', { hour12: false })
-}
-
-export function formatDeletionRemaining(deletionInfo) {
-  if (!deletionInfo) return '—'
-  if (deletionInfo.expired) return '已超过保留期'
-  const days = deletionInfo.days_remaining ?? 0
-  const hours = deletionInfo.hours_remaining ?? 0
-  if (days > 0) {
-    return hours > 0 ? `${days} 天 ${hours} 小时` : `${days} 天`
-  }
-  if (hours > 0) return `${hours} 小时`
-  return '不足 1 小时'
-}
-
-export function getImageApi(id) {
-  return request.get(`/images/${id}/`)
-}
-
-export function updateImageApi(id, data) {
-  return request.patch(`/images/${id}/`, data)
-}
-
-export function deleteImageApi(id) {
-  return request.delete(`/images/${id}/`)
-}
-
-export function restoreImageApi(id) {
-  return request.post(`/images/${id}/restore/`)
 }
 
 export function createCategoryApi(data) {

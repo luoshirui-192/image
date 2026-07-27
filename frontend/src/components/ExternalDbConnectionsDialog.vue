@@ -7,6 +7,7 @@ import { onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { callWithRetry } from '@/utils/callWithRetry'
 import {
+import { showRequestError } from '@/utils/showRequestError'
   createExternalDbConnectionApi,
   deleteExternalDbConnectionApi,
   listExternalDbConnectionsApi,
@@ -89,7 +90,7 @@ async function saveConnection() {
     await loadConnections()
     emit('changed')
   } catch (err) {
-    ElMessage.error(err.message || '保存失败')
+    showRequestError(err, '保存失败')
   } finally {
     connSaving.value = false
   }
@@ -113,7 +114,7 @@ async function testNewConnection() {
     })
     ElMessage.success(res.message || '连接成功')
   } catch (err) {
-    ElMessage.error(err.message || '连接失败')
+    showRequestError(err, '连接失败')
   } finally {
     connTesting.value = false
   }
@@ -126,7 +127,7 @@ async function testSavedConnection(row) {
     ElMessage.success(res.message || '连接成功')
     await loadConnections()
   } catch (err) {
-    ElMessage.error(err.message || '连接失败')
+    showRequestError(err, '连接失败')
     await loadConnections()
   } finally {
     connTesting.value = false
@@ -140,7 +141,7 @@ async function syncConnectionTableViews(row) {
     ElMessage.success(res.message || '表视图同步完成')
     emit('changed')
   } catch (err) {
-    ElMessage.error(err.message || '表视图同步失败')
+    showRequestError(err, '表视图同步失败')
   } finally {
     provisionConnId.value = null
   }

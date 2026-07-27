@@ -1,0 +1,139 @@
+"""Shared SQLite DDL snippets for Django TestCase setUpClass scripts.
+
+Use IF NOT EXISTS so suites can compose CORE + feature extras safely.
+"""
+
+SYS_USER_TABLE = """
+CREATE TABLE IF NOT EXISTS sys_user (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    password VARCHAR(128) NOT NULL,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    role VARCHAR(20) NOT NULL DEFAULT 'user',
+    status SMALLINT NOT NULL DEFAULT 1,
+    create_time DATETIME NULL
+);
+"""
+
+IMAGE_CATEGORY_TABLE = """
+CREATE TABLE IF NOT EXISTS image_category (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_name VARCHAR(100) NOT NULL DEFAULT '',
+    sort INTEGER NOT NULL DEFAULT 0,
+    create_time DATETIME NULL
+);
+"""
+
+IMAGE_INFO_TABLE = """
+CREATE TABLE IF NOT EXISTS image_info (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    image_name VARCHAR(255) NOT NULL DEFAULT '',
+    image_path VARCHAR(500) NOT NULL DEFAULT '',
+    image_width INTEGER NOT NULL DEFAULT 0,
+    image_height INTEGER NOT NULL DEFAULT 0,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    file_suffix VARCHAR(20) NOT NULL DEFAULT '',
+    file_hash VARCHAR(64) NOT NULL DEFAULT '',
+    upload_time DATETIME NOT NULL,
+    update_time DATETIME NOT NULL,
+    upload_user VARCHAR(100) NOT NULL DEFAULT '',
+    is_delete SMALLINT NOT NULL DEFAULT 0,
+    category_id INTEGER NULL,
+    tags VARCHAR(500) NOT NULL DEFAULT ''
+);
+"""
+
+OPERATE_LOG_TABLE = """
+CREATE TABLE IF NOT EXISTS operate_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NULL,
+    username VARCHAR(100) NOT NULL DEFAULT '',
+    action_type VARCHAR(20) NOT NULL DEFAULT '',
+    sql_content TEXT NULL,
+    detail VARCHAR(500) NOT NULL DEFAULT '',
+    ip VARCHAR(50) NOT NULL DEFAULT '',
+    create_time DATETIME NULL
+);
+"""
+
+CORE_SQLITE_TABLES = SYS_USER_TABLE + IMAGE_CATEGORY_TABLE + IMAGE_INFO_TABLE
+
+FINGERPRINT_EXTRA_TABLES = """
+CREATE TABLE IF NOT EXISTS fingerprint_layer_type (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    layer_key VARCHAR(64) NOT NULL UNIQUE,
+    label VARCHAR(100) NOT NULL DEFAULT '',
+    color VARCHAR(20) NOT NULL DEFAULT '#e53935',
+    suffixes VARCHAR(200) NOT NULL DEFAULT '',
+    default_algo_name VARCHAR(100) NOT NULL DEFAULT 'default',
+    default_setlen INTEGER NOT NULL DEFAULT 0,
+    default_setang INTEGER NOT NULL DEFAULT 256,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    enabled SMALLINT NOT NULL DEFAULT 1,
+    create_time DATETIME NULL
+);
+CREATE TABLE IF NOT EXISTS fingerprint_pair (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_name VARCHAR(200) NOT NULL DEFAULT '',
+    finger_position VARCHAR(40) NOT NULL DEFAULT '',
+    match_score REAL NULL,
+    left_image_id INTEGER NOT NULL DEFAULT 0,
+    right_image_id INTEGER NOT NULL DEFAULT 0,
+    left_person_id VARCHAR(64) NOT NULL DEFAULT '',
+    right_person_id VARCHAR(64) NOT NULL DEFAULT '',
+    left_image_name VARCHAR(255) NOT NULL DEFAULT '',
+    right_image_name VARCHAR(255) NOT NULL DEFAULT '',
+    source_dir VARCHAR(500) NOT NULL DEFAULT '',
+    upload_user VARCHAR(100) NOT NULL DEFAULT '',
+    tags VARCHAR(500) NOT NULL DEFAULT '',
+    is_delete SMALLINT NOT NULL DEFAULT 0,
+    create_time DATETIME NULL,
+    update_time DATETIME NULL
+);
+CREATE TABLE IF NOT EXISTS fingerprint_feature_layer (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair_id INTEGER NOT NULL,
+    side VARCHAR(10) NOT NULL DEFAULT 'left',
+    layer_type VARCHAR(64) NOT NULL DEFAULT '',
+    algo_name VARCHAR(100) NOT NULL DEFAULT 'default',
+    algo_version VARCHAR(64) NOT NULL DEFAULT '1.0',
+    template_path VARCHAR(500) NOT NULL DEFAULT '',
+    file_suffix VARCHAR(40) NOT NULL DEFAULT '',
+    file_hash VARCHAR(64) NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0,
+    setlen INTEGER NOT NULL DEFAULT 0,
+    setang INTEGER NOT NULL DEFAULT 256,
+    minutiae_count INTEGER NOT NULL DEFAULT 0,
+    minutiae_json TEXT,
+    create_time DATETIME NULL
+);
+CREATE TABLE IF NOT EXISTS fingerprint_import_job (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    zip_path VARCHAR(500) NOT NULL DEFAULT '',
+    zip_name VARCHAR(255) NOT NULL DEFAULT '',
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    algo_version VARCHAR(64) NOT NULL DEFAULT '1.0',
+    tags VARCHAR(500) NOT NULL DEFAULT '',
+    skip_existing SMALLINT NOT NULL DEFAULT 1,
+    category_id INTEGER NULL,
+    total_estimate INTEGER NOT NULL DEFAULT 0,
+    processed INTEGER NOT NULL DEFAULT 0,
+    succeeded INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    cancel_requested SMALLINT NOT NULL DEFAULT 0,
+    message VARCHAR(500) NOT NULL DEFAULT '',
+    last_error VARCHAR(500) NOT NULL DEFAULT '',
+    result_json TEXT NULL,
+    created_by VARCHAR(100) NOT NULL DEFAULT '',
+    create_time DATETIME NULL,
+    started_at DATETIME NULL,
+    finished_at DATETIME NULL,
+    updated_at DATETIME NULL
+);
+"""
+
+FINGERPRINT_SQLITE_TABLES = CORE_SQLITE_TABLES + FINGERPRINT_EXTRA_TABLES
+
+CORE_WITH_LOG_SQLITE_TABLES = CORE_SQLITE_TABLES + OPERATE_LOG_TABLE
+
+AUTH_SQLITE_TABLES = SYS_USER_TABLE + OPERATE_LOG_TABLE

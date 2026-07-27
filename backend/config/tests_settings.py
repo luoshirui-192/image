@@ -9,17 +9,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from users.models import SysUser
-
-SQLITE_TABLES = """
-CREATE TABLE IF NOT EXISTS sys_user (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    password VARCHAR(128) NOT NULL,
-    username VARCHAR(100) NOT NULL UNIQUE,
-    role VARCHAR(20) NOT NULL DEFAULT 'user',
-    status SMALLINT NOT NULL DEFAULT 1,
-    create_time DATETIME NULL
-);
-"""
+from tests_support.sqlite_schema import SYS_USER_TABLE as SQLITE_TABLES
 
 
 class SystemConfigAPITestCase(TestCase):

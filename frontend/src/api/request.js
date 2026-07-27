@@ -41,13 +41,13 @@ request.interceptors.response.use(
         const err = new Error(payload.message || '请求失败')
         err.code = payload.code
         err.data = payload.data
+        // Business errors: let the caller toast (may be quiet / custom UX).
         return Promise.reject(err)
       }
       return payload
     }
     return payload
-  },
-  async (error) => {
+  },  async (error) => {
     const auth = useAuthStore()
     const original = error.config
     const status = error.response?.status
@@ -72,12 +72,13 @@ request.interceptors.response.use(
       error.response?.data?.message ||
       error.message ||
       '网络请求失败'
-    if (status !== 401 && !error.config?.skipGlobalError && suppressGlobalErrorDepth === 0) {
-      ElMessage.error(message)
-    }
     const err = new Error(message)
     err.data = error.response?.data?.data
     err.code = error.response?.data?.code
+    if (status !== 401 && !error.config?.skipGlobalError && suppressGlobalErrorDepth === 0) {
+      ElMessage.error(message)
+      err.__globalToastShown = true
+    }
     return Promise.reject(err)
   },
 )

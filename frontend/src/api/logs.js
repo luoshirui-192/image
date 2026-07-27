@@ -25,18 +25,3 @@ export function listLogsApi(params = {}) {
 export function fetchStorageStatsApi() {
   return request.get('/logs/stats/')
 }
-
-export function formatDateTime(value) {
-  if (!value) return '-'
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return value
-  return d.toLocaleString('zh-CN', { hour12: false })
-}
-
-export function formatFileSize(bytes) {
-  const n = Number(bytes) || 0
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
-}

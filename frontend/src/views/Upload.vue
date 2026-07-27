@@ -3,7 +3,9 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import ImagePreview from '@/components/ImagePreview.vue'
-import { formatFileSize, uploadImagesApi } from '@/api/images'
+import { uploadImagesApi } from '@/api/images'
+import { formatFileSize } from '@/utils/format'
+import { showRequestError } from '@/utils/showRequestError'
 
 const ACCEPT_TYPES = '.jpg,.jpeg,.png,.gif,.webp,.bmp'
 const MAX_SIZE_MB = 20
@@ -113,7 +115,7 @@ async function submitUpload(overwrite = false) {
     if (err.data) {
       results.value = err.data
     }
-    ElMessage.error(err.message || '上传失败')
+    showRequestError(err, '上传失败')
   } finally {
     uploading.value = false
     setTimeout(() => {

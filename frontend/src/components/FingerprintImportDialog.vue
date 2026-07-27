@@ -8,6 +8,7 @@ import { ElMessage } from 'element-plus'
 import { listBlobCatalogConnectionsApi } from '@/api/images'
 import { importFingerprintZipApi } from '@/api/fingerprints'
 import { connectionKey, pickPreferredConnection } from '@/utils/dbConnection'
+import { showRequestError } from '@/utils/showRequestError'
 
 const visible = defineModel({ type: Boolean, default: false })
 const emit = defineEmits(['started'])
@@ -43,7 +44,7 @@ async function ensureConnections() {
       wbConnectionKey.value = connectionKey(fallback)
     }
   } catch (err) {
-    ElMessage.error(err.message || '加载数据库连接失败')
+    showRequestError(err, '加载数据库连接失败')
   } finally {
     wbLoading.value = false
   }
@@ -116,7 +117,7 @@ async function submitImport() {
     visible.value = false
     emit('started', job)
   } catch (err) {
-    ElMessage.error(err.message || '启动导入失败')
+    showRequestError(err, '启动导入失败')
   } finally {
     submitting.value = false
   }
