@@ -1,7 +1,7 @@
 <script setup>
 /**
  * 任务台：BLOB 迁移 / 路径导出 / 指纹 ZIP 导入 三类后台任务。
- * 扫表建配置、一键迁移 → 数据库模拟；旧库连接 → 模拟页「管理连接」。
+ * 扫表建配置、一键迁移 → 模拟数据库；旧库连接 → 模拟页「管理连接」。
  */
 import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -575,18 +575,18 @@ onUnmounted(() => {
           <h2 class="page-title">任务台</h2>
           <p class="page-desc">
             集中查看三类后台任务：BLOB 迁移、路径导出、指纹 ZIP 导入。
-            迁移与导出全局串行排队（完成/取消/删除后自动开始下一个，暂停不会开下一个）；扫表建配置请用「数据库模拟」。
+            迁移与导出全局串行排队（完成/取消/删除后自动开始下一个，暂停不会开下一个）；扫表建配置请用「模拟数据库」。
           </p>
         </div>
         <div class="page-actions">
           <el-button @click="connDialogVisible = true">管理旧库连接</el-button>
-          <el-button type="primary" plain @click="router.push('/blob-browse')">打开数据库模拟</el-button>
+          <el-button type="primary" plain @click="router.push('/blob-browse')">打开模拟数据库</el-button>
           <el-button plain @click="router.push('/fingerprint-pairs')">打开指纹浏览</el-button>
         </div>
       </div>
 
       <el-alert
-        title="部署更新 backend/scheduler 前请先暂停进行中的 BLOB 迁移/导出任务。配置与启迁在「数据库模拟」完成。"
+        title="部署更新 backend/scheduler 前请先暂停进行中的 BLOB 迁移/导出任务。配置与启迁在「模拟数据库」完成。"
         type="info"
         show-icon
         :closable="false"
@@ -605,7 +605,7 @@ onUnmounted(() => {
             </div>
           </div>
           <p class="field-hint">
-            源由「数据库模拟」创建配置 / 一键迁移时自动生成。此处可选用、预检、全量迁移与查看历史。
+            源由「模拟数据库」创建配置 / 一键迁移时自动生成。此处可选用、预检、全量迁移与查看历史。
           </p>
 
           <h4 class="subsection-title">已保存的迁移源</h4>
@@ -614,7 +614,7 @@ onUnmounted(() => {
             :data="sources"
             size="small"
             border
-            empty-text="暂无迁移源，请先到数据库模拟创建配置并一键迁移"
+            empty-text="暂无迁移源，请先到模拟数据库创建配置并一键迁移"
           >
             <el-table-column prop="id" label="ID" width="60" />
             <el-table-column prop="name" label="名称" min-width="140" />

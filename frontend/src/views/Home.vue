@@ -24,7 +24,7 @@ const roleLabel = computed(() => (auth.isAdmin ? '服务器管理员' : '客户�
 const roleHint = computed(() =>
   auth.isAdmin
     ? '可管理操作日志、系统设置及全部功能'
-    : '可上传图片；在「数据库模拟」扫表建配置与一键迁移，在「任务台」监控任务',
+    : '可上传图片；在「模拟数据库」扫表建配置与一键迁移，在「任务台」监控任务',
 )
 
 function goToMenu(item) {
@@ -58,7 +58,7 @@ usePageDataRefresh(loadHealth, {
           图像路径式数据库管理系统 — 服务器端：原文件存储、路径入库、SQL 查询与运维管理。
         </template>
         <template v-else>
-          图像路径式数据库 — 可上传图片，并在「数据库模拟」中查看远程表、执行 SQL 与预览图片。
+          图像路径式数据库 — 可上传图片，并在「模拟数据库」中查看远程表、执行 SQL 与预览图片。
         </template>
       </p>
     </div>
@@ -100,7 +100,7 @@ usePageDataRefresh(loadHealth, {
           </template>
           <template v-else>
             <p>上传的图片保存在<strong>服务器</strong>，不会留在您的电脑里。</p>
-            <p>使用「数据库模拟」可查看表数据、执行 SQL、预览与下载图片；上传与迁移时可选择或新建分类。</p>
+            <p>使用「模拟数据库」可查看表数据、执行 SQL、预览与下载图片；上传与迁移时可选择或新建分类。</p>
           </template>
         </el-card>
       </el-col>

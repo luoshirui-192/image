@@ -536,6 +536,20 @@ function objectHasMigratableBlob(catalogData, view) {
   return !!(catalogData?.imageColumns?.length || catalogData?.blobColumns?.length || catalogData?.pathColumns?.length)
 }
 
+/** Physical BLOB columns only — path-export varchar columns do not need 一键迁移. */
+function objectHasPhysicalBlob(catalogData, view) {
+  const catalogBlobs = catalogData?.blobColumns
+  if (Array.isArray(catalogBlobs) && catalogBlobs.length) return true
+  if (Array.isArray(catalogData?.imageColumns)) {
+    if (catalogData.imageColumns.some((c) => (c?.role || c?.data_type || '') === 'blob' || /blob/i.test(String(c?.data_type || '')))) {
+      return true
+    }
+  }
+  // No catalog detail: do not treat configured path columns as migratable BLOBs.
+  if (catalogData?.pathColumns?.length && !catalogData?.blobColumns?.length) return false
+  return blobColumnsFromView(view).length > 0 && !catalogData?.pathColumns?.length
+}
+
 function mapLookupTables(view, catalogData) {
   const tables = []
   const seen = new Set()
@@ -625,12 +639,18 @@ const selectionMigrationTag = computed(() => {
 const selectionMigrationHint = computed(() => selectionMigrationTag.value?.text || '')
 
 const showMigrateForSelection = computed(() => {
-  if (!savedViewForSelection.value) return false
-  if (loadingSelectionMigrationStats.value) return false
+  const view = savedViewForSelection.value
+  const catalog = selectedCatalogObject.value
+  if (!view) return false
+  if (!objectHasPhysicalBlob(catalog, view)) return false
+  if (isMigrationMatchAmbiguous(view, catalog)) return false
   const stats = selectionMigrationStats.value
+  // Avoid flicker: only hide while first load (no stats yet).
+  if (loadingSelectionMigrationStats.value && !stats) return false
   if (!stats) return false
-  if (stats.noSource) return objectHasMigratableBlob(selectedCatalogObject.value, savedViewForSelection.value)
   if (stats.error) return false
+  // First-time migrate: no source yet, but table still has physical BLOB columns.
+  if (stats.noSource) return true
   return Number(stats.pending ?? 0) > 0
 })
 
@@ -759,21 +779,29 @@ async function refreshSelectionMigrationStats() {
   const catalogData = selectedCatalogObject.value
   if (!view) {
     selectionMigrationStats.value = null
+    loadingSelectionMigrationStats.value = false
     return
   }
   const source = findMigrationSourceForView(view, catalogData)
   if (!source?.id) {
     selectionMigrationStats.value = { noSource: true }
+    loadingSelectionMigrationStats.value = false
     return
   }
-  loadingSelectionMigrationStats.value = true
+  const hadStats = !!selectionMigrationStats.value && !selectionMigrationStats.value.noSource
+  if (!hadStats) loadingSelectionMigrationStats.value = true
   try {
     const res = await getBlobMigrationSourceApi(source.id, { includeStats: true })
+    // Ignore stale responses if selection changed mid-flight.
+    if (savedViewForSelection.value?.id !== view.id) return
     selectionMigrationStats.value = res.data?.stats || { error: true }
   } catch {
+    if (savedViewForSelection.value?.id !== view.id) return
     selectionMigrationStats.value = { error: true }
   } finally {
-    loadingSelectionMigrationStats.value = false
+    if (savedViewForSelection.value?.id === view.id) {
+      loadingSelectionMigrationStats.value = false
+    }
   }
 }
 
@@ -1962,10 +1990,13 @@ watch(
 )
 
 watch(savedViewForSelection, (view) => {
+  // Clear immediately so 一键迁移 never flashes with the previous object's stats.
+  selectionMigrationStats.value = null
+  loadingSelectionMigrationStats.value = !!view
   if (view) {
-    refreshSelectionMigrationStats()
+    void refreshSelectionMigrationStats()
   } else {
-    selectionMigrationStats.value = null
+    loadingSelectionMigrationStats.value = false
   }
 })
 
@@ -2057,7 +2088,7 @@ onUnmounted(() => {
 <template>
   <div class="blob-views-page">
     <div class="page-card">
-      <h2 class="page-title">数据库模拟</h2>
+      <h2 class="page-title">模拟数据库</h2>
       <p class="page-desc">
         目录浏览、建配置、一键迁移、SQL 与导出。旧库连接点左侧「连接」管理；任务暂停/继续在「任务台」。
       </p>
@@ -2142,11 +2173,9 @@ onUnmounted(() => {
                 <el-button size="small" type="success" plain @click="openExportDialog">
                   导出到连接
                 </el-button>
-                <el-button size="small" plain @click="refreshActiveView">刷新</el-button>
                 <el-button size="small" type="danger" plain @click="removeView(savedViewForSelection)">
                   删除配置
                 </el-button>
-                <el-button size="small" plain @click="rightTab = 'sql'">SQL 查询</el-button>
               </template>
             </div>
           </div>

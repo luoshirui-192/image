@@ -1025,6 +1025,8 @@ class _PreparedMigrationBatch:
     blob_rows: list[dict]
     pre_skipped: list[MigrationItemResult]
     map_ctx: _MigrationBatchContext | None = None
+    # Count of already-migrated cells jumped over (prefer this over huge pre_skipped lists).
+    pre_skipped_count: int = 0
 
 
 def _cursor_where_parts(
@@ -1082,14 +1084,19 @@ def _fetch_source_pks_cursor(
 
 def _skip_scan_window(batch_size: int) -> int:
     """How many light PKs to scan per round when skipping already-migrated rows."""
-    configured = int(getattr(settings, "BLOB_MIGRATION_SKIP_SCAN_WINDOW", 2000))
+    configured = int(getattr(settings, "BLOB_MIGRATION_SKIP_SCAN_WINDOW", 5000))
     return max(int(batch_size), max(1, configured))
 
 
 def _skip_scan_max_per_batch(batch_size: int) -> int:
-    """Cap light-row examination per batch so skip-only stretches still yield UI progress."""
-    configured = int(getattr(settings, "BLOB_MIGRATION_SKIP_SCAN_MAX_PER_BATCH", 10000))
-    return max(_skip_scan_window(batch_size), max(1, configured))
+    """Soft cap per prepare call; 0 / negative means scan until pending batch is full or table ends.
+
+    Default is uncapped so sparse pending tails are not drip-fed through tiny skip windows.
+    """
+    configured = int(getattr(settings, "BLOB_MIGRATION_SKIP_SCAN_MAX_PER_BATCH", 0))
+    if configured <= 0:
+        return 0
+    return max(_skip_scan_window(batch_size), configured)
 
 
 def _fetch_source_rows_by_pks(
@@ -1175,9 +1182,9 @@ def _prepare_migration_batch(
         map_ctx: _MigrationBatchContext,
         *,
         pending_budget: int | None = None,
-    ) -> tuple[list[dict], list[MigrationItemResult], str, int]:
+    ) -> tuple[list[dict], int, str, int]:
         pending: list[dict] = []
-        pre_skipped: list[MigrationItemResult] = []
+        skipped_cells = 0
         last_pk = ""
         examined = 0
         for light in light_rows:
@@ -1187,21 +1194,14 @@ def _prepare_migration_batch(
             needs_blob = False
             for col in map_ctx.blob_columns:
                 if map_ctx.is_row_column_migrated(source, light, col):
-                    pre_skipped.append(
-                        MigrationItemResult(
-                            source_id=source_id_str,
-                            source_column=col,
-                            success=True,
-                            skipped=True,
-                        )
-                    )
+                    skipped_cells += 1
                 else:
                     needs_blob = True
             if needs_blob:
                 pending.append(light)
                 if pending_budget is not None and len(pending) >= pending_budget:
                     break
-        return pending, pre_skipped, last_pk, examined
+        return pending, skipped_cells, last_pk, examined
 
     def _load_batch(alias: str) -> _PreparedMigrationBatch:
         if not skip_existing:
@@ -1226,7 +1226,7 @@ def _prepare_migration_batch(
         max_examine = _skip_scan_max_per_batch(batch_size)
         cursor_pk = after_pk
         pending_lights: list[dict] = []
-        pre_skipped: list[MigrationItemResult] = []
+        skipped_cells = 0
         migrated_keys: set[tuple[str, str, str]] = set()
         last_pk = after_pk
         rows_scanned = 0
@@ -1234,12 +1234,17 @@ def _prepare_migration_batch(
         blob_columns = _source_blob_columns(source)
         path_mappings = _path_mappings(source)
 
-        while len(pending_lights) < batch_size and rows_scanned < max_examine:
+        while len(pending_lights) < batch_size:
+            if max_examine > 0 and rows_scanned >= max_examine:
+                break
+            fetch_limit = scan_window
+            if max_examine > 0:
+                fetch_limit = min(scan_window, max_examine - rows_scanned)
             light_rows = _fetch_source_pks_cursor(
                 source,
                 conn_alias=alias,
                 after_pk=cursor_pk,
-                limit=min(scan_window, max_examine - rows_scanned),
+                limit=fetch_limit,
             )
             if not light_rows:
                 break
@@ -1252,7 +1257,7 @@ def _prepare_migration_batch(
                 map_ctx,
                 pending_budget=budget,
             )
-            pre_skipped.extend(skipped_chunk)
+            skipped_cells += skipped_chunk
             pending_lights.extend(pending_chunk)
             rows_scanned += examined
             if chunk_last_pk:
@@ -1260,10 +1265,10 @@ def _prepare_migration_batch(
                 cursor_pk = chunk_last_pk
             if len(pending_lights) >= batch_size:
                 break
-            if len(light_rows) < scan_window:
+            if len(light_rows) < fetch_limit:
                 break
 
-        if not pending_lights and not pre_skipped:
+        if not pending_lights and skipped_cells <= 0:
             return _PreparedMigrationBatch(
                 rows_fetched=0, last_pk=after_pk, blob_rows=[], pre_skipped=[]
             )
@@ -1280,7 +1285,8 @@ def _prepare_migration_batch(
             rows_fetched=rows_scanned,
             last_pk=last_pk,
             blob_rows=blob_rows,
-            pre_skipped=pre_skipped,
+            pre_skipped=[],
+            pre_skipped_count=skipped_cells,
             map_ctx=map_ctx,
         )
 
@@ -1619,12 +1625,29 @@ def _run_migration_batch_cursor(
             return batch, items
 
         batch.last_pk = prepared.last_pk
-        for item in prepared.pre_skipped:
-            _record_batch_item(batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap)
+        skipped_n = int(getattr(prepared, "pre_skipped_count", 0) or 0)
+        if skipped_n:
+            # Keep skip counts on the batch result (one-shot / dry-run reporting).
+            batch.skipped += skipped_n
+            batch.processed += skipped_n
+        elif prepared.pre_skipped:
+            for item in prepared.pre_skipped:
+                _record_batch_item(
+                    batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap
+                )
 
-        # Flush pre-skipped counts early so the UI moves before BLOB I/O starts.
-        if job and batch.processed:
-            _update_job_progress(job, batch, last_pk=prepared.last_pk)
+        # Always advance cursor past the scanned window (including pure-skip stretches).
+        # For async jobs with skip_existing, do not treat catch-up skips as progress work —
+        # total_estimate is pending-only so the bar tracks real migrations.
+        if job:
+            if skip_existing:
+                _update_job_progress(
+                    job,
+                    MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk),
+                    last_pk=prepared.last_pk,
+                )
+            elif batch.processed:
+                _update_job_progress(job, batch, last_pk=prepared.last_pk)
             batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
 
         work_units = _build_work_units(

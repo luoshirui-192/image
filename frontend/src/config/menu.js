@@ -29,7 +29,7 @@ export const MENU_ITEMS = [
   {
     path: 'blob-browse',
     name: 'blob-browse',
-    title: '数据库模拟',
+    title: '模拟数据库',
     icon: 'View',
     adminOnly: false,
     description: '目录、连接、建配置、一键迁移、SQL 与导出',

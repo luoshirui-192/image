@@ -782,11 +782,11 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(prepared.last_pk, "8")
             self.assertEqual(len(prepared.blob_rows), 2)
             self.assertEqual({str(r["id"]) for r in prepared.blob_rows}, {"7", "8"})
-            self.assertGreaterEqual(len(prepared.pre_skipped), 6)
+            self.assertGreaterEqual(int(prepared.pre_skipped_count or 0), 6)
 
             second = run_blob_migration(self.source.id, batch_size=2, dry_run=False, skip_existing=True)
             self.assertEqual(second.succeeded, 2)
-            self.assertGreaterEqual(second.skipped, 6)
+            # skip_existing jumps already-migrated rows without counting them as job.skipped work
             self.assertEqual(ImageSourceMap.objects.filter(source_table="legacy_photos").count(), 8)
 
     @override_settings(UPLOAD_ROOT=None)
@@ -971,9 +971,10 @@ class BlobMigrationTestCase(TestCase):
             self.assertEqual(job.total_estimate, 0)
             finished = execute_migration_job(job.id)
             self.assertEqual(finished.status, BlobMigrationJob.STATUS_COMPLETED)
-            # Already migrated: cursor walk skips existing rows (no new successes).
+            # Already migrated: cursor jumps without counting skips as job work.
             self.assertEqual(finished.succeeded, 0)
-            self.assertGreaterEqual(finished.skipped, 1)
+            self.assertEqual(finished.skipped, 0)
+            self.assertIn("没有待处理", finished.message or "")
 
     @override_settings(UPLOAD_ROOT=None, BLOB_MIGRATION_UPLOAD_WORKERS=1)
     def test_migration_job_runs_to_completion(self):

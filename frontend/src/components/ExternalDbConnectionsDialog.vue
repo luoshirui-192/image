@@ -1,7 +1,7 @@
 <script setup>
 /**
  * External DB connection admin (create / test / provision / delete).
- * Used by 数据库模拟; 任务台不再重复此向导。
+ * Used by 模拟数据库; 任务台不再重复此向导。
  */
 import { onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'

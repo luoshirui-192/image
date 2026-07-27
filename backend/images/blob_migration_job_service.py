@@ -465,20 +465,26 @@ def _resolve_final_job_status(job: BlobMigrationJob) -> tuple[str, str]:
     if skipped > 0:
         return (
             BlobMigrationJob.STATUS_COMPLETED,
-            f"未新增迁移：{skipped} 条已有有效图片映射",
+            f"未新增上传：{skipped} 条已有有效图片映射",
         )
     prior = (job.message or "").strip()
     if prior.startswith("源表"):
         return BlobMigrationJob.STATUS_FAILED, prior
+    # skip_existing jumps already-migrated rows without counting them as skipped;
+    # finishing with 0/0/0 means there was nothing pending left to do.
+    if job.skip_existing:
+        return (
+            BlobMigrationJob.STATUS_COMPLETED,
+            "迁移完成：没有待处理项（已全部迁移或无可迁移 BLOB）",
+        )
     return BlobMigrationJob.STATUS_FAILED, "未发现可迁移数据，请检查库名/表名/BLOB 列配置"
 
 
 def _refresh_job_estimate_for_ui(job: BlobMigrationJob, *, touch_message: bool = True) -> BlobMigrationJob:
     """Best-effort COUNT for the progress bar. Never affects whether batches run.
 
-    Denominator is always total_with_blob (rows×blob cols to scan), not pending.
-    skip_existing still skips writes, but the UI counts skipped into progress, so
-    pending-only estimates make the bar jump to ~100% after early skips.
+    With skip_existing, denominator is pending work (not whole-table total_with_blob),
+    so sparse remigrations do not look like a full-table skip marathon.
     """
     if job.retry_failed_only:
         return job
@@ -497,7 +503,13 @@ def _refresh_job_estimate_for_ui(job: BlobMigrationJob, *, touch_message: bool =
     try:
         prepare_migration_source(_load_source(job.source_id))
         stats = count_migration_candidates(job.source_id, use_cache=False)
-        estimate = int(stats.get("total_with_blob") or 0)
+        if job.skip_existing:
+            estimate = int(stats.get("pending") or 0)
+            # Fallback if pending math is empty but table still has candidates.
+            if estimate <= 0:
+                estimate = int(stats.get("total_with_blob") or 0)
+        else:
+            estimate = int(stats.get("total_with_blob") or 0)
     except Exception:
         logger.warning(
             "count_migration_candidates failed job_id=%s source_id=%s",
@@ -519,9 +531,14 @@ def _refresh_job_estimate_for_ui(job: BlobMigrationJob, *, touch_message: bool =
         "updated_at": timezone.now(),
     }
     if touch_message and handled == 0:
-        updates["message"] = (
-            f"迁移进行中（预估 {estimate}）" if estimate > 0 else "迁移进行中（扫描确认中）"
-        )
+        if job.skip_existing:
+            updates["message"] = (
+                f"迁移进行中（待处理约 {estimate}）" if estimate > 0 else "迁移进行中（扫描确认中）"
+            )
+        else:
+            updates["message"] = (
+                f"迁移进行中（预估 {estimate}）" if estimate > 0 else "迁移进行中（扫描确认中）"
+            )
     BlobMigrationJob.objects.filter(pk=job.pk).update(**updates)
     job.refresh_from_db()
     return job
@@ -600,7 +617,12 @@ def execute_migration_job(job_id: int) -> BlobMigrationJob:
             retry_failed_rows_for_job(job)
         else:
             prepare_migration_source(_load_source(job.source_id))
-            _kick_job_estimate_async(job_id)
+            # skip_existing needs pending estimate before progress makes sense; do it
+            # synchronously to avoid sqlite "database table is locked" races with workers.
+            if job.skip_existing:
+                _refresh_job_estimate_for_ui(job, touch_message=True)
+            else:
+                _kick_job_estimate_async(job_id)
             execute_migration_job_batches(job)
         job.refresh_from_db()
         if job.cancel_requested or job.status == BlobMigrationJob.STATUS_CANCELLED:
