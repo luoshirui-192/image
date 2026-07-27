@@ -396,6 +396,75 @@ def build_sample_view(
     }
 
 
+def build_pair_view_by_caps(
+    config: dict,
+    image_reg: str,
+    image_match: str,
+    *,
+    data_set_code: str | None = None,
+    match_id: int | None = None,
+    selected_layer_types: list[str] | None = None,
+    show_labels: bool = True,
+) -> dict:
+    """
+    Dual-panel view from explicit cap stems (SQL-filter browse).
+
+    Does not require a t_match_result_image.id; pair_meta.id may be null.
+    """
+    reg = str(image_reg or "").strip()
+    match = str(image_match or "").strip()
+    if not reg or not match:
+        raise BizBrowseError("image_reg / image_match 不能为空")
+
+    selected: set[str] | None = None
+    if selected_layer_types is not None:
+        selected = {x.strip().lower() for x in selected_layer_types if x and str(x).strip()}
+
+    try:
+        with _with_biz_cursor(config) as session_alias:
+            conn = connections[session_alias]
+            with conn.cursor() as cursor:
+                left = build_panel_for_cap(
+                    config,
+                    reg,
+                    role="reg",
+                    selected_layer_types=selected,
+                    show_labels=show_labels,
+                    cursor=cursor,
+                )
+                right = build_panel_for_cap(
+                    config,
+                    match,
+                    role="match",
+                    selected_layer_types=selected,
+                    show_labels=show_labels,
+                    cursor=cursor,
+                )
+    except BizBrowseError:
+        raise
+    except ExternalDbError as exc:
+        raise BizBrowseError(str(exc)) from exc
+    except Exception as exc:
+        logger.exception("build_pair_view_by_caps failed reg=%s match=%s", reg, match)
+        raise BizBrowseError(f"读取配对失败: {exc}") from exc
+
+    available_types = sorted(
+        set(left.get("available_layer_types") or []) | set(right.get("available_layer_types") or [])
+    )
+    return {
+        "mode": "pair",
+        "panels": [left, right],
+        "pair_meta": {
+            "id": match_id,
+            "image_reg": reg,
+            "image_match": match,
+            "data_set_code": str(data_set_code or "").strip(),
+        },
+        "available_layer_types": available_types,
+        "layer_type_options": [info.to_dict() for info in list_layer_types(enabled_only=True)],
+    }
+
+
 def build_pair_view(
     config: dict,
     match_id: int | str,

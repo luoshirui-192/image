@@ -21,8 +21,11 @@ t_match_result_image
 2. 顶栏切换 **配对 / 单图**
    - 配对：左树 `t_match_result_image`；右栏双栏 `image_reg` / `image_match`
    - 单图：左树 `T_CAP_FP_DATA`；右栏单栏叠加
-3. 方向键切换上一项 / 下一项
-4. **评测指标**子页（顶栏「评测指标」）：按 `data_set_code` + 分数列计算 EER/FMR/DET
+3. 左侧列表支持 **常规筛选 / SQL 筛选**
+   - 常规：keyword + dataset
+   - SQL：对业务库执行 SELECT，结果填入左树；配对结果可含 `id` 或 `image_reg`+`image_match`
+4. 方向键切换上一项 / 下一项
+5. **评测指标**子页（顶栏「评测指标」）：按 `data_set_code` + 分数列计算 EER/FMR/DET
 
 ## 评测指标（子页）
 
@@ -53,6 +56,7 @@ t_match_result_image
 | GET | `/api/fingerprints/biz/meta/` | `data_set_code` 列表 + layer-types |
 | GET | `/api/fingerprints/biz/pairs/` | 配对分页（`dataset_code`/`keyword`） |
 | GET | `/api/fingerprints/biz/pairs/{id}/view/` | `mode=pair`，`panels[reg,match]` |
+| GET | `/api/fingerprints/biz/pairs/view-by-caps/` | 按 `image_reg`+`image_match` 打开双栏（SQL 筛选无 id 时） |
 
 `pair_meta` 仅含：`id`、`image_reg`、`image_match`、`data_set_code`（浏览侧不含 score 等指标）。
 

@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 from fingerprints.biz_browse import (
     BizBrowseError,
     build_pair_view,
+    build_pair_view_by_caps,
     build_sample_view,
     list_biz_meta,
     list_biz_pairs,
@@ -476,6 +477,54 @@ class FingerprintBizPairViewView(APIView):
             data = build_pair_view(
                 cfg,
                 pk,
+                selected_layer_types=selected_layers,
+                show_labels=show_labels,
+            )
+        except BizBrowseError as exc:
+            status = 404 if "未找到" in str(exc) else 400
+            return error_response(str(exc), code=4041 if status == 404 else 4001, status=status)
+        return success_response(data)
+
+
+class FingerprintBizPairViewByCapsView(APIView):
+    """GET /api/fingerprints/biz/pairs/view-by-caps/ — dual panel from image_reg + image_match."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request):
+        layers_param = request.query_params.get("layers")
+        if layers_param is None:
+            layers_param = request.query_params.get("layer_types")
+        selected_layers = None
+        if layers_param is not None:
+            selected_layers = [x.strip() for x in layers_param.split(",") if x.strip()]
+        show_labels = str(request.query_params.get("show_labels", "1")).lower() not in {
+            "0",
+            "false",
+            "no",
+        }
+        image_reg = (request.query_params.get("image_reg") or "").strip()
+        image_match = (request.query_params.get("image_match") or "").strip()
+        data_set_code = (
+            request.query_params.get("data_set_code")
+            or request.query_params.get("dataset_code")
+            or ""
+        ).strip()
+        match_id = None
+        raw_id = request.query_params.get("id") or request.query_params.get("match_id")
+        if raw_id not in (None, ""):
+            try:
+                match_id = int(raw_id)
+            except (TypeError, ValueError):
+                return error_response("id 无效", code=4001, status=400)
+        try:
+            cfg = _biz_config_from_request(request)
+            data = build_pair_view_by_caps(
+                cfg,
+                image_reg,
+                image_match,
+                data_set_code=data_set_code or None,
+                match_id=match_id,
                 selected_layer_types=selected_layers,
                 show_labels=show_labels,
             )

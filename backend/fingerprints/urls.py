@@ -5,6 +5,7 @@ from fingerprints.views import (
     FingerprintBizEvalReportView,
     FingerprintBizMetaView,
     FingerprintBizPairListView,
+    FingerprintBizPairViewByCapsView,
     FingerprintBizPairViewView,
     FingerprintBizSampleListView,
     FingerprintBizSampleViewView,
@@ -26,6 +27,11 @@ urlpatterns = [
     path("biz/eval/meta/", FingerprintBizEvalMetaView.as_view(), name="fingerprint-biz-eval-meta"),
     path("biz/eval/report/", FingerprintBizEvalReportView.as_view(), name="fingerprint-biz-eval-report"),
     path("biz/pairs/", FingerprintBizPairListView.as_view(), name="fingerprint-biz-pairs"),
+    path(
+        "biz/pairs/view-by-caps/",
+        FingerprintBizPairViewByCapsView.as_view(),
+        name="fingerprint-biz-pair-view-by-caps",
+    ),
     path(
         "biz/pairs/<int:pk>/view/",
         FingerprintBizPairViewView.as_view(),

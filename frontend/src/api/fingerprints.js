@@ -17,6 +17,11 @@ export function fetchFingerprintBizPairViewApi(matchId, params = {}) {
   return request.get(`/fingerprints/biz/pairs/${matchId}/view/`, { params })
 }
 
+/** Dual-panel view from image_reg + image_match (SQL-filter browse without match id). */
+export function fetchFingerprintBizPairViewByCapsApi(params = {}) {
+  return request.get('/fingerprints/biz/pairs/view-by-caps/', { params })
+}
+
 export function fetchFingerprintBizSamplesApi(params = {}) {
   return request.get('/fingerprints/biz/samples/', { params })
 }

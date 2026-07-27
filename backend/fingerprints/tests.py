@@ -680,6 +680,24 @@ class FingerprintAPITestCase(TestCase):
         self.assertGreater(data["panels"][0]["layers"][0]["minutiae"]["count"], 0)
         self.assertGreater(data["panels"][1]["layers"][0]["minutiae"]["count"], 0)
 
+        by_caps = self.client.get(
+            "/api/fingerprints/biz/pairs/view-by-caps/",
+            {
+                "db_alias": "default",
+                "database": "",
+                "image_reg": "100001_right_index",
+                "image_match": "100002_right_index",
+                "data_set_code": "PK_5W",
+            },
+        )
+        self.assertEqual(by_caps.status_code, 200, by_caps.data)
+        caps_data = by_caps.data["data"]
+        self.assertEqual(caps_data["mode"], "pair")
+        self.assertEqual(len(caps_data["panels"]), 2)
+        self.assertIsNone(caps_data["pair_meta"]["id"])
+        self.assertEqual(caps_data["pair_meta"]["image_reg"], "100001_right_index")
+        self.assertEqual(caps_data["pair_meta"]["image_match"], "100002_right_index")
+
 
 class PathWritebackUnitTestCase(TestCase):
     def test_parse_disabled(self):

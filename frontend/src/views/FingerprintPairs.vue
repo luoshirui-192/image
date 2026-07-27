@@ -12,14 +12,22 @@ import {
   createFingerprintLayerTypeApi,
   fetchFingerprintBizMetaApi,
   fetchFingerprintBizPairViewApi,
+  fetchFingerprintBizPairViewByCapsApi,
   fetchFingerprintBizPairsApi,
   fetchFingerprintBizSampleViewApi,
   fetchFingerprintBizSamplesApi,
   fetchFingerprintLayerTypesApi,
   updateFingerprintLayerTypeApi,
 } from '@/api/fingerprints'
+import { executeSqlApi } from '@/api/sql'
 import FingerprintImportDialog from '@/components/FingerprintImportDialog.vue'
+import SqlEditor from '@/components/SqlEditor.vue'
 import { useFingerprintImportStore } from '@/stores/fingerprintImport'
+import {
+  defaultBrowseSql,
+  mapSqlResultToBrowseRows,
+  pairSqlKey,
+} from '@/utils/fingerprintSqlBrowse'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,9 +40,17 @@ const compareLoading = ref(false)
 const rows = ref([])
 const total = ref(0)
 const selectedMatchId = ref(null)
+/** When pair row has no match id (SQL image_reg+image_match). */
+const selectedPairCaps = ref(null) // { image_reg, image_match, data_set_code, sqlKey }
 const selectedCapId = ref(null)
 /** pair | single */
 const browseMode = ref('pair')
+/** filter | sql */
+const listSourceMode = ref('filter')
+const sqlTextPair = ref(defaultBrowseSql('pair'))
+const sqlTextSingle = ref(defaultBrowseSql('single'))
+const sqlRunning = ref(false)
+const sqlHint = ref('')
 const comparePanelRef = ref(null)
 const treeRef = ref(null)
 
@@ -142,6 +158,31 @@ const panels = computed(() => payload.value?.panels || [])
 const pairMeta = computed(() => payload.value?.pair_meta || null)
 
 const isPairMode = computed(() => browseMode.value === 'pair')
+const isSqlListMode = computed(() => listSourceMode.value === 'sql')
+const activeSqlText = computed({
+  get: () => (isPairMode.value ? sqlTextPair.value : sqlTextSingle.value),
+  set: (v) => {
+    if (isPairMode.value) sqlTextPair.value = v
+    else sqlTextSingle.value = v
+  },
+})
+
+const sqlSimulateContext = computed(() => {
+  const conn = selectedBrowseConnection.value
+  if (!conn) return {}
+  if (conn.connection_id != null) {
+    return {
+      connectionId: conn.connection_id,
+      database: 'ara_fp_analyst',
+      blobMode: 'path',
+    }
+  }
+  return {
+    dbAlias: conn.alias || 'default',
+    database: conn.alias === 'default' || !conn.alias ? '' : 'ara_fp_analyst',
+    blobMode: 'path',
+  }
+})
 
 const treeData = computed(() => {
   const groups = new Map()
@@ -160,10 +201,20 @@ const treeData = computed(() => {
       isGroup: true,
       children: items.map((row) => {
         if (isPairMode.value) {
+          const nodeId =
+            row.id != null
+              ? `match:${row.id}`
+              : `caps:${row._sqlKey || pairSqlKey(row.image_reg, row.image_match)}`
           return {
-            id: `match:${row.id}`,
+            id: nodeId,
             matchId: row.id,
-            label: `${row.image_reg || '?'} ↔ ${row.image_match || '?'}`,
+            imageReg: row.image_reg,
+            imageMatch: row.image_match,
+            sqlKey: row._sqlKey,
+            label:
+              row.id != null
+                ? `#${row.id} · ${row.image_reg || '?'} ↔ ${row.image_match || '?'}`
+                : `${row.image_reg || '?'} ↔ ${row.image_match || '?'}`,
             isGroup: false,
             row,
           }
@@ -181,30 +232,48 @@ const treeData = computed(() => {
 
 const currentNodeKey = computed(() => {
   if (isPairMode.value) {
-    return selectedMatchId.value != null ? `match:${selectedMatchId.value}` : undefined
+    if (selectedMatchId.value != null) return `match:${selectedMatchId.value}`
+    if (selectedPairCaps.value?.sqlKey) return `caps:${selectedPairCaps.value.sqlKey}`
+    return undefined
   }
   return selectedCapId.value ? `cap:${selectedCapId.value}` : undefined
 })
 
 const hasSelection = computed(() =>
-  isPairMode.value ? selectedMatchId.value != null : !!selectedCapId.value,
+  isPairMode.value
+    ? selectedMatchId.value != null || !!selectedPairCaps.value
+    : !!selectedCapId.value,
 )
 
 const selectionTitle = computed(() => {
   if (isPairMode.value) {
-    return selectedMatchId.value != null ? `#${selectedMatchId.value}` : ''
+    if (selectedMatchId.value != null) return `#${selectedMatchId.value}`
+    if (selectedPairCaps.value) {
+      return `${selectedPairCaps.value.image_reg} ↔ ${selectedPairCaps.value.image_match}`
+    }
+    return ''
   }
   return selectedCapId.value || ''
 })
 
-const selectionSource = computed(() =>
-  isPairMode.value ? '来自 t_match_result_image' : '来自 T_CAP_FP_DATA',
-)
+const selectionSource = computed(() => {
+  if (isSqlListMode.value) {
+    return isPairMode.value
+      ? '来自 SQL（配对）'
+      : '来自 SQL（单图）'
+  }
+  return isPairMode.value ? '来自 t_match_result_image' : '来自 T_CAP_FP_DATA'
+})
 
 const navPrevLabel = computed(() => (isPairMode.value ? '上一对' : '上一张'))
 const navNextLabel = computed(() => (isPairMode.value ? '下一对' : '下一张'))
 const emptyTreeHint = computed(() => {
   if (!browseConnectionKey.value) return '请选择业务库连接'
+  if (isSqlListMode.value) {
+    return isPairMode.value
+      ? '执行 SQL 后在此显示配对结果'
+      : '执行 SQL 后在此显示样本结果'
+  }
   return isPairMode.value
     ? '暂无配对（需 t_match_result_image 有数据）'
     : '暂无样本（需 T_CAP_FP_DATA 有写回路径）'
@@ -249,11 +318,16 @@ async function loadMeta() {
 let samplesLoadSeq = 0
 
 async function loadSamples() {
+  if (isSqlListMode.value) {
+    // SQL mode keeps last executed result until user re-runs.
+    return
+  }
   const conn = selectedBrowseConnection.value
   const params = connectionQueryParams(conn)
   if (!params) return
   const seq = ++samplesLoadSeq
   loading.value = true
+  sqlHint.value = ''
   try {
     const q = {
       ...params,
@@ -269,6 +343,7 @@ async function loadSamples() {
       total.value = res.data.total || 0
       if (selectedMatchId.value != null && !rows.value.some((r) => r.id === selectedMatchId.value)) {
         selectedMatchId.value = null
+        selectedPairCaps.value = null
         clearView()
       }
     } else {
@@ -283,10 +358,69 @@ async function loadSamples() {
     }
   } catch (err) {
     if (seq !== samplesLoadSeq) return
-    // Keep previous list on transient errors (visibility refresh races).
     ElMessage.error(err.message || (isPairMode.value ? '加载配对列表失败' : '加载样本列表失败'))
   } finally {
     if (seq === samplesLoadSeq) loading.value = false
+  }
+}
+
+async function runBrowseSql() {
+  const conn = selectedBrowseConnection.value
+  if (!conn) {
+    ElMessage.warning('请先选择业务库连接')
+    return
+  }
+  const sql = (activeSqlText.value || '').trim()
+  if (!sql) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
+  sqlRunning.value = true
+  loading.value = true
+  try {
+    const res = await executeSqlApi(sql, sqlSimulateContext.value)
+    const columns = res.data?.columns || []
+    const rawRows = res.data?.rows || []
+    const mapped = mapSqlResultToBrowseRows(browseMode.value, columns, rawRows)
+    if (mapped.error) {
+      ElMessage.error(mapped.error)
+      return
+    }
+    rows.value = mapped.items
+    total.value = mapped.items.length
+    selectedMatchId.value = null
+    selectedPairCaps.value = null
+    selectedCapId.value = null
+    clearView()
+    const trunc = res.data?.truncated ? '（已截断）' : ''
+    const skip = mapped.skipped ? `，跳过无效行 ${mapped.skipped}` : ''
+    sqlHint.value = `SQL 返回 ${mapped.items.length} 行${trunc}${skip}`
+    if (!mapped.items.length) {
+      ElMessage.warning('SQL 无有效结果行')
+    } else {
+      ElMessage.success(sqlHint.value)
+    }
+  } catch (err) {
+    ElMessage.error(err.message || 'SQL 执行失败')
+  } finally {
+    sqlRunning.value = false
+    loading.value = false
+  }
+}
+
+function switchListSourceMode(mode) {
+  if (mode !== 'filter' && mode !== 'sql') return
+  if (listSourceMode.value === mode) return
+  listSourceMode.value = mode
+  selectedMatchId.value = null
+  selectedPairCaps.value = null
+  selectedCapId.value = null
+  clearView()
+  rows.value = []
+  total.value = 0
+  sqlHint.value = ''
+  if (mode === 'filter') {
+    void loadSamples()
   }
 }
 
@@ -302,8 +436,13 @@ function onReset() {
 
 const selectedSampleIndex = computed(() => {
   if (isPairMode.value) {
-    if (selectedMatchId.value == null) return -1
-    return rows.value.findIndex((r) => r.id === selectedMatchId.value)
+    if (selectedMatchId.value != null) {
+      return rows.value.findIndex((r) => r.id === selectedMatchId.value)
+    }
+    if (selectedPairCaps.value?.sqlKey) {
+      return rows.value.findIndex((r) => r._sqlKey === selectedPairCaps.value.sqlKey)
+    }
+    return -1
   }
   if (!selectedCapId.value) return -1
   return rows.value.findIndex((r) => r.cap_image_id === selectedCapId.value)
@@ -336,8 +475,21 @@ function syncTreeCurrent() {
 function onTreeNodeClick(data) {
   if (data.isGroup) return
   if (isPairMode.value) {
-    if (data.matchId == null) return
-    selectPair(data.matchId, { focusPanel: true })
+    if (data.matchId != null) {
+      selectPair(data.matchId, { focusPanel: true })
+      return
+    }
+    if (data.imageReg && data.imageMatch) {
+      selectPairByCaps(
+        {
+          image_reg: data.imageReg,
+          image_match: data.imageMatch,
+          data_set_code: data.row?.data_set_code || '',
+          sqlKey: data.sqlKey || pairSqlKey(data.imageReg, data.imageMatch),
+        },
+        { focusPanel: true },
+      )
+    }
   } else {
     if (!data.capImageId) return
     selectSample(data.capImageId, { focusPanel: true })
@@ -347,10 +499,45 @@ function onTreeNodeClick(data) {
 function selectPair(matchId, { focusPanel = false } = {}) {
   const id = Number(matchId)
   selectedMatchId.value = id
+  selectedPairCaps.value = null
   selectedCapId.value = null
   syncTreeCurrent()
   router.replace({
-    query: { ...route.query, mode: 'pair', match: String(id), cap: undefined },
+    query: {
+      ...route.query,
+      mode: 'pair',
+      match: String(id),
+      cap: undefined,
+      image_reg: undefined,
+      image_match: undefined,
+    },
+  }).catch(() => {})
+  loadView()
+  if (focusPanel) focusComparePanel()
+}
+
+function selectPairByCaps(caps, { focusPanel = false } = {}) {
+  const image_reg = String(caps.image_reg || '').trim()
+  const image_match = String(caps.image_match || '').trim()
+  if (!image_reg || !image_match) return
+  selectedMatchId.value = null
+  selectedPairCaps.value = {
+    image_reg,
+    image_match,
+    data_set_code: caps.data_set_code || '',
+    sqlKey: caps.sqlKey || pairSqlKey(image_reg, image_match),
+  }
+  selectedCapId.value = null
+  syncTreeCurrent()
+  router.replace({
+    query: {
+      ...route.query,
+      mode: 'pair',
+      match: undefined,
+      cap: undefined,
+      image_reg,
+      image_match,
+    },
   }).catch(() => {})
   loadView()
   if (focusPanel) focusComparePanel()
@@ -360,9 +547,17 @@ function selectSample(capImageId, { focusPanel = false } = {}) {
   const id = String(capImageId)
   selectedCapId.value = id
   selectedMatchId.value = null
+  selectedPairCaps.value = null
   syncTreeCurrent()
   router.replace({
-    query: { ...route.query, mode: 'single', cap: id, match: undefined },
+    query: {
+      ...route.query,
+      mode: 'single',
+      cap: id,
+      match: undefined,
+      image_reg: undefined,
+      image_match: undefined,
+    },
   }).catch(() => {})
   loadView()
   if (focusPanel) focusComparePanel()
@@ -371,20 +566,32 @@ function selectSample(capImageId, { focusPanel = false } = {}) {
 function goPrevSample() {
   if (compareLoading.value || !canPrevSample.value) return
   const prev = rows.value[selectedSampleIndex.value - 1]
-  if (isPairMode.value) {
-    if (prev?.id != null) selectPair(prev.id, { focusPanel: true })
-  } else if (prev?.cap_image_id) {
-    selectSample(prev.cap_image_id, { focusPanel: true })
-  }
+  selectBrowseRow(prev, { focusPanel: true })
 }
 
 function goNextSample() {
   if (compareLoading.value || !canNextSample.value) return
   const next = rows.value[selectedSampleIndex.value + 1]
+  selectBrowseRow(next, { focusPanel: true })
+}
+
+function selectBrowseRow(row, opts = {}) {
+  if (!row) return
   if (isPairMode.value) {
-    if (next?.id != null) selectPair(next.id, { focusPanel: true })
-  } else if (next?.cap_image_id) {
-    selectSample(next.cap_image_id, { focusPanel: true })
+    if (row.id != null) selectPair(row.id, opts)
+    else if (row.image_reg && row.image_match) {
+      selectPairByCaps(
+        {
+          image_reg: row.image_reg,
+          image_match: row.image_match,
+          data_set_code: row.data_set_code || '',
+          sqlKey: row._sqlKey,
+        },
+        opts,
+      )
+    }
+  } else if (row.cap_image_id) {
+    selectSample(row.cap_image_id, opts)
   }
 }
 
@@ -426,7 +633,7 @@ async function loadView() {
     return
   }
   if (isPairMode.value) {
-    if (selectedMatchId.value == null) return
+    if (selectedMatchId.value == null && !selectedPairCaps.value) return
   } else if (!selectedCapId.value) {
     return
   }
@@ -434,9 +641,28 @@ async function loadView() {
   compareLoading.value = true
   layersReady.value = false
   try {
-    const res = isPairMode.value
-      ? await fetchFingerprintBizPairViewApi(selectedMatchId.value, { ...params, show_labels: '1' })
-      : await fetchFingerprintBizSampleViewApi(selectedCapId.value, { ...params, show_labels: '1' })
+    let res
+    if (isPairMode.value) {
+      if (selectedMatchId.value != null) {
+        res = await fetchFingerprintBizPairViewApi(selectedMatchId.value, {
+          ...params,
+          show_labels: '1',
+        })
+      } else {
+        res = await fetchFingerprintBizPairViewByCapsApi({
+          ...params,
+          image_reg: selectedPairCaps.value.image_reg,
+          image_match: selectedPairCaps.value.image_match,
+          data_set_code: selectedPairCaps.value.data_set_code || undefined,
+          show_labels: '1',
+        })
+      }
+    } else {
+      res = await fetchFingerprintBizSampleViewApi(selectedCapId.value, {
+        ...params,
+        show_labels: '1',
+      })
+    }
     payload.value = res.data
     const types = res.data.available_layer_types || []
     panelTypes.value = [...types]
@@ -481,11 +707,25 @@ async function switchBrowseMode(mode) {
   browseMode.value = mode
   clearView()
   selectedMatchId.value = null
+  selectedPairCaps.value = null
   selectedCapId.value = null
   router.replace({
-    query: { ...route.query, mode, match: undefined, cap: undefined },
+    query: {
+      ...route.query,
+      mode,
+      match: undefined,
+      cap: undefined,
+      image_reg: undefined,
+      image_match: undefined,
+    },
   }).catch(() => {})
-  await loadSamples()
+  if (isSqlListMode.value) {
+    rows.value = []
+    total.value = 0
+    sqlHint.value = ''
+  } else {
+    await loadSamples()
+  }
 }
 
 function goEvalPage() {
@@ -582,9 +822,15 @@ watch(browseConnectionKey, async () => {
   if (suppressConnWatch) return
   clearView()
   selectedMatchId.value = null
+  selectedPairCaps.value = null
   selectedCapId.value = null
   await loadMeta()
-  await loadSamples()
+  if (!isSqlListMode.value) await loadSamples()
+  else {
+    rows.value = []
+    total.value = 0
+    sqlHint.value = ''
+  }
 })
 
 function openImportDialog() {
@@ -676,9 +922,13 @@ async function bootstrapFingerprintPage() {
     browseMode.value = modeQ
   }
   await loadMeta()
-  await loadSamples()
+  if (!isSqlListMode.value) {
+    await loadSamples()
+  }
   const matchQ = route.query.match || route.params.match
   const capQ = route.query.cap || route.params.cap
+  const regQ = route.query.image_reg
+  const matchCapQ = route.query.image_match
   if (browseMode.value === 'pair' && matchQ != null && matchQ !== '') {
     const id = Number(matchQ)
     if (!Number.isNaN(id)) {
@@ -687,6 +937,15 @@ async function bootstrapFingerprintPage() {
       await loadView()
       focusComparePanel()
     }
+  } else if (browseMode.value === 'pair' && regQ && matchCapQ) {
+    selectPairByCaps(
+      {
+        image_reg: String(regQ),
+        image_match: String(matchCapQ),
+        data_set_code: '',
+      },
+      { focusPanel: true },
+    )
   } else if (browseMode.value === 'single' && capQ) {
     selectedCapId.value = String(capQ)
     syncTreeCurrent()
@@ -707,8 +966,8 @@ usePageDataRefresh(
     await ensureConnections({ force: !wbConnections.value.length })
     if (!browseConnectionKey.value) return
     await loadMeta()
-    await loadSamples()
-    if (selectedMatchId.value || selectedCapId.value) {
+    if (!isSqlListMode.value) await loadSamples()
+    if (selectedMatchId.value || selectedPairCaps.value || selectedCapId.value) {
       await loadView()
     }
   },
@@ -785,27 +1044,56 @@ onBeforeUnmount(() => {
           <span class="muted">共 {{ total }}</span>
         </div>
         <div class="filter-box">
-          <el-input
-            v-model="filters.keyword"
-            clearable
+          <el-radio-group
+            :model-value="listSourceMode"
             size="small"
-            :placeholder="isPairMode ? 'reg / match / id' : 'cap_image_id'"
-            @keyup.enter="onSearch"
-          />
-          <el-select
-            v-model="filters.dataset_code"
-            clearable
-            size="small"
-            :placeholder="isPairMode ? 'data_set_code' : 'dataset_code'"
-            style="width: 100%"
+            class="list-source-toggle"
+            @change="switchListSourceMode"
           >
-            <el-option v-for="c in meta.dataset_codes" :key="c" :label="c" :value="c" />
-          </el-select>
-          <div class="filter-actions">
-            <el-button type="primary" size="small" :loading="loading" @click="onSearch">筛选</el-button>
-            <el-button size="small" @click="onReset">重置</el-button>
-            <el-button size="small" :loading="loading" @click="onSearch">刷新</el-button>
-          </div>
+            <el-radio-button value="filter">常规筛选</el-radio-button>
+            <el-radio-button value="sql">SQL 筛选</el-radio-button>
+          </el-radio-group>
+
+          <template v-if="!isSqlListMode">
+            <el-input
+              v-model="filters.keyword"
+              clearable
+              size="small"
+              :placeholder="isPairMode ? 'reg / match / id' : 'cap_image_id'"
+              @keyup.enter="onSearch"
+            />
+            <el-select
+              v-model="filters.dataset_code"
+              clearable
+              size="small"
+              :placeholder="isPairMode ? 'data_set_code' : 'dataset_code'"
+              style="width: 100%"
+            >
+              <el-option v-for="c in meta.dataset_codes" :key="c" :label="c" :value="c" />
+            </el-select>
+            <div class="filter-actions">
+              <el-button type="primary" size="small" :loading="loading" @click="onSearch">筛选</el-button>
+              <el-button size="small" @click="onReset">重置</el-button>
+              <el-button size="small" :loading="loading" @click="onSearch">刷新</el-button>
+            </div>
+          </template>
+
+          <template v-else>
+            <p class="sql-tip">
+              {{
+                isPairMode
+                  ? '结果需含 id，或同时含 image_reg + image_match'
+                  : '结果需含 cap_image_id'
+              }}
+            </p>
+            <SqlEditor v-model="activeSqlText" min-height="140px" @execute="runBrowseSql" />
+            <div class="filter-actions">
+              <el-button type="primary" size="small" :loading="sqlRunning" @click="runBrowseSql">
+                执行并刷新列表
+              </el-button>
+            </div>
+            <div v-if="sqlHint" class="sql-hint muted">{{ sqlHint }}</div>
+          </template>
         </div>
         <div class="tree-wrap">
           <el-tree
@@ -842,8 +1130,8 @@ onBeforeUnmount(() => {
           <div class="compare-toolbar">
             <div class="meta">
               <template v-if="isPairMode && pairMeta">
-                #{{ pairMeta.id }}
-                · {{ pairMeta.image_reg }} ↔ {{ pairMeta.image_match }}
+                <template v-if="pairMeta.id != null">#{{ pairMeta.id }} · </template>
+                {{ pairMeta.image_reg }} ↔ {{ pairMeta.image_match }}
                 <template v-if="pairMeta.data_set_code"> · {{ pairMeta.data_set_code }}</template>
               </template>
               <template v-else-if="panels[0]">
@@ -1088,6 +1376,24 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.list-source-toggle {
+  width: 100%;
+}
+.list-source-toggle :deep(.el-radio-button) {
+  flex: 1;
+}
+.list-source-toggle :deep(.el-radio-button__inner) {
+  width: 100%;
+}
+.sql-tip,
+.sql-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.sql-tip {
+  color: var(--el-text-color-secondary);
 }
 .filter-actions { display: flex; gap: 8px; }
 .tree-wrap { flex: 1; overflow: auto; padding: 8px 4px; }
