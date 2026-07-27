@@ -638,20 +638,33 @@ const selectionMigrationTag = computed(() => {
 
 const selectionMigrationHint = computed(() => selectionMigrationTag.value?.text || '')
 
+/** Set true after first migration-source list fetch (avoids false noSource → 一键迁移闪现). */
+const migrationSourcesLoaded = ref(false)
+
 const showMigrateForSelection = computed(() => {
   const view = savedViewForSelection.value
   const catalog = selectedCatalogObject.value
   if (!view) return false
   if (!objectHasPhysicalBlob(catalog, view)) return false
   if (isMigrationMatchAmbiguous(view, catalog)) return false
+  if (!migrationSourcesLoaded.value) return false
   const stats = selectionMigrationStats.value
   // Avoid flicker: only hide while first load (no stats yet).
   if (loadingSelectionMigrationStats.value && !stats) return false
   if (!stats) return false
   if (stats.error) return false
-  // First-time migrate: no source yet, but table still has physical BLOB columns.
-  if (stats.noSource) return true
-  return Number(stats.pending ?? 0) > 0
+  // Source exists: only when remote stats report pending work.
+  if (!stats.noSource) {
+    return Number(stats.pending ?? 0) > 0
+  }
+  // No source yet: show only for first-time tables with no map evidence of prior migration.
+  // (If sources list was empty mid-refresh, mapped>0 hides the false positive.)
+  const mapped = countMapMigratedEntries({
+    source_uid: view.source_uid,
+    source_table: view.source_table,
+    path_lookup_table: view.path_lookup_table,
+  })
+  return mapped <= 0
 })
 
 async function loadCatalogTree(root, resolve) {
@@ -760,6 +773,8 @@ async function loadMigrationSources({ includeStats = false } = {}) {
     migrationSources.value = res.data || []
   } catch {
     migrationSources.value = []
+  } finally {
+    migrationSourcesLoaded.value = true
   }
 }
 
@@ -1994,7 +2009,11 @@ watch(savedViewForSelection, (view) => {
   selectionMigrationStats.value = null
   loadingSelectionMigrationStats.value = !!view
   if (view) {
-    void refreshSelectionMigrationStats()
+    void (async () => {
+      await Promise.all([loadMigrationSources(), loadMapStats()])
+      if (savedViewForSelection.value?.id !== view.id) return
+      await refreshSelectionMigrationStats()
+    })()
   } else {
     loadingSelectionMigrationStats.value = false
   }

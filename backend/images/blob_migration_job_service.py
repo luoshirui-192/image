@@ -264,12 +264,18 @@ def _job_progress_count(job: BlobMigrationJob) -> int:
 
 
 def _job_progress_display(job: BlobMigrationJob) -> tuple[int, int, float]:
-    """Return (done, total, percent) for API responses. total_estimate never gates execution."""
-    handled = _job_handled_count(job)
+    """Return (done, total, percent) for API responses. total_estimate never gates execution.
+
+    With skip_existing, progress tracks real migrate attempts (success+fail), not catch-up skips;
+    total_estimate is pending-only so sparse remigrations do not look like a full-table marathon.
+    """
+    if job.skip_existing and not job.retry_failed_only:
+        done = _job_progress_count(job)
+    else:
+        done = _job_handled_count(job)
     estimate = int(job.total_estimate or 0)
 
     if job.status in ACTIVE_STATUSES:
-        done = handled
         total = max(estimate, done) if estimate > 0 else 0
         if total > 0:
             percent = min(99.0, round(100.0 * done / total, 2))
@@ -277,7 +283,6 @@ def _job_progress_display(job: BlobMigrationJob) -> tuple[int, int, float]:
             percent = 0.0
         return done, total, percent
 
-    done = handled
     total = max(estimate, done) if estimate > 0 else (done if done > 0 else 0)
     if job.status == BlobMigrationJob.STATUS_COMPLETED:
         percent = 100.0 if total > 0 or done == 0 else 100.0
