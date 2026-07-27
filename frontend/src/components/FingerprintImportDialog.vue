@@ -7,6 +7,7 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { listBlobCatalogConnectionsApi } from '@/api/images'
 import { importFingerprintZipApi } from '@/api/fingerprints'
+import { connectionKey, pickPreferredConnection } from '@/utils/dbConnection'
 
 const visible = defineModel({ type: Boolean, default: false })
 const emit = defineEmits(['started'])
@@ -24,12 +25,6 @@ const selectedWbConnection = computed(
   () => wbConnections.value.find((c) => connectionKey(c) === wbConnectionKey.value) || null,
 )
 
-function connectionKey(conn) {
-  if (!conn) return ''
-  if (conn.connection_id != null) return `ext:${conn.connection_id}`
-  return `alias:${conn.alias || 'default'}`
-}
-
 function resetForm() {
   importFile.value = null
   importVersion.value = '1.0'
@@ -43,16 +38,7 @@ async function ensureConnections() {
   try {
     const res = await listBlobCatalogConnectionsApi()
     wbConnections.value = res.data || []
-    const preferred = wbConnections.value.find(
-      (c) =>
-        String(c.label || c.alias || '')
-          .toLowerCase()
-          .includes('ara') ||
-        String(c.name || '')
-          .toLowerCase()
-          .includes('ara'),
-    )
-    const fallback = preferred || wbConnections.value[0]
+    const fallback = pickPreferredConnection(wbConnections.value)
     if (fallback && !wbConnectionKey.value) {
       wbConnectionKey.value = connectionKey(fallback)
     }

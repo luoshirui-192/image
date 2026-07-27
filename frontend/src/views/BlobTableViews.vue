@@ -2090,7 +2090,7 @@ usePageDataRefresh(
     isEmpty: () => !views.value.length && !browseReady.value,
     intervalMs: 1500,
     maxEmptyRetries: 12,
-    alwaysRefreshOnVisible: true,
+    alwaysRefreshOnVisible: false,
     mountRetryDelaysMs: [200, 600, 1500, 3000],
   },
 )

@@ -534,3 +534,40 @@ def kick_import_job_async(job_id: int) -> None:
     )
     thread.start()
     logger.info("kicked fingerprint import thread job_id=%s", job_id)
+
+
+def reclaim_orphaned_import_jobs(*, reason: str = "服务重启，已自动重新排队") -> int:
+    """Re-queue orphaned running import jobs after worker/container restart.
+
+    Daemon threads die with the Gunicorn/scheduler process; DB rows can stay ``running``.
+    """
+    now = timezone.now()
+    running_ids = list(
+        FingerprintImportJob.objects.filter(status=FingerprintImportJob.STATUS_RUNNING).values_list(
+            "id", flat=True
+        )
+    )
+    if not running_ids:
+        return 0
+    msg = (reason or "服务重启，已自动重新排队")[:500]
+    FingerprintImportJob.objects.filter(pk__in=running_ids).update(
+        status=FingerprintImportJob.STATUS_PENDING,
+        cancel_requested=0,
+        message=msg,
+        last_error="",
+        finished_at=None,
+        updated_at=now,
+    )
+    return len(running_ids)
+
+
+def kick_pending_import_jobs(*, limit: int = 5) -> int:
+    """Start worker threads for pending import jobs (serial-ish: claim is atomic)."""
+    pending_ids = list(
+        FingerprintImportJob.objects.filter(status=FingerprintImportJob.STATUS_PENDING)
+        .order_by("id")
+        .values_list("id", flat=True)[: max(1, min(int(limit or 5), 20))]
+    )
+    for job_id in pending_ids:
+        kick_import_job_async(int(job_id))
+    return len(pending_ids)

@@ -75,7 +75,7 @@ async function refreshSettingsPage() {
 
 usePageDataRefresh(refreshSettingsPage, {
   isEmpty: () => !configMeta.value?.editable || Object.keys(configMeta.value.editable || {}).length === 0,
-  alwaysRefreshOnVisible: true,
+  alwaysRefreshOnVisible: false,
   intervalMs: 1500,
   maxEmptyRetries: 10,
   mountRetryDelaysMs: [200, 600, 1500, 3000],

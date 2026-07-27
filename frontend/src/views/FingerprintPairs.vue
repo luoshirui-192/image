@@ -28,6 +28,11 @@ import {
   mapSqlResultToBrowseRows,
   pairSqlKey,
 } from '@/utils/fingerprintSqlBrowse'
+import {
+  connectionKey,
+  connectionQueryParams,
+  pickPreferredConnection,
+} from '@/utils/dbConnection'
 
 const route = useRoute()
 const router = useRouter()
@@ -69,27 +74,6 @@ const selectedBrowseConnection = computed(() =>
 
 const activeImportJob = computed(() => fpImport.latestActive)
 
-function connectionKey(conn) {
-  if (!conn) return ''
-  if (conn.connection_id != null) return `ext:${conn.connection_id}`
-  return `alias:${conn.alias || 'default'}`
-}
-
-function connectionQueryParams(conn) {
-  if (!conn) return null
-  const params = { database: 'ara_fp_analyst' }
-  if (conn.connection_id != null) {
-    params.connection_id = conn.connection_id
-  } else {
-    params.db_alias = conn.alias || 'default'
-    // Local/default alias: leave database empty so sqlite tests / same-DB work.
-    if (!conn.connection_id && (conn.alias === 'default' || !conn.alias)) {
-      params.database = ''
-    }
-  }
-  return params
-}
-
 let suppressConnWatch = false
 
 async function ensureConnections({ force = false } = {}) {
@@ -98,11 +82,7 @@ async function ensureConnections({ force = false } = {}) {
   try {
     const res = await listBlobCatalogConnectionsApi()
     wbConnections.value = res.data || []
-    const preferred = wbConnections.value.find((c) =>
-      String(c.label || c.alias || '').toLowerCase().includes('ara')
-      || String(c.name || '').toLowerCase().includes('ara'),
-    )
-    const fallback = preferred || wbConnections.value[0]
+    const fallback = pickPreferredConnection(wbConnections.value)
     if (fallback) {
       const key = connectionKey(fallback)
       // Avoid watch(browseConnectionKey) double-fetch while bootstrapping keys.
@@ -982,7 +962,7 @@ usePageDataRefresh(
     isEmpty: () =>
       !wbConnections.value.length ||
       (!isSqlListMode.value && !fpListLoadedOnce),
-    alwaysRefreshOnVisible: true,
+    alwaysRefreshOnVisible: false,
     intervalMs: 1500,
     maxEmptyRetries: 12,
     mountRetryDelaysMs: [200, 600, 1500, 3000],

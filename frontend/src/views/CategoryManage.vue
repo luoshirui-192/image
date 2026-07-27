@@ -17,6 +17,7 @@ const router = useRouter()
 
 const loading = ref(false)
 const categories = ref([])
+const categoriesLoadedOnce = ref(false)
 
 const dialogVisible = ref(false)
 const dialogSaving = ref(false)
@@ -44,6 +45,7 @@ async function loadCategories() {
   try {
     const res = await listCategoriesApi()
     categories.value = res.data || []
+    categoriesLoadedOnce.value = true
   } finally {
     loading.value = false
   }
@@ -120,8 +122,9 @@ function goBack() {
 }
 
 usePageDataRefresh(loadCategories, {
-  isEmpty: () => !categories.value.length,
-  alwaysRefreshOnVisible: true,
+  // Zero categories can be a valid steady state after first load.
+  isEmpty: () => !categoriesLoadedOnce.value,
+  alwaysRefreshOnVisible: false,
   intervalMs: 1500,
   maxEmptyRetries: 10,
   mountRetryDelaysMs: [200, 600, 1500, 3000],

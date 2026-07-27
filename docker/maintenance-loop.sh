@@ -42,9 +42,10 @@ print("[scheduler] database not ready", file=sys.stderr)
 sys.exit(1)
 PY
 
-echo "==> reclaim orphaned migration/export jobs"
+echo "==> reclaim orphaned migration/export/fingerprint-import jobs"
 python manage.py reclaim_blob_migration_jobs --no-kick || true
 python manage.py reclaim_blob_export_jobs --no-kick --include-paused || true
+python manage.py reclaim_fingerprint_import_jobs --no-kick || true
 
 run_maintenance() {
   echo "==> $(date -Iseconds) run_scheduled_maintenance"
@@ -61,6 +62,11 @@ run_export_jobs() {
 
 run_blob_sync() {
   python manage.py process_blob_sync --once --max-sources 1
+}
+
+run_fingerprint_imports() {
+  # Reclaim stuck running rows, then kick pending workers in this long-lived process.
+  python manage.py reclaim_fingerprint_import_jobs --kick-limit 3 || true
 }
 
 echo "==> scheduler started (maintenance every ${INTERVAL_HOURS}h, migration poll every ${MIGRATION_POLL_SEC}s)"
@@ -84,6 +90,12 @@ while true; do
     :
   else
     echo "[scheduler] blob sync worker failed (will retry)" >&2
+  fi
+
+  if run_fingerprint_imports; then
+    :
+  else
+    echo "[scheduler] fingerprint import reclaim/kick failed (will retry)" >&2
   fi
 
   now_epoch=$(date +%s)

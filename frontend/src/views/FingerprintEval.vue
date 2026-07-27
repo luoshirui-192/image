@@ -8,6 +8,11 @@ import {
   fetchFingerprintBizEvalReportApi,
 } from '@/api/fingerprints'
 import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
+import {
+  connectionKey as connectionKeyOf,
+  connectionQueryParams,
+  pickPreferredConnection,
+} from '@/utils/dbConnection'
 
 const route = useRoute()
 const router = useRouter()
@@ -28,26 +33,6 @@ const filters = reactive({
 const histCanvas = ref(null)
 const fmrCanvas = ref(null)
 const detCanvas = ref(null)
-
-function connectionKeyOf(conn) {
-  if (!conn) return ''
-  if (conn.connection_id != null) return `ext:${conn.connection_id}`
-  return `alias:${conn.alias || 'default'}`
-}
-
-function connectionQueryParams(conn) {
-  if (!conn) return null
-  const params = { database: 'ara_fp_analyst' }
-  if (conn.connection_id != null) {
-    params.connection_id = conn.connection_id
-  } else {
-    params.db_alias = conn.alias || 'default'
-    if (!conn.connection_id && (conn.alias === 'default' || !conn.alias)) {
-      params.database = ''
-    }
-  }
-  return params
-}
 
 const selectedConnection = computed(
   () => connections.value.find((c) => connectionKeyOf(c) === connectionKey.value) || null,
@@ -99,10 +84,8 @@ async function loadConnections() {
     if (fromQuery && connections.value.some((c) => connectionKeyOf(c) === fromQuery)) {
       connectionKey.value = fromQuery
     } else if (!connectionKey.value) {
-      const preferred = connections.value.find((c) =>
-        String(c.label || c.alias || '').toLowerCase().includes('ara'),
-      )
-      connectionKey.value = connectionKeyOf(preferred || connections.value[0])
+      const preferred = pickPreferredConnection(connections.value)
+      connectionKey.value = connectionKeyOf(preferred)
     }
   } catch (err) {
     ElMessage.error(err.message || '加载数据库连接失败')
@@ -625,7 +608,7 @@ usePageDataRefresh(refreshEvalPage, {
     if (filters.dataset_code && filters.score_column) return !report.value
     return false
   },
-  alwaysRefreshOnVisible: true,
+  alwaysRefreshOnVisible: false,
   intervalMs: 1500,
   maxEmptyRetries: 12,
   mountRetryDelaysMs: [200, 600, 1500, 3000],

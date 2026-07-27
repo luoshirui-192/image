@@ -30,9 +30,13 @@ import {
 import ExternalDbConnectionsDialog from '@/components/ExternalDbConnectionsDialog.vue'
 import BackgroundExportDock from '@/components/BackgroundExportDock.vue'
 import FingerprintImportDock from '@/components/FingerprintImportDock.vue'
+import { useBackgroundExportStore } from '@/stores/backgroundExport'
+import { useFingerprintImportStore } from '@/stores/fingerprintImport'
 
 const router = useRouter()
 const route = useRoute()
+const bgExport = useBackgroundExportStore()
+const fpImport = useFingerprintImportStore()
 
 const sources = ref([])
 const loadingSources = ref(false)
@@ -532,7 +536,12 @@ async function applyRouteQuery() {
 }
 
 async function refreshConsole() {
-  await Promise.all([loadSources(), loadJobHistory()])
+  await Promise.all([
+    loadSources(),
+    loadJobHistory(),
+    bgExport.syncFromServer(),
+    fpImport.syncFromServer(),
+  ])
   if (!routeApplied.value) {
     await applyRouteQuery()
     routeApplied.value = true
@@ -540,6 +549,8 @@ async function refreshConsole() {
 }
 
 usePageDataRefresh(refreshConsole, {
+  // Sources may be empty forever; treat job-history load readiness via length OR sources.
+  // Keep focus refresh for this volatile console only.
   isEmpty: () => !sources.value.length && !jobHistory.value.length,
   intervalMs: 1500,
   maxEmptyRetries: 10,

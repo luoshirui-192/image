@@ -9,6 +9,16 @@ const request = axios.create({
 })
 
 let refreshing = null
+/** Depth counter: while > 0, interceptor skips ElMessage (used by callWithRetry mid-attempts). */
+let suppressGlobalErrorDepth = 0
+
+export function beginSuppressGlobalError() {
+  suppressGlobalErrorDepth += 1
+}
+
+export function endSuppressGlobalError() {
+  suppressGlobalErrorDepth = Math.max(0, suppressGlobalErrorDepth - 1)
+}
 
 request.interceptors.request.use((config) => {
   const auth = useAuthStore()
@@ -62,7 +72,7 @@ request.interceptors.response.use(
       error.response?.data?.message ||
       error.message ||
       '网络请求失败'
-    if (status !== 401 && !error.config?.skipGlobalError) {
+    if (status !== 401 && !error.config?.skipGlobalError && suppressGlobalErrorDepth === 0) {
       ElMessage.error(message)
     }
     const err = new Error(message)

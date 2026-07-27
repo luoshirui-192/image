@@ -698,6 +698,23 @@ class FingerprintAPITestCase(TestCase):
         self.assertEqual(caps_data["pair_meta"]["image_reg"], "100001_right_index")
         self.assertEqual(caps_data["pair_meta"]["image_match"], "100002_right_index")
 
+    def test_reclaim_orphaned_fingerprint_import_jobs(self):
+        from fingerprints.job_service import reclaim_orphaned_import_jobs
+        from fingerprints.models import FingerprintImportJob
+
+        job = FingerprintImportJob.objects.create(
+            zip_name="orphan.zip",
+            zip_path="/tmp/orphan.zip",
+            status=FingerprintImportJob.STATUS_RUNNING,
+            algo_version="1.0",
+            message="stuck",
+        )
+        count = reclaim_orphaned_import_jobs(reason="测试重启")
+        self.assertEqual(count, 1)
+        job.refresh_from_db()
+        self.assertEqual(job.status, FingerprintImportJob.STATUS_PENDING)
+        self.assertIn("测试重启", job.message)
+
 
 class PathWritebackUnitTestCase(TestCase):
     def test_parse_disabled(self):

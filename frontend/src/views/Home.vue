@@ -45,7 +45,7 @@ async function loadHealth() {
 
 usePageDataRefresh(loadHealth, {
   isEmpty: () => !health.value,
-  alwaysRefreshOnVisible: true,
+  alwaysRefreshOnVisible: false,
   intervalMs: 1500,
   maxEmptyRetries: 10,
   mountRetryDelaysMs: [200, 600, 1500, 3000],

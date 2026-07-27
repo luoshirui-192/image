@@ -38,10 +38,12 @@ python /app/docker/ensure_mysql57_triggers.py
 echo "==> ensure file_hash column"
 python /app/docker/ensure_file_hash_column.py
 
-echo "==> reclaim orphaned export/migration jobs"
+echo "==> reclaim orphaned export/migration/fingerprint-import jobs"
 # include-paused: after restart, paused jobs must not wedge the serial queue
 python manage.py reclaim_blob_export_jobs --no-kick --include-paused || true
 python manage.py reclaim_blob_migration_jobs --no-kick || true
+# Do not kick FP imports here: threads would die when exec replaces this process with gunicorn.
+python manage.py reclaim_fingerprint_import_jobs --no-kick || true
 
 echo "==> start export worker (sidecar; long-lived sync runner)"
 # Owns long exports. Do NOT run sync export in this script before gunicorn —

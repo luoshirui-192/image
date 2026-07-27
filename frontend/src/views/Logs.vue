@@ -12,6 +12,7 @@ import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 
 const loading = ref(false)
 const logs = ref([])
+const logsLoadedOnce = ref(false)
 const pagination = reactive({
   page: 1,
   pageSize: 20,
@@ -51,6 +52,7 @@ async function loadLogs() {
     const data = res.data || {}
     logs.value = data.results || []
     pagination.total = data.count || 0
+    logsLoadedOnce.value = true
   } finally {
     loading.value = false
   }
@@ -98,8 +100,9 @@ function copySql() {
 }
 
 usePageDataRefresh(loadLogs, {
-  isEmpty: () => !logs.value.length,
-  alwaysRefreshOnVisible: true,
+  // Empty filtered results are valid; only retry before first successful fetch.
+  isEmpty: () => !logsLoadedOnce.value,
+  alwaysRefreshOnVisible: false,
   intervalMs: 1500,
   maxEmptyRetries: 10,
   mountRetryDelaysMs: [200, 600, 1500, 3000],
