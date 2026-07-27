@@ -24,7 +24,7 @@ const roleLabel = computed(() => (auth.isAdmin ? '服务器管理员' : '客户�
 const roleHint = computed(() =>
   auth.isAdmin
     ? '可管理操作日志、系统设置及全部功能'
-    : '可上传图片；在「数据库模拟」扫表建配置与一键迁移，在「迁移任务台」监控任务',
+    : '可上传图片；在「数据库模拟」扫表建配置与一键迁移，在「任务台」监控任务',
 )
 
 function goToMenu(item) {

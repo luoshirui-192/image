@@ -9,28 +9,25 @@ import {
 import { useAuthStore } from '@/stores/auth'
 import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 import {
-  cancelFingerprintImportJobApi,
   createFingerprintLayerTypeApi,
   fetchFingerprintBizMetaApi,
   fetchFingerprintBizPairViewApi,
   fetchFingerprintBizPairsApi,
   fetchFingerprintBizSampleViewApi,
   fetchFingerprintBizSamplesApi,
-  fetchFingerprintImportJobApi,
   fetchFingerprintLayerTypesApi,
-  importFingerprintZipApi,
   updateFingerprintLayerTypeApi,
 } from '@/api/fingerprints'
+import FingerprintImportDialog from '@/components/FingerprintImportDialog.vue'
+import { useFingerprintImportStore } from '@/stores/fingerprintImport'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const fpImport = useFingerprintImportStore()
 
 const loading = ref(false)
 const compareLoading = ref(false)
-const importing = ref(false)
-const importJob = ref(null)
-const pollTimer = ref(null)
 
 const rows = ref([])
 const total = ref(0)
@@ -42,13 +39,7 @@ const comparePanelRef = ref(null)
 const treeRef = ref(null)
 
 const importDialogVisible = ref(false)
-const importFile = ref(null)
-const importVersion = ref('1.0')
-const importFailOnDuplicates = ref(false)
-const dupReportExpanded = ref(false)
 
-const wbEnabled = ref(false)
-const wbLoading = ref(false)
 const wbConnections = ref([])
 const wbConnectionKey = ref('')
 
@@ -56,18 +47,11 @@ const wbConnectionKey = ref('')
 const browseConnectionKey = ref('')
 const browseLoading = ref(false)
 
-const selectedWbConnection = computed(() =>
-  wbConnections.value.find((c) => connectionKey(c) === wbConnectionKey.value) || null,
-)
 const selectedBrowseConnection = computed(() =>
   wbConnections.value.find((c) => connectionKey(c) === browseConnectionKey.value) || null,
 )
 
-const dupReport = computed(() => importJob.value?.duplicate_report || null)
-const dupWarningRows = computed(() => {
-  const list = dupReport.value?.warnings || []
-  return list.slice(0, 50)
-})
+const activeImportJob = computed(() => fpImport.latestActive)
 
 function connectionKey(conn) {
   if (!conn) return ''
@@ -90,16 +74,10 @@ function connectionQueryParams(conn) {
   return params
 }
 
-function resetWritebackForm() {
-  wbEnabled.value = false
-  wbConnectionKey.value = ''
-}
-
 let suppressConnWatch = false
 
 async function ensureConnections({ force = false } = {}) {
   if (wbConnections.value.length && !force) return
-  wbLoading.value = true
   browseLoading.value = true
   try {
     const res = await listBlobCatalogConnectionsApi()
@@ -123,28 +101,8 @@ async function ensureConnections({ force = false } = {}) {
   } catch (err) {
     ElMessage.error(err.message || '加载数据库连接失败')
   } finally {
-    wbLoading.value = false
     browseLoading.value = false
   }
-}
-
-function buildPathWritebackPayload() {
-  if (!wbEnabled.value) return null
-  const conn = selectedWbConnection.value
-  if (!conn) {
-    throw new Error('启用路径写回时请选择数据库连接（需能访问 ara_fp_analyst）')
-  }
-  const payload = {
-    enabled: true,
-    database: 'ara_fp_analyst',
-    dataset_code: 'PK_5W',
-  }
-  if (conn.connection_id != null) {
-    payload.connection_id = conn.connection_id
-  } else {
-    payload.db_alias = conn.alias || 'default'
-  }
-  return payload
 }
 
 const typeDialogVisible = ref(false)
@@ -629,99 +587,17 @@ watch(browseConnectionKey, async () => {
   await loadSamples()
 })
 
-function stopPoll() {
-  if (pollTimer.value) {
-    clearInterval(pollTimer.value)
-    pollTimer.value = null
-  }
-  pollInFlight.value = false
-  pollFailStreak.value = 0
-}
-
-const pollInFlight = ref(false)
-const pollFailStreak = ref(0)
-
-function normalizeImportJobPayload(jobPayload) {
-  const data = jobPayload?.data ?? jobPayload
-  if (!data || typeof data !== 'object') return null
-  if (data.job && typeof data.job === 'object') return data.job
-  if (data.id != null || data.status != null) return data
-  return null
-}
-
-async function pollImportJob(jobId) {
-  if (jobId == null || jobId === '') {
-    stopPoll()
-    importing.value = false
-    return
-  }
-  if (pollInFlight.value) return
-  pollInFlight.value = true
-  try {
-    const res = await fetchFingerprintImportJobApi(jobId)
-    const job = normalizeImportJobPayload(res)
-    if (!job) {
-      pollFailStreak.value += 1
-      if (pollFailStreak.value >= 5) {
-        stopPoll()
-        importing.value = false
-        ElMessage.error('导入进度接口连续返回异常格式，已停止轮询（导入可能仍在后台进行）')
-      }
-      return
-    }
-    pollFailStreak.value = 0
-    importJob.value = job
-    const status = job.status
-    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-      stopPoll()
-      importing.value = false
-      const dupTotal = Number(job.duplicate_report?.total || 0)
-      if (dupTotal > 0) dupReportExpanded.value = true
-      if (status === 'completed') {
-        const wbFail = Number(job.writeback_failed || 0)
-        const wbOk = Number(job.writeback_inserted || job.writeback_updated || 0)
-        if (job.path_writeback_enabled && wbFail > 0) {
-          ElMessage.warning(
-            job.message || `导入完成，路径写回成功 ${wbOk} / 失败 ${wbFail}（见进度区）`,
-          )
-        } else if (dupTotal > 0) {
-          ElMessage.warning(job.message || `导入完成，发现 ${dupTotal} 项重复`)
-        } else {
-          ElMessage.success(job.message || '导入完成')
-        }
-      } else if (status === 'failed') ElMessage.error(job.message || job.last_error || '导入失败')
-      else ElMessage.warning(job.message || '已取消')
-      await loadMeta()
-      await loadSamples()
-      if (hasSelection.value) await loadView()
-    }
-  } catch (err) {
-    pollFailStreak.value += 1
-    if (pollFailStreak.value >= 5) {
-      stopPoll()
-      importing.value = false
-      ElMessage.error(err.message || '查询导入进度失败（导入可能仍在后台进行）')
-    }
-  } finally {
-    pollInFlight.value = false
-  }
-}
-
 function openImportDialog() {
-  importFile.value = null
-  importVersion.value = '1.0'
-  importFailOnDuplicates.value = false
-  resetWritebackForm()
   importDialogVisible.value = true
 }
 
-watch(wbEnabled, (on) => {
-  if (on) void ensureConnections({ force: true })
-})
+async function onImportStarted(job) {
+  fpImport.trackJob(job)
+}
 
-watch(importDialogVisible, (open) => {
-  if (open) void ensureConnections({ force: true })
-})
+function goTaskConsole() {
+  void router.push({ path: '/blob-migrate' })
+}
 
 watch(typeDialogVisible, (open) => {
   if (open) void loadTypeRows()
@@ -738,71 +614,20 @@ watch(
   },
 )
 
-function dupTypeLabel(type) {
-  const map = {
-    zip_duplicate_content: '包内同内容',
-    zip_name_collision: '同名覆盖',
-    pair_same_bmp: '左右同图',
-    cross_pair_shared_bmp: '跨配对共用',
-  }
-  return map[type] || type
-}
-
-function onImportFileChange(uploadFile) {
-  importFile.value = uploadFile.raw || null
-}
-
-async function submitImport() {
-  if (!importFile.value) {
-    ElMessage.warning('请选择 zip 文件')
-    return
-  }
-  const ver = (importVersion.value || '').trim()
-  if (!ver) {
-    ElMessage.warning('请填写算法版本')
-    return
-  }
-  let pathWriteback = null
-  try {
-    pathWriteback = buildPathWritebackPayload()
-  } catch (err) {
-    ElMessage.warning(err.message || '路径写回配置不完整')
-    return
-  }
-  importing.value = true
-  importJob.value = null
-  importDialogVisible.value = false
-  stopPoll()
-  try {
-    const res = await importFingerprintZipApi(importFile.value, {
-      algo_version: ver,
-      skip_existing: true,
-      fail_on_duplicates: importFailOnDuplicates.value,
-      path_writeback: pathWriteback,
-    })
-    const job = res?.data?.job
-    if (!job?.id) {
-      importing.value = false
-      ElMessage.error('未拿到导入任务')
-      return
-    }
-    importJob.value = job
-    pollTimer.value = setInterval(() => pollImportJob(job.id), 1200)
-    await pollImportJob(job.id)
-  } catch (err) {
-    importing.value = false
-    ElMessage.error(err.message || '启动导入失败')
-  }
-}
-
-async function onCancelImport() {
-  if (!importJob.value?.id) return
-  try {
-    await cancelFingerprintImportJobApi(importJob.value.id)
-  } catch (err) {
-    ElMessage.error(err.message || '取消失败')
-  }
-}
+// When an import finishes (polled on 任务台 / layout), refresh browse lists.
+watch(
+  () => fpImport.jobs.map((j) => `${j.id}:${j.status}`).join('|'),
+  async (next, prev) => {
+    if (!prev || next === prev) return
+    const finished = fpImport.jobs.some(
+      (j) => ['completed', 'failed', 'cancelled'].includes(j.status),
+    )
+    if (!finished) return
+    await loadMeta()
+    await loadSamples()
+    if (hasSelection.value) await loadView()
+  },
+)
 
 async function loadTypeRows() {
   typeLoading.value = true
@@ -899,7 +724,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onPreviewKeydown, true)
-  stopPoll()
   revokeUrls()
   if (filterTimer) clearTimeout(filterTimer)
 })
@@ -934,62 +758,25 @@ onBeforeUnmount(() => {
         </el-select>
         <el-button @click="goEvalPage">评测指标</el-button>
         <el-button v-if="auth.isAdmin" @click="openTypeDialog">特征类型</el-button>
-        <el-button type="primary" :loading="importing" @click="openImportDialog">导入 zip</el-button>
-        <el-button v-if="importing && importJob" @click="onCancelImport">取消导入</el-button>
+        <el-button type="primary" @click="openImportDialog">导入 zip</el-button>
+        <el-button plain @click="goTaskConsole">任务台</el-button>
       </div>
     </div>
 
-    <el-card v-if="importJob" shadow="never" class="import-progress">
-      <div class="import-progress-head">
-        <strong>{{ importJob.zip_name || '导入任务' }}</strong>
-        <span>{{ importJob.status }} · {{ importJob.message }}</span>
-      </div>
-      <el-progress
-        :percentage="Number(importJob.percent || 0)"
-        :status="importJob.status === 'failed' ? 'exception' : (importJob.status === 'completed' ? 'success' : undefined)"
-      />
-      <div class="import-progress-meta">
-        进度 {{ importJob.processed || 0 }}/{{ importJob.total_estimate || '?' }}
-        · 成功 {{ importJob.succeeded || 0 }}
-        · 跳过 {{ importJob.skipped || 0 }}
-        · 失败 {{ importJob.failed || 0 }}
-        <template v-if="importJob.library_bmp_reused">
-          · 图库复用 bmp {{ importJob.library_bmp_reused }}
-        </template>
-        <template v-if="importJob.path_writeback_enabled">
-          · 路径写回 插入 {{ importJob.writeback_inserted || importJob.writeback_updated || 0 }}
-          / 跳过 {{ importJob.writeback_skipped || 0 }}
-          / 失败 {{ importJob.writeback_failed || 0 }}
-        </template>
-      </div>
-      <div
-        v-if="importJob.path_writeback_enabled && (importJob.writeback_errors || []).length"
-        class="dup-report"
-      >
-        <div class="dup-report-head"><strong>写回错误</strong></div>
-        <ul class="wb-errors">
-          <li v-for="(err, i) in importJob.writeback_errors" :key="i">{{ err }}</li>
-        </ul>
-      </div>
-      <div v-if="dupReport && dupReport.total > 0" class="dup-report">
-        <div class="dup-report-head">
-          <strong>重复检测</strong>
-          <span class="muted">{{ dupReport.total }} 项</span>
-          <el-button link type="primary" @click="dupReportExpanded = !dupReportExpanded">
-            {{ dupReportExpanded ? '收起' : '展开' }}
-          </el-button>
-        </div>
-        <div v-if="dupReportExpanded" class="dup-report-body">
-          <div v-for="(w, idx) in dupWarningRows" :key="idx" class="dup-row">
-            <el-tag size="small" type="warning">{{ dupTypeLabel(w.type) }}</el-tag>
-            <span class="dup-paths">{{ (w.paths || w.names || []).join(' · ') }}</span>
-          </div>
-          <div v-if="(dupReport.warnings || []).length > dupWarningRows.length" class="muted">
-            仅显示前 {{ dupWarningRows.length }} 条
-          </div>
-        </div>
-      </div>
-    </el-card>
+    <el-alert
+      v-if="activeImportJob"
+      type="info"
+      show-icon
+      :closable="false"
+      class="import-banner"
+    >
+      <template #title>
+        导入进行中：{{ activeImportJob.zip_name || `#${activeImportJob.id}` }}
+        · {{ activeImportJob.percent || 0 }}%
+        ·
+        <el-button link type="primary" @click="goTaskConsole">在任务台查看</el-button>
+      </template>
+    </el-alert>
 
     <div class="layout">
       <aside class="tree-panel" v-loading="loading">
@@ -1134,53 +921,7 @@ onBeforeUnmount(() => {
       </main>
     </div>
 
-    <el-dialog v-model="importDialogVisible" title="导入 batmatch zip" width="640px">
-      <p class="dialog-tip">
-        导入仍写入本系统图库与配对表；开启<strong>路径写回</strong>后才会进入业务表，左侧树才能看到样本。
-      </p>
-      <el-form label-width="110px" v-loading="wbLoading">
-        <el-form-item label="算法版本" required>
-          <el-input v-model="importVersion" placeholder="例如 1.0 / 2.0 / bidiso-2024" />
-        </el-form-item>
-        <el-form-item label="zip 文件" required>
-          <el-upload :auto-upload="false" :show-file-list="true" :limit="1" accept=".zip" :on-change="onImportFileChange">
-            <el-button>选择文件</el-button>
-          </el-upload>
-        </el-form-item>
-        <el-form-item label="严格模式">
-          <el-checkbox v-model="importFailOnDuplicates">
-            发现左右同图 / 同名覆盖时中止导入
-          </el-checkbox>
-        </el-form-item>
-
-        <el-divider content-position="left">路径写回（浏览数据源）</el-divider>
-        <p class="dialog-tip">
-          固定写入 <code>ara_fp_analyst.T_CAP_FP_DATA</code> /
-          <code>T_FEATURE_RECORD</code>；
-          图像路径进 <code>fingerprint_image</code>，
-          Bidiso→<code>feature_ara_data</code>，Neuiso→<code>feature_neuro_data</code>。
-        </p>
-        <el-form-item label="启用写回">
-          <el-switch v-model="wbEnabled" />
-        </el-form-item>
-        <template v-if="wbEnabled">
-          <el-form-item label="数据库连接" required>
-            <el-select v-model="wbConnectionKey" filterable placeholder="选择能访问 ara_fp_analyst 的连接" style="width: 100%">
-              <el-option
-                v-for="conn in wbConnections"
-                :key="connectionKey(conn)"
-                :label="conn.label || conn.alias"
-                :value="connectionKey(conn)"
-              />
-            </el-select>
-          </el-form-item>
-        </template>
-      </el-form>
-      <template #footer>
-        <el-button @click="importDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitImport">开始导入</el-button>
-      </template>
-    </el-dialog>
+    <FingerprintImportDialog v-model="importDialogVisible" @started="onImportStarted" />
 
     <el-dialog v-model="typeDialogVisible" title="特征类型配置" width="720px" @opened="loadTypeRows">
       <p class="dialog-tip">业务浏览当前映射：feature_ara_data→bidiso，feature_neuro_data→neuiso。</p>
@@ -1257,6 +998,9 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+.import-banner {
+  flex-shrink: 0;
 }
 .import-progress { flex-shrink: 0; }
 .import-progress-head {

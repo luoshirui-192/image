@@ -21,10 +21,10 @@ export const MENU_ITEMS = [
   {
     path: 'blob-migrate',
     name: 'blob-migrate',
-    title: '迁移任务台',
+    title: '任务台',
     icon: 'Connection',
     adminOnly: false,
-    description: '迁移源进度、预检/全量任务、暂停继续与错误导出',
+    description: 'BLOB 迁移、路径导出、指纹 ZIP 导入任务监控',
   },
   {
     path: 'blob-browse',

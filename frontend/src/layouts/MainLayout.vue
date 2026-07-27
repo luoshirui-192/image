@@ -52,6 +52,7 @@ import { filterMenuByRole, resolveActiveMenuPath } from '@/config/menu'
 
 import { useAuthStore } from '@/stores/auth'
 import { useBackgroundExportStore } from '@/stores/backgroundExport'
+import { useFingerprintImportStore } from '@/stores/fingerprintImport'
 
 
 
@@ -65,6 +66,7 @@ const router = useRouter()
 
 const auth = useAuthStore()
 const bgExport = useBackgroundExportStore()
+const fpImport = useFingerprintImportStore()
 
 
 
@@ -204,8 +206,9 @@ onMounted(() => {
 
   window.addEventListener('resize', checkMobile)
 
-  // Resume export job polling without a floating overlay; progress lives on 迁移任务台.
+  // Resume background job polling; progress lives on 任务台.
   void bgExport.restoreFromSession()
+  void fpImport.restoreFromSession()
 
 })
 

@@ -2,14 +2,12 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ElMessage } from 'element-plus'
 import {
-  cancelBlobSimulatedExportJobApi,
-  getBlobSimulatedExportJobApi,
-  listBlobSimulatedExportJobsApi,
-  pauseBlobSimulatedExportJobApi,
-  resumeBlobSimulatedExportJobApi,
-} from '@/api/images'
+  cancelFingerprintImportJobApi,
+  fetchFingerprintImportJobApi,
+  fetchFingerprintImportJobsApi,
+} from '@/api/fingerprints'
 
-const STORAGE_KEY = 'image_db_bg_export_jobs'
+const STORAGE_KEY = 'image_db_fp_import_jobs'
 
 function loadPersistedIds() {
   try {
@@ -25,14 +23,22 @@ function persistIds(ids) {
   sessionStorage.setItem(STORAGE_KEY, JSON.stringify([...new Set(ids)]))
 }
 
-export const useBackgroundExportStore = defineStore('backgroundExport', () => {
+function normalizeJob(payload) {
+  const data = payload?.data ?? payload
+  if (!data || typeof data !== 'object') return null
+  if (data.job && typeof data.job === 'object') return data.job
+  if (data.id != null || data.status != null) return data
+  return null
+}
+
+export const useFingerprintImportStore = defineStore('fingerprintImport', () => {
   /** @type {import('vue').Ref<Array<Record<string, any>>>} */
   const jobs = ref([])
   const loadingList = ref(false)
   let pollTimer = null
 
   const activeJobs = computed(() =>
-    jobs.value.filter((j) => ['pending', 'running', 'paused'].includes(j.status)),
+    jobs.value.filter((j) => ['pending', 'running'].includes(j.status)),
   )
   const visibleJobs = computed(() =>
     [...jobs.value]
@@ -40,6 +46,7 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
       .sort((a, b) => Number(b.id) - Number(a.id)),
   )
   const hasVisible = computed(() => visibleJobs.value.length > 0)
+  const latestActive = computed(() => activeJobs.value[0] || null)
 
   function upsertJob(job) {
     if (!job?.id) return
@@ -55,54 +62,58 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     const idx = jobs.value.findIndex((j) => j.id === jobId)
     if (idx < 0) return
     const job = jobs.value[idx]
-    if (['pending', 'running', 'paused'].includes(job.status)) {
-      return
-    }
+    if (['pending', 'running'].includes(job.status)) return
     jobs.value.splice(idx, 1)
     persistIds(jobs.value.map((j) => j.id))
     if (!activeJobs.value.length) stopPolling()
   }
 
   function clearFinished() {
-    jobs.value = jobs.value.filter((j) =>
-      ['pending', 'running', 'paused'].includes(j.status),
-    )
+    jobs.value = jobs.value.filter((j) => ['pending', 'running'].includes(j.status))
     persistIds(jobs.value.map((j) => j.id))
   }
 
   async function refreshJob(jobId) {
-    const res = await getBlobSimulatedExportJobApi(jobId)
-    const job = res?.data
+    const res = await fetchFingerprintImportJobApi(jobId)
+    const job = normalizeJob(res)
     if (!job || typeof job !== 'object') return null
     const prev = jobs.value.find((j) => j.id === jobId)
     const wasActive = prev && ['pending', 'running'].includes(prev.status)
     upsertJob(job)
     if (wasActive && job.status === 'completed') {
-      ElMessage.success(job.message || `导出任务 #${jobId} 已完成`)
+      const dupTotal = Number(job.duplicate_report?.total || 0)
+      const wbFail = Number(job.writeback_failed || 0)
+      if (job.path_writeback_enabled && wbFail > 0) {
+        ElMessage.warning(job.message || `导入 #${jobId} 完成，路径写回有失败`)
+      } else if (dupTotal > 0) {
+        ElMessage.warning(job.message || `导入 #${jobId} 完成，发现 ${dupTotal} 项重复`)
+      } else {
+        ElMessage.success(job.message || `导入任务 #${jobId} 已完成`)
+      }
     } else if (wasActive && job.status === 'failed') {
-      ElMessage.error(job.message || job.last_error || `导出任务 #${jobId} 失败`)
+      ElMessage.error(job.message || job.last_error || `导入任务 #${jobId} 失败`)
     } else if (wasActive && job.status === 'cancelled') {
-      ElMessage.warning(job.message || `导出任务 #${jobId} 已取消`)
-    } else if (wasActive && job.status === 'paused') {
-      ElMessage.info(job.message || `导出任务 #${jobId} 已暂停`)
+      ElMessage.warning(job.message || `导入任务 #${jobId} 已取消`)
     }
     return job
   }
 
-  /** Pull active (+ recent) jobs from server so UI matches DB even after refresh/other clients. */
   async function syncFromServer() {
     loadingList.value = true
     try {
-      const res = await listBlobSimulatedExportJobsApi({ activeOnly: false, limit: 30 })
-      const list = Array.isArray(res?.data) ? res.data : []
+      const res = await fetchFingerprintImportJobsApi({ limit: 30 })
+      const payload = res?.data
+      const list = Array.isArray(payload?.items)
+        ? payload.items
+        : Array.isArray(payload)
+          ? payload
+          : []
       for (const job of list) {
         if (!job?.id) continue
-        // Keep finished jobs only if already tracked, or if still active/paused.
-        const active = ['pending', 'running', 'paused'].includes(job.status)
+        const active = ['pending', 'running'].includes(job.status)
         const known = jobs.value.some((j) => j.id === job.id)
         if (active || known) upsertJob(job)
       }
-      // Also ensure any session ids not in list get refreshed.
       const listedIds = new Set(list.map((j) => j.id))
       for (const id of loadPersistedIds()) {
         if (!listedIds.has(id)) {
@@ -115,47 +126,25 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
       }
       if (activeJobs.value.length) startPolling()
     } catch {
-      // ignore list errors; session restore may still work
+      // ignore
     } finally {
       loadingList.value = false
     }
   }
 
   async function pollAll() {
-    // Prefer a cheap list of active jobs so we discover server-side workers (unstick/sidecar).
-    try {
-      const res = await listBlobSimulatedExportJobsApi({ activeOnly: true, limit: 50 })
-      const list = Array.isArray(res?.data) ? res.data : []
-      const seen = new Set()
-      for (const job of list) {
-        if (!job?.id) continue
-        seen.add(job.id)
-        upsertJob(job)
-      }
-      // Refresh any locally tracked active ids missing from list (race).
-      for (const j of jobs.value) {
-        if (['pending', 'running', 'paused'].includes(j.status) && !seen.has(j.id)) {
-          try {
-            await refreshJob(j.id)
-          } catch {
-            // ignore
-          }
+    const ids = jobs.value
+      .filter((j) => ['pending', 'running'].includes(j.status))
+      .map((j) => j.id)
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          await refreshJob(id)
+        } catch {
+          // ignore
         }
-      }
-    } catch {
-      const ids = jobs.value
-        .filter((j) => ['pending', 'running', 'paused'].includes(j.status))
-        .map((j) => j.id)
-      await Promise.all(
-        ids.map(async (id) => {
-          try {
-            await refreshJob(id)
-          } catch {
-            // ignore
-          }
-        }),
-      )
-    }
+      }),
+    )
     if (!activeJobs.value.length) stopPolling()
   }
 
@@ -173,38 +162,23 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     }
   }
 
-  /** Call after starting an export job from any page. */
+  /** Call after starting an import from any page. */
   function trackJob(job, { notify = true } = {}) {
     if (!job?.id) return
     upsertJob(job)
     if (notify) {
-      ElMessage.success(`导出已加入队列（任务 #${job.id}），可到「任务台」查看进度`)
+      ElMessage.success(`导入已加入队列（任务 #${job.id}），可到「任务台」查看进度`)
     }
     void pollAll()
     startPolling()
   }
 
   async function cancelJob(jobId) {
-    await cancelBlobSimulatedExportJobApi(jobId)
+    await cancelFingerprintImportJobApi(jobId)
     await refreshJob(jobId)
-    ElMessage.info(`已请求取消导出 #${jobId}`)
+    ElMessage.info(`已请求取消导入 #${jobId}`)
   }
 
-  async function pauseJob(jobId) {
-    await pauseBlobSimulatedExportJobApi(jobId)
-    await refreshJob(jobId)
-    startPolling()
-    ElMessage.info(`已请求暂停导出 #${jobId}`)
-  }
-
-  async function resumeJob(jobId) {
-    await resumeBlobSimulatedExportJobApi(jobId)
-    await refreshJob(jobId)
-    startPolling()
-    ElMessage.success(`导出 #${jobId} 已重新排队`)
-  }
-
-  /** Resume tracking after page reload / layout mount — prefer server list. */
   async function restoreFromSession() {
     await syncFromServer()
     const ids = loadPersistedIds()
@@ -212,11 +186,11 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
       ids.map(async (id) => {
         if (jobs.value.some((j) => j.id === id)) return
         try {
-          const res = await getBlobSimulatedExportJobApi(id)
-          const job = res?.data
+          const res = await fetchFingerprintImportJobApi(id)
+          const job = normalizeJob(res)
           if (job?.id) upsertJob(job)
         } catch {
-          // drop missing jobs
+          // drop
         }
       }),
     )
@@ -229,12 +203,11 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     activeJobs,
     visibleJobs,
     hasVisible,
+    latestActive,
     trackJob,
     dismissJob,
     clearFinished,
     cancelJob,
-    pauseJob,
-    resumeJob,
     restoreFromSession,
     syncFromServer,
     refreshJob,

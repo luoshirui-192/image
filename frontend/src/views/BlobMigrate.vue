@@ -1,6 +1,6 @@
 <script setup>
 /**
- * BLOB 迁移任务台：管任务（预检 / 全量 / 暂停继续 / 历史）。
+ * 任务台：BLOB 迁移 / 路径导出 / 指纹 ZIP 导入 三类后台任务。
  * 扫表建配置、一键迁移 → 数据库模拟；旧库连接 → 模拟页「管理连接」。
  */
 import { computed, onUnmounted, reactive, ref, watch } from 'vue'
@@ -29,6 +29,7 @@ import {
 } from '@/api/images'
 import ExternalDbConnectionsDialog from '@/components/ExternalDbConnectionsDialog.vue'
 import BackgroundExportDock from '@/components/BackgroundExportDock.vue'
+import FingerprintImportDock from '@/components/FingerprintImportDock.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -571,227 +572,240 @@ onUnmounted(() => {
     <div class="page-card">
       <div class="page-head">
         <div>
-          <h2 class="page-title">迁移任务台</h2>
+          <h2 class="page-title">任务台</h2>
           <p class="page-desc">
-            管理迁移源与后台任务（预检、全量、暂停/继续），以及「数据库模拟」发起的路径导出。
-            迁移与导出均全局串行排队：完成/取消/删除后自动开始下一个，暂停不会开下一个；日常扫表建配置请用「数据库模拟」。
+            集中查看三类后台任务：BLOB 迁移、路径导出、指纹 ZIP 导入。
+            迁移与导出全局串行排队（完成/取消/删除后自动开始下一个，暂停不会开下一个）；扫表建配置请用「数据库模拟」。
           </p>
         </div>
         <div class="page-actions">
           <el-button @click="connDialogVisible = true">管理旧库连接</el-button>
           <el-button type="primary" plain @click="router.push('/blob-browse')">打开数据库模拟</el-button>
+          <el-button plain @click="router.push('/fingerprint-pairs')">打开指纹浏览</el-button>
         </div>
       </div>
 
       <el-alert
-        title="部署更新 backend/scheduler 前请先暂停进行中的任务。配置与启迁在「数据库模拟」完成。"
+        title="部署更新 backend/scheduler 前请先暂停进行中的 BLOB 迁移/导出任务。配置与启迁在「数据库模拟」完成。"
         type="info"
         show-icon
         :closable="false"
         class="info-alert"
       />
 
-      <section class="section">
-        <BackgroundExportDock />
-      </section>
-
-      <section class="section">
-        <div class="section-head-row">
-          <h3>1. 已保存的迁移源</h3>
-          <div>
-            <el-button :loading="loadingSources" @click="refreshConsole">刷新</el-button>
-            <el-button type="primary" plain :loading="globalSyncLoading" @click="runGlobalDataSync">
-              全局数据同步
-            </el-button>
-          </div>
-        </div>
-        <p class="field-hint">
-          源由「数据库模拟」创建配置 / 一键迁移时自动生成。此处可选用、看进度或删除。
-        </p>
-        <el-table v-loading="loadingSources" :data="sources" size="small" border empty-text="暂无迁移源，请先到数据库模拟创建配置并一键迁移">
-          <el-table-column prop="id" label="ID" width="60" />
-          <el-table-column prop="name" label="名称" min-width="140" />
-          <el-table-column label="源" min-width="220">
-            <template #default="{ row }">
-              {{ row.db_alias }} · {{ row.source_table }}
-              <span v-if="row.source_object_type === 'view'"> [视图→{{ row.path_lookup_table || '?' }}]</span>
-              · {{ formatSourceColumns(row) }}
-            </template>
-          </el-table-column>
-          <el-table-column label="进度" min-width="200">
-            <template #default="{ row }">
-              <span v-if="row.stats">
-                已迁移 {{ row.stats.migrated }} / 共 {{ row.stats.total_with_blob }}
-                <el-tag v-if="row.stats.pending > 0" size="small" type="warning" style="margin-left: 8px">
-                  待处理 {{ row.stats.pending }}
-                </el-tag>
-                <el-tag v-else size="small" type="success" style="margin-left: 8px">已完成</el-tag>
-              </span>
-              <el-button v-else link type="primary" size="small" @click="refreshSourceStats(row.id)">
-                加载进度
+      <div class="task-boxes">
+        <section class="task-box">
+          <div class="task-box-head">
+            <h3>BLOB 迁移</h3>
+            <div>
+              <el-button size="small" :loading="loadingSources" @click="refreshConsole">刷新</el-button>
+              <el-button size="small" type="primary" plain :loading="globalSyncLoading" @click="runGlobalDataSync">
+                全局数据同步
               </el-button>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="120">
-            <template #default="{ row }">
-              <el-button link type="primary" @click="runOptions.sourceId = row.id">选用</el-button>
-              <el-button link type="danger" @click="removeSource(row.id)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </section>
-
-      <section class="section">
-        <h3>2. 执行与监控</h3>
-        <el-form inline class="run-form">
-          <el-form-item label="任务">
-            <el-select v-model="runOptions.sourceId" placeholder="选择迁移源" style="min-width: 220px">
-              <el-option
-                v-for="src in sources"
-                :key="src.id"
-                :label="`${src.id}: ${src.name || src.source_table}`"
-                :value="src.id"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="批次大小">
-            <el-input-number v-model="runOptions.batchSize" :min="1" :max="500" />
-          </el-form-item>
-          <el-form-item>
-            <el-checkbox v-model="runOptions.dryRun">仅预检（不写盘）</el-checkbox>
-          </el-form-item>
-          <el-form-item>
-            <el-checkbox v-model="runOptions.skipExisting">跳过已迁移</el-checkbox>
-          </el-form-item>
-          <el-form-item>
-            <el-checkbox v-model="runOptions.warmThumbsAfter">完成后预热缩略图</el-checkbox>
-          </el-form-item>
-          <el-form-item>
-            <el-button :loading="running && !jobInProgress" @click="executeMigration">预检一批</el-button>
-            <el-button
-              type="primary"
-              :loading="jobInProgress"
-              :disabled="runOptions.dryRun || jobInProgress"
-              @click="startFullMigration"
-            >
-              <el-icon><Refresh /></el-icon>
-              开始全量迁移
-            </el-button>
-            <el-button v-if="jobCanPause" type="warning" plain @click="pauseActiveJob">暂停</el-button>
-            <el-button v-if="jobInProgress" type="danger" plain @click="cancelActiveJob">取消</el-button>
-            <el-button v-if="jobIsPaused" type="primary" @click="resumePausedJob(displayJob)">继续迁移</el-button>
-          </el-form-item>
-        </el-form>
-
-        <div v-if="displayJob" class="job-progress-panel">
-          <div class="job-progress-head">
-            <span>{{ jobStatusLabel(displayJob.status) }}</span>
-            <span v-if="displayJob.eta_seconds != null" class="job-eta">
-              剩余 {{ formatEta(displayJob.eta_seconds) }}
-            </span>
-          </div>
-          <el-progress
-            :percentage="jobProgressPercent(displayJob)"
-            :indeterminate="jobProgressIndeterminate(displayJob)"
-            :status="
-              !jobInProgress && Number(liveStatsForJob(displayJob)?.pending ?? 1) <= 0
-                ? 'success'
-                : displayJob.status === 'failed' && jobNeedsRetry(displayJob)
-                  ? 'exception'
-                  : displayJob.status === 'completed'
-                    ? 'success'
-                    : undefined
-            "
-            :stroke-width="16"
-            striped
-            :striped-flow="jobInProgress && displayJob.status === 'running'"
-          />
-          <p class="job-stats">{{ formatLiveProgress(displayJob) }}</p>
-          <p v-if="jobInProgress" class="job-message field-hint">
-            任务由 scheduler 执行；更新部署前请先点「暂停」。
-          </p>
-          <p v-else-if="jobIsPaused" class="job-message field-hint">
-            任务已暂停，可安全更新 backend/scheduler，完成后点「继续迁移」。
-          </p>
-          <p v-else-if="displayJob.message" class="job-message">{{ displayJob.message }}</p>
-          <div v-if="displayJob.recent_errors?.length && jobHasFailedRows(displayJob)" class="job-errors">
-            <div v-for="(err, idx) in displayJob.recent_errors" :key="idx" class="job-error-line">
-              {{ err.source_pk }}: {{ err.error }}
             </div>
           </div>
-          <div v-if="(jobNeedsRetry(displayJob) || jobIsPaused) && !jobInProgress" class="job-actions">
-            <el-button v-if="jobIsPaused" size="small" type="primary" @click="resumePausedJob(displayJob)">
-              继续迁移
-            </el-button>
-            <el-button v-else size="small" type="primary" @click="retryFailedJob(displayJob)">
-              {{ jobHasFailedRows(displayJob) ? '重试失败项' : '继续迁移待处理项' }}
-            </el-button>
+          <p class="field-hint">
+            源由「数据库模拟」创建配置 / 一键迁移时自动生成。此处可选用、预检、全量迁移与查看历史。
+          </p>
+
+          <h4 class="subsection-title">已保存的迁移源</h4>
+          <el-table
+            v-loading="loadingSources"
+            :data="sources"
+            size="small"
+            border
+            empty-text="暂无迁移源，请先到数据库模拟创建配置并一键迁移"
+          >
+            <el-table-column prop="id" label="ID" width="60" />
+            <el-table-column prop="name" label="名称" min-width="140" />
+            <el-table-column label="源" min-width="220">
+              <template #default="{ row }">
+                {{ row.db_alias }} · {{ row.source_table }}
+                <span v-if="row.source_object_type === 'view'"> [视图→{{ row.path_lookup_table || '?' }}]</span>
+                · {{ formatSourceColumns(row) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="进度" min-width="200">
+              <template #default="{ row }">
+                <span v-if="row.stats">
+                  已迁移 {{ row.stats.migrated }} / 共 {{ row.stats.total_with_blob }}
+                  <el-tag v-if="row.stats.pending > 0" size="small" type="warning" style="margin-left: 8px">
+                    待处理 {{ row.stats.pending }}
+                  </el-tag>
+                  <el-tag v-else size="small" type="success" style="margin-left: 8px">已完成</el-tag>
+                </span>
+                <el-button v-else link type="primary" size="small" @click="refreshSourceStats(row.id)">
+                  加载进度
+                </el-button>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="runOptions.sourceId = row.id">选用</el-button>
+                <el-button link type="danger" @click="removeSource(row.id)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <h4 class="subsection-title exec-title">执行与监控</h4>
+          <el-form inline class="run-form">
+            <el-form-item label="任务">
+              <el-select v-model="runOptions.sourceId" placeholder="选择迁移源" style="min-width: 220px">
+                <el-option
+                  v-for="src in sources"
+                  :key="src.id"
+                  :label="`${src.id}: ${src.name || src.source_table}`"
+                  :value="src.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="批次大小">
+              <el-input-number v-model="runOptions.batchSize" :min="1" :max="500" />
+            </el-form-item>
+            <el-form-item>
+              <el-checkbox v-model="runOptions.dryRun">仅预检（不写盘）</el-checkbox>
+            </el-form-item>
+            <el-form-item>
+              <el-checkbox v-model="runOptions.skipExisting">跳过已迁移</el-checkbox>
+            </el-form-item>
+            <el-form-item>
+              <el-checkbox v-model="runOptions.warmThumbsAfter">完成后预热缩略图</el-checkbox>
+            </el-form-item>
+            <el-form-item>
+              <el-button :loading="running && !jobInProgress" @click="executeMigration">预检一批</el-button>
+              <el-button
+                type="primary"
+                :loading="jobInProgress"
+                :disabled="runOptions.dryRun || jobInProgress"
+                @click="startFullMigration"
+              >
+                <el-icon><Refresh /></el-icon>
+                开始全量迁移
+              </el-button>
+              <el-button v-if="jobCanPause" type="warning" plain @click="pauseActiveJob">暂停</el-button>
+              <el-button v-if="jobInProgress" type="danger" plain @click="cancelActiveJob">取消</el-button>
+              <el-button v-if="jobIsPaused" type="primary" @click="resumePausedJob(displayJob)">继续迁移</el-button>
+            </el-form-item>
+          </el-form>
+
+          <div v-if="displayJob" class="job-progress-panel">
+            <div class="job-progress-head">
+              <span>{{ jobStatusLabel(displayJob.status) }}</span>
+              <span v-if="displayJob.eta_seconds != null" class="job-eta">
+                剩余 {{ formatEta(displayJob.eta_seconds) }}
+              </span>
+            </div>
+            <el-progress
+              :percentage="jobProgressPercent(displayJob)"
+              :indeterminate="jobProgressIndeterminate(displayJob)"
+              :status="
+                !jobInProgress && Number(liveStatsForJob(displayJob)?.pending ?? 1) <= 0
+                  ? 'success'
+                  : displayJob.status === 'failed' && jobNeedsRetry(displayJob)
+                    ? 'exception'
+                    : displayJob.status === 'completed'
+                      ? 'success'
+                      : undefined
+              "
+              :stroke-width="16"
+              striped
+              :striped-flow="jobInProgress && displayJob.status === 'running'"
+            />
+            <p class="job-stats">{{ formatLiveProgress(displayJob) }}</p>
+            <p v-if="jobInProgress" class="job-message field-hint">
+              任务由 scheduler 执行；更新部署前请先点「暂停」。
+            </p>
+            <p v-else-if="jobIsPaused" class="job-message field-hint">
+              任务已暂停，可安全更新 backend/scheduler，完成后点「继续迁移」。
+            </p>
+            <p v-else-if="displayJob.message" class="job-message">{{ displayJob.message }}</p>
+            <div v-if="displayJob.recent_errors?.length && jobHasFailedRows(displayJob)" class="job-errors">
+              <div v-for="(err, idx) in displayJob.recent_errors" :key="idx" class="job-error-line">
+                {{ err.source_pk }}: {{ err.error }}
+              </div>
+            </div>
+            <div v-if="(jobNeedsRetry(displayJob) || jobIsPaused) && !jobInProgress" class="job-actions">
+              <el-button v-if="jobIsPaused" size="small" type="primary" @click="resumePausedJob(displayJob)">
+                继续迁移
+              </el-button>
+              <el-button v-else size="small" type="primary" @click="retryFailedJob(displayJob)">
+                {{ jobHasFailedRows(displayJob) ? '重试失败项' : '继续迁移待处理项' }}
+              </el-button>
+              <el-button
+                v-if="jobHasFailedRows(displayJob)"
+                size="small"
+                @click="downloadJobErrors(displayJob)"
+              >
+                导出错误 CSV
+              </el-button>
+            </div>
+          </div>
+
+          <el-table
+            v-if="runResult?.items?.length"
+            :data="runResult.items"
+            size="small"
+            border
+            class="result-table"
+            max-height="240"
+          >
+            <el-table-column prop="source_id" label="源 ID" width="100" />
+            <el-table-column prop="source_column" label="BLOB 列" width="100" />
+            <el-table-column prop="filename" label="文件名" min-width="160" />
+            <el-table-column label="结果" width="100">
+              <template #default="{ row }">
+                <el-tag v-if="row.skipped" type="info">跳过</el-tag>
+                <el-tag v-else-if="row.success" type="success">成功</el-tag>
+                <el-tag v-else type="danger">失败</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="image_info_id" label="image_info" width="100" />
+            <el-table-column prop="error" label="说明" min-width="160" show-overflow-tooltip />
+          </el-table>
+
+          <div v-if="jobHistory.length" class="job-history-head">
+            <h4 class="subsection-title">任务记录</h4>
             <el-button
-              v-if="jobHasFailedRows(displayJob)"
               size="small"
-              @click="downloadJobErrors(displayJob)"
+              type="danger"
+              plain
+              :disabled="clearableJobCount <= 0"
+              @click="clearJobHistory"
             >
-              导出错误 CSV
+              清除记录
             </el-button>
           </div>
-        </div>
+          <el-table v-if="jobHistory.length" :data="jobHistory" size="small" border max-height="280">
+            <el-table-column prop="status" label="状态" width="100">
+              <template #default="{ row }">{{ jobStatusLabel(row.status) }}</template>
+            </el-table-column>
+            <el-table-column label="当前进度" min-width="220">
+              <template #default="{ row }">{{ formatLiveProgress(row) }}</template>
+            </el-table-column>
+            <el-table-column prop="create_time" label="创建时间" min-width="160" />
+            <el-table-column label="操作" width="220">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="viewJob(row)">查看</el-button>
+                <el-button v-if="row.status === 'paused'" link type="primary" @click="resumePausedJob(row)">
+                  继续
+                </el-button>
+                <el-button v-else-if="jobNeedsRetry(row)" link type="primary" @click="retryFailedJob(row)">
+                  {{ jobHasFailedRows(row) ? '重试失败' : '继续迁移' }}
+                </el-button>
+                <el-button link type="danger" @click="removeJob(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </section>
 
-        <el-table
-          v-if="runResult?.items?.length"
-          :data="runResult.items"
-          size="small"
-          border
-          class="result-table"
-          max-height="240"
-        >
-          <el-table-column prop="source_id" label="源 ID" width="100" />
-          <el-table-column prop="source_column" label="BLOB 列" width="100" />
-          <el-table-column prop="filename" label="文件名" min-width="160" />
-          <el-table-column label="结果" width="100">
-            <template #default="{ row }">
-              <el-tag v-if="row.skipped" type="info">跳过</el-tag>
-              <el-tag v-else-if="row.success" type="success">成功</el-tag>
-              <el-tag v-else type="danger">失败</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="image_info_id" label="image_info" width="100" />
-          <el-table-column prop="error" label="说明" min-width="160" show-overflow-tooltip />
-        </el-table>
+        <section class="task-box">
+          <BackgroundExportDock />
+        </section>
 
-        <div v-if="jobHistory.length" class="job-history-head">
-          <h4 class="subsection-title">任务记录</h4>
-          <el-button
-            size="small"
-            type="danger"
-            plain
-            :disabled="clearableJobCount <= 0"
-            @click="clearJobHistory"
-          >
-            清除记录
-          </el-button>
-        </div>
-        <el-table v-if="jobHistory.length" :data="jobHistory" size="small" border max-height="280">
-          <el-table-column prop="status" label="状态" width="100">
-            <template #default="{ row }">{{ jobStatusLabel(row.status) }}</template>
-          </el-table-column>
-          <el-table-column label="当前进度" min-width="220">
-            <template #default="{ row }">{{ formatLiveProgress(row) }}</template>
-          </el-table-column>
-          <el-table-column prop="create_time" label="创建时间" min-width="160" />
-          <el-table-column label="操作" width="220">
-            <template #default="{ row }">
-              <el-button link type="primary" @click="viewJob(row)">查看</el-button>
-              <el-button v-if="row.status === 'paused'" link type="primary" @click="resumePausedJob(row)">
-                继续
-              </el-button>
-              <el-button v-else-if="jobNeedsRetry(row)" link type="primary" @click="retryFailedJob(row)">
-                {{ jobHasFailedRows(row) ? '重试失败' : '继续迁移' }}
-              </el-button>
-              <el-button link type="danger" @click="removeJob(row)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </section>
+        <section class="task-box">
+          <FingerprintImportDock />
+        </section>
+      </div>
     </div>
 
     <ExternalDbConnectionsDialog v-model="connDialogVisible" @changed="refreshConsole" />
@@ -799,7 +813,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.migrate-page { max-width: 1100px; }
+.migrate-page { max-width: 1120px; }
 .page-card {
   background: var(--el-bg-color);
   border-radius: 8px;
@@ -821,22 +835,32 @@ onUnmounted(() => {
   line-height: 1.5;
   max-width: 720px;
 }
-.page-actions { display: flex; gap: 8px; flex-shrink: 0; }
-.info-alert { margin: 14px 0 8px; }
-.section {
-  margin-top: 22px;
-  padding-top: 8px;
-  border-top: 1px solid var(--el-border-color-lighter);
+.page-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+.info-alert { margin: 14px 0 4px; }
+.task-boxes {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 16px;
 }
-.section h3 { margin: 0 0 10px; font-size: 16px; }
-.section-head-row {
+.task-box {
+  padding: 16px 18px 18px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  background: var(--el-fill-color-blank);
+}
+.task-box-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
   margin-bottom: 8px;
+  flex-wrap: wrap;
 }
-.section-head-row h3 { margin: 0; }
+.task-box-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
 .field-hint {
   margin: 0 0 10px;
   font-size: 12px;
@@ -844,6 +868,7 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 .run-form { margin-bottom: 8px; }
+.exec-title { margin-top: 18px; }
 .job-progress-panel {
   margin: 12px 0;
   padding: 12px 14px;

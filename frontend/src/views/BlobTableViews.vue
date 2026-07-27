@@ -855,7 +855,7 @@ async function submitSavedViewMigration() {
     if (jobId) {
       try {
         await ElMessageBox.confirm(
-          '任务已在后台排队。是否打开「迁移任务台」查看进度（暂停/继续/错误）？',
+          '任务已在后台排队。是否打开「任务台」查看进度（暂停/继续/错误）？',
           '迁移已启动',
           { type: 'success', confirmButtonText: '打开任务台', cancelButtonText: '留在本页' },
         )
@@ -1017,13 +1017,13 @@ async function submitExportToConnection() {
     if (!job?.id) {
       throw new Error('未拿到导出任务')
     }
-    // Track in store (progress on 迁移任务台); close dialog so user can keep working.
+    // Track in store (progress on 任务台); close dialog so user can keep working.
     bgExport.trackJob(job, { notify: false })
     exportDialogVisible.value = false
     ElMessage.success(`导出已在后台运行（任务 #${job.id}）`)
     try {
       await ElMessageBox.confirm(
-        '是否打开「迁移任务台」查看路径导出进度？',
+        '是否打开「任务台」查看路径导出进度？',
         '导出已启动',
         {
           type: 'success',
@@ -1169,7 +1169,7 @@ async function submitCreateView() {
         if (jobId && !(estimate <= 0 && job?.status === 'completed')) {
           try {
             await ElMessageBox.confirm(
-              '是否打开「迁移任务台」查看进度？',
+              '是否打开「任务台」查看进度？',
               '迁移已启动',
               { type: 'success', confirmButtonText: '打开任务台', cancelButtonText: '留在本页' },
             )
@@ -2059,7 +2059,7 @@ onUnmounted(() => {
     <div class="page-card">
       <h2 class="page-title">数据库模拟</h2>
       <p class="page-desc">
-        目录浏览、建配置、一键迁移、SQL 与导出。旧库连接点左侧「连接」管理；任务暂停/继续在「迁移任务台」。
+        目录浏览、建配置、一键迁移、SQL 与导出。旧库连接点左侧「连接」管理；任务暂停/继续在「任务台」。
       </p>
 
       <div class="layout">
