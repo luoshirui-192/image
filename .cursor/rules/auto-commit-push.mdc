@@ -1,0 +1,33 @@
+---
+description: After finishing code changes, automatically commit and push
+alwaysApply: true
+---
+
+# Auto Commit + Push After Task Completion
+
+When a coding task is **finished** (feature/fix/docs implemented and verified as needed), **automatically commit and push** without waiting for the user to ask again.
+
+## When to run
+
+- After completing the work the user requested in the current turn (or a clear multi-step task)
+- Include related docs/tests/rules that belong to that change
+- Skip if there is nothing to commit
+
+## Commit
+
+- Follow the existing git safety protocol (no force push to main/master, no config changes, no secrets)
+- Stage only relevant files (exclude bundles, local secrets, unrelated junk)
+- Use a concise commit message focused on why
+- On Windows PowerShell, pass the message with a here-string if heredoc is unavailable
+
+## Push
+
+- Push the current branch to `origin` (`git push -u origin HEAD` when upstream missing)
+- **Retry until success** per `git-push-retry` (backoff on network errors; stop only on auth/non-fast-forward/hook blockers)
+- Report final outcome: commit hash + remote branch, or the blocking error
+
+## Do not auto-commit when
+
+- The user explicitly says not to commit/push
+- Changes are exploratory drafts the user has not accepted
+- Only questions/discussion with no file changes

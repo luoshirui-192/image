@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "users",
     "images",
+    "fingerprints",
     "sqlquery",
     "logs",
 ]
@@ -55,6 +56,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "images.middleware.RepairSystemDatabaseMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -167,6 +169,15 @@ MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 THUMB_SIZE = int(os.getenv("THUMB_SIZE", "200"))
 
+# Object storage (MinIO / S3-compatible) — STORAGE_BACKEND=local|minio
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").lower()
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "biox")
+MINIO_PREFIX = os.getenv("MINIO_PREFIX", "data/image_db")
+MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() in {"1", "true", "yes", "on"}
+
 IMAGE_ACCESS_SECRET = os.getenv("IMAGE_ACCESS_SECRET", SECRET_KEY)
 IMAGE_ACCESS_TOKEN_TTL = int(os.getenv("IMAGE_ACCESS_TOKEN_TTL", "3600"))
 
@@ -180,6 +191,31 @@ SQL_REQUIRE_WHERE_FOR_SELECT_STAR = os.getenv("SQL_REQUIRE_WHERE_FOR_SELECT_STAR
 # Maintenance (Step 16)
 DELETED_IMAGE_RETENTION_DAYS = int(os.getenv("DELETED_IMAGE_RETENTION_DAYS", "30"))
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "90"))
+
+# BLOB migration jobs (background worker)
+BLOB_MIGRATION_BATCH_SIZE = int(os.getenv("BLOB_MIGRATION_BATCH_SIZE", "100"))
+BLOB_MIGRATION_BATCH_MAX = int(os.getenv("BLOB_MIGRATION_BATCH_MAX", "500"))
+# When skip_existing, scan this many light PKs per round while seeking pending rows.
+BLOB_MIGRATION_SKIP_SCAN_WINDOW = int(os.getenv("BLOB_MIGRATION_SKIP_SCAN_WINDOW", "2000"))
+# Cap light-row examination per batch call (keeps progress updates flowing on skip-only stretches).
+BLOB_MIGRATION_SKIP_SCAN_MAX_PER_BATCH = int(os.getenv("BLOB_MIGRATION_SKIP_SCAN_MAX_PER_BATCH", "10000"))
+BLOB_MIGRATION_UPLOAD_WORKERS = int(os.getenv("BLOB_MIGRATION_UPLOAD_WORKERS", "3"))
+BLOB_MIGRATION_POLL_SECONDS = int(os.getenv("BLOB_MIGRATION_POLL_SECONDS", "30"))
+BLOB_MIGRATION_SKIP_DIMENSIONS = os.getenv("BLOB_MIGRATION_SKIP_DIMENSIONS", "true").lower() in {
+    "1", "true", "yes", "on",
+}
+
+# External BLOB auto-sync (fingerprint detect + re-migration)
+BLOB_SYNC_ENABLED = os.getenv("BLOB_SYNC_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+BLOB_SYNC_DEFAULT_INTERVAL_MINUTES = int(os.getenv("BLOB_SYNC_DEFAULT_INTERVAL_MINUTES", "60"))
+BLOB_SYNC_BATCH_SIZE = int(os.getenv("BLOB_SYNC_BATCH_SIZE", "200"))
+BLOB_SYNC_PURGE_OLD_IMAGE = os.getenv("BLOB_SYNC_PURGE_OLD_IMAGE", "true").lower() in {"1", "true", "yes", "on"}
+BLOB_SYNC_USE_MYSQL_SHA2 = os.getenv("BLOB_SYNC_USE_MYSQL_SHA2", "true").lower() in {"1", "true", "yes", "on"}
+BLOB_SYNC_MAX_RESYNC_PER_RUN = int(os.getenv("BLOB_SYNC_MAX_RESYNC_PER_RUN", "50"))
+BLOB_MAP_LEGACY_LOOKUP = os.getenv("BLOB_MAP_LEGACY_LOOKUP", "true").lower() in {"1", "true", "yes", "on"}
+
+# Fingerprint zip import (background workers for pair uploads)
+FP_IMPORT_WORKERS = int(os.getenv("FP_IMPORT_WORKERS", "4"))
 
 # ---------------------------------------------------------------------------
 # CORS

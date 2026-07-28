@@ -15,8 +15,9 @@ cd frontend && npm install && npm run dev
 |------|------|
 | `/upload` | 图片上传 |
 | `/blob-migrate` | BLOB 迁移 |
-| `/blob-views` | BLOB 表视图 |
-| `/sql` | SQL 查询面板 |
+| `/blob-browse` | BLOB 数据浏览（表数据 + SQL + 多 BLOB 预览） |
+| `/blob-views` | 旧路由，重定向到 `/blob-browse` |
+| `/sql`、`/sql-query` | 旧路由，重定向到 `/blob-browse?mode=sql` |
 | `/categories` | 分类管理 |
 | `/logs` | 操作日志（管理员） |
 | `/settings` | 系统设置（管理员） |

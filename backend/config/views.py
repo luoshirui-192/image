@@ -20,6 +20,7 @@ class HealthView(APIView):
             "service": "image-path-db-backend",
             "version": "1.0.0",
             "db_engine": settings.DB_ENGINE,
+            "storage_backend": getattr(settings, "STORAGE_BACKEND", "local"),
             "upload_root": settings.UPLOAD_ROOT,
             "debug": settings.DEBUG,
             "readiness": readiness,

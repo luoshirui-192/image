@@ -1,0 +1,14 @@
+---
+description: Push 失败时持续重试直到成功
+alwaysApply: true
+---
+
+# Git Push: Retry Until Success
+
+When pushing commits to the remote, **do not stop after a single failure**. Keep retrying until the push succeeds.
+
+- Retry `git push` until exit code 0, or until a non-network blocker appears (auth denied, rejected non-fast-forward, hook failure).
+- Use backoff between attempts (e.g. 5s → 10s → 20s, cap around 60s).
+- Do not report push as done until the command exits 0.
+- If network errors persist, continue retrying in the same session rather than giving up after one or two attempts.
+- Report the final outcome: success with branch/commit, or the blocking error if retries cannot resolve it.

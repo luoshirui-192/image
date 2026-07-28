@@ -59,6 +59,10 @@ class BlobMigrationSource(models.Model):
     source_table = models.CharField(max_length=64)
     source_pk_column = models.CharField(max_length=64, default="id")
     blob_column = models.CharField(max_length=64)
+    blob_columns = models.TextField(default="")
+    source_object_type = models.CharField(max_length=20, default="table")
+    path_lookup_table = models.CharField(max_length=64, default="")
+    blob_column_path_mappings = models.TextField(default="")
     name_column = models.CharField(max_length=64, default="")
     suffix_column = models.CharField(max_length=64, default="")
     category_id = models.PositiveIntegerField()
@@ -66,8 +70,17 @@ class BlobMigrationSource(models.Model):
     tags = models.CharField(max_length=500, default="")
     where_clause = models.CharField(max_length=500, default="")
     db_alias = models.CharField(max_length=32, default="default")
+    database_name = models.CharField(max_length=64, default="")
     enabled = models.SmallIntegerField(default=1)
     last_run_at = models.DateTimeField(null=True, blank=True)
+    auto_sync_enabled = models.SmallIntegerField(default=1)
+    sync_interval_minutes = models.PositiveIntegerField(default=60)
+    sync_batch_size = models.PositiveIntegerField(default=200)
+    sync_last_run_at = models.DateTimeField(null=True, blank=True)
+    sync_last_checked_map_id = models.PositiveBigIntegerField(default=0)
+    change_track_column = models.CharField(max_length=64, default="")
+    change_track_mode = models.CharField(max_length=20, default="hash")
+    source_uid = models.CharField(max_length=36, default="")
     create_time = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -84,8 +97,16 @@ class BlobMigrationSource(models.Model):
 class ImageSourceMap(models.Model):
     source_table = models.CharField(max_length=64)
     source_id = models.CharField(max_length=64)
+    source_column = models.CharField(max_length=64, default="")
     image_info_id = models.PositiveBigIntegerField()
     migrated_at = models.DateTimeField()
+    source_content_hash = models.CharField(max_length=64, default="")
+    source_blob_length = models.PositiveBigIntegerField(default=0)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    sync_status = models.CharField(max_length=20, default="unknown")
+    last_sync_error = models.CharField(max_length=500, default="")
+    source_uid = models.CharField(max_length=36, default="")
+    migration_source_id = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         managed = False
@@ -94,7 +115,7 @@ class ImageSourceMap(models.Model):
         verbose_name_plural = "图像源映射"
         ordering = ["-id"]
         indexes = [
-            models.Index(fields=["source_table", "source_id"], name="uk_source"),
+            models.Index(fields=["source_table", "source_id", "source_column"], name="uk_source"),
             models.Index(fields=["image_info_id"], name="idx_image_info"),
         ]
 
@@ -105,21 +126,27 @@ class ImageSourceMap(models.Model):
 class BlobTableView(models.Model):
     name = models.CharField(max_length=100, default="")
     db_alias = models.CharField(max_length=32, default="default")
+    database_name = models.CharField(max_length=64, default="")
     source_table = models.CharField(max_length=64)
+    source_object_type = models.CharField(max_length=20, default="table")
+    path_lookup_table = models.CharField(max_length=64, default="")
+    blob_column_path_mappings = models.TextField(default="")
     source_pk_column = models.CharField(max_length=64, default="id")
     blob_column = models.CharField(max_length=64)
+    blob_columns = models.TextField(default="")
     display_columns = models.TextField(default="")
     where_clause = models.CharField(max_length=500, default="")
     remark = models.CharField(max_length=500, default="")
     last_viewed_at = models.DateTimeField(null=True, blank=True)
+    source_uid = models.CharField(max_length=36, default="")
     create_time = models.DateTimeField(null=True, blank=True)
     update_time = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         managed = False
         db_table = "blob_table_view"
-        verbose_name = "BLOB 表视图"
-        verbose_name_plural = "BLOB 表视图"
+        verbose_name = "BLOB 浏览配置"
+        verbose_name_plural = "BLOB 浏览配置"
         ordering = ["-id"]
 
     def __str__(self) -> str:
@@ -151,3 +178,123 @@ class ExternalDbConnection(models.Model):
 
     def __str__(self) -> str:
         return self.name or f"{self.username}@{self.host}/{self.db_name}"
+
+
+class BlobMigrationJob(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_PAUSED = "paused"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_CANCELLED = "cancelled"
+
+    source_id = models.PositiveIntegerField()
+    status = models.CharField(max_length=20, default=STATUS_PENDING)
+    dry_run = models.SmallIntegerField(default=0)
+    skip_existing = models.SmallIntegerField(default=1)
+    run_all = models.SmallIntegerField(default=1)
+    retry_failed_only = models.SmallIntegerField(default=0)
+    parent_job_id = models.PositiveBigIntegerField(null=True, blank=True)
+    batch_size = models.PositiveIntegerField(default=50)
+    warm_thumbs_after = models.SmallIntegerField(default=0)
+    cancel_requested = models.SmallIntegerField(default=0)
+    pause_requested = models.SmallIntegerField(default=0)
+    total_estimate = models.PositiveIntegerField(default=0)
+    processed = models.PositiveIntegerField(default=0)
+    succeeded = models.PositiveIntegerField(default=0)
+    failed = models.PositiveIntegerField(default=0)
+    skipped = models.PositiveIntegerField(default=0)
+    last_pk_cursor = models.CharField(max_length=128, default="")
+    message = models.CharField(max_length=500, default="")
+    created_by = models.CharField(max_length=100, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+    create_time = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = "blob_migration_job"
+        verbose_name = "BLOB 迁移任务"
+        verbose_name_plural = "BLOB 迁移任务"
+        ordering = ["-id"]
+
+    def __str__(self) -> str:
+        return f"job#{self.id} source={self.source_id} {self.status}"
+
+
+class BlobSyncRun(models.Model):
+    source_id = models.PositiveIntegerField(null=True, blank=True)
+    run_type = models.CharField(max_length=20, default="detect")
+    status = models.CharField(max_length=20, default="running")
+    checked = models.PositiveIntegerField(default=0)
+    changed = models.PositiveIntegerField(default=0)
+    resynced = models.PositiveIntegerField(default=0)
+    failed = models.PositiveIntegerField(default=0)
+    message = models.CharField(max_length=500, default="")
+    started_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = "blob_sync_run"
+        verbose_name = "BLOB 同步运行"
+        verbose_name_plural = "BLOB 同步运行"
+        ordering = ["-id"]
+
+
+class BlobMigrationJobError(models.Model):
+    job_id = models.PositiveBigIntegerField()
+    source_pk = models.CharField(max_length=128, default="")
+    source_column = models.CharField(max_length=64, default="")
+    filename = models.CharField(max_length=255, default="")
+    error_message = models.CharField(max_length=1000, default="")
+    retried = models.SmallIntegerField(default=0)
+    create_time = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = "blob_migration_job_error"
+        verbose_name = "BLOB 迁移失败记录"
+        verbose_name_plural = "BLOB 迁移失败记录"
+        ordering = ["-id"]
+
+
+class BlobSimulatedExportJob(models.Model):
+    """Background job: export simulated browse rows to another DB table."""
+
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_PAUSED = "paused"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_CANCELLED = "cancelled"
+
+    view_id = models.PositiveIntegerField()
+    target_connection_id = models.PositiveIntegerField(null=True, blank=True)
+    target_db_alias = models.CharField(max_length=64, default="")
+    target_database = models.CharField(max_length=64, default="")
+    target_table = models.CharField(max_length=64, default="")
+    if_exists = models.CharField(max_length=20, default="fail")
+    status = models.CharField(max_length=20, default=STATUS_PENDING)
+    total_estimate = models.PositiveIntegerField(default=0)
+    rows_written = models.PositiveIntegerField(default=0)
+    last_offset = models.PositiveIntegerField(default=0)
+    cancel_requested = models.SmallIntegerField(default=0)
+    pause_requested = models.SmallIntegerField(default=0)
+    message = models.CharField(max_length=500, default="")
+    last_error = models.CharField(max_length=500, default="")
+    result_json = models.TextField(null=True, blank=True)
+    created_by = models.CharField(max_length=100, default="")
+    create_time = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = "blob_simulated_export_job"
+        ordering = ["-id"]
+
+    def __str__(self) -> str:
+        return f"export-job#{self.id} view={self.view_id} {self.status}"

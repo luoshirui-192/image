@@ -16,6 +16,7 @@ from images.external_db_service import (
     test_external_connection,
     update_external_connection,
 )
+from images.blob_table_view_service import auto_provision_table_views_for_connection
 from images.models import BlobMigrationSource, ExternalDbConnection
 from images.serializers import ExternalDbConnectionSerializer, ExternalDbConnectionTestSerializer
 from utils.audit import write_operate_log
@@ -55,8 +56,12 @@ class ExternalDbConnectionListCreateView(APIView):
         except ExternalDbError as exc:
             return error_response(str(exc), code=4001, status=400)
 
+        provision = auto_provision_table_views_for_connection(record)
         write_operate_log(request, "external_db_create", detail=f"name={record.name} host={record.host}")
-        return success_response(serialize_connection(record), message="旧库连接已保存", status=201)
+        message = _format_provision_message("旧库连接已保存", provision)
+        payload = serialize_connection(record)
+        payload["table_view_provision"] = provision
+        return success_response(payload, message=message, status=201)
 
 
 @extend_schema(tags=["blob-migration"])
@@ -155,6 +160,59 @@ class ExternalDbConnectionTestSavedView(APIView):
 
         write_operate_log(request, "external_db_test", detail=f"id={pk} ok=1")
         return success_response({"ok": True, "message": message}, message=message)
+
+
+@extend_schema(tags=["blob-migration"])
+class ExternalDbConnectionProvisionTableViewsView(APIView):
+    """POST /api/images/blob-migration/connections/{id}/provision-table-views/ — sync saved table views."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def post(self, request, pk: int):
+        try:
+            record = ExternalDbConnection.objects.get(pk=pk)
+        except ExternalDbConnection.DoesNotExist:
+            return error_response("连接不存在", code=4044, status=404)
+
+        provision = auto_provision_table_views_for_connection(record)
+        write_operate_log(
+            request,
+            "external_db_provision_views",
+            detail=(
+                f"id={pk} created={provision.get('created', 0)} "
+                f"skipped={provision.get('skipped', 0)} failed={provision.get('failed', 0)}"
+            ),
+        )
+        message = _format_provision_message("表视图同步完成", provision)
+        return success_response(
+            {
+                "connection_id": pk,
+                "table_view_provision": provision,
+            },
+            message=message,
+        )
+
+
+def _format_provision_message(prefix: str, provision: dict) -> str:
+    created = int(provision.get("created") or 0)
+    skipped = int(provision.get("skipped") or 0)
+    failed = int(provision.get("failed") or 0)
+    errors = provision.get("errors") or []
+
+    if errors and not created and not skipped and not failed:
+        return f"{prefix}：{errors[0]}"
+
+    parts = [prefix]
+    detail_parts: list[str] = []
+    if created:
+        detail_parts.append(f"新增 {created} 个")
+    if skipped:
+        detail_parts.append(f"跳过 {skipped} 个")
+    if failed:
+        detail_parts.append(f"失败 {failed} 个")
+    if detail_parts:
+        parts.append("（" + "，".join(detail_parts) + "）")
+    return "".join(parts)
 
 
 def _format_errors(errors: dict) -> str:

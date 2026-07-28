@@ -1,11 +1,9 @@
 """Restore logically deleted images."""
 from __future__ import annotations
 
-from django.conf import settings
-
 from images.models import ImageInfo
 from images.services import find_duplicate_image
-from utils.file_security import resolve_safe_upload_file
+from utils.storage import get_image_storage
 
 
 class RestoreError(Exception):
@@ -30,11 +28,7 @@ def _assert_can_restore(user, image: ImageInfo) -> None:
 def _assert_file_exists(relative_path: str) -> None:
     if not relative_path:
         raise RestoreError("图片路径无效，无法恢复")
-    try:
-        abs_path = resolve_safe_upload_file(settings.UPLOAD_ROOT, relative_path)
-    except Exception as exc:
-        raise RestoreError("图片路径无效，无法恢复") from exc
-    if not abs_path.is_file():
+    if not get_image_storage().exists(relative_path):
         raise RestoreError("磁盘文件已不存在，无法恢复（可能已超过保留期被清理）")
 
 

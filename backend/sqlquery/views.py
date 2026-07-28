@@ -34,10 +34,23 @@ class SqlExecuteView(APIView):
         if not serializer.is_valid():
             return error_response(_format_errors(serializer.errors), code=4001, status=400)
 
-        sql = serializer.validated_data["sql"]
+        data = serializer.validated_data
+        sql = data["sql"]
 
         try:
-            result = execute_select_sql(sql)
+            result = execute_select_sql(
+                sql,
+                db_alias=data.get("db_alias") or None,
+                connection_id=data.get("connection_id"),
+                database=data.get("database") or None,
+                view_id=data.get("view_id"),
+                source_table=data.get("source_table") or None,
+                source_pk_column=data.get("source_pk_column") or None,
+                blob_columns=data.get("blob_columns") or None,
+                source_object_type=data.get("source_object_type") or None,
+                path_lookup_table=data.get("path_lookup_table") or None,
+                blob_mode=data.get("blob_mode") or "path",
+            )
         except SqlValidationError as exc:
             write_operate_log(
                 request,
@@ -59,7 +72,11 @@ class SqlExecuteView(APIView):
             request,
             "sql_execute",
             sql_content=result["sql"][:2000],
-            detail=f"rows={result['row_count']} elapsed={result['elapsed_ms']}ms truncated={result['truncated']}",
+            detail=(
+                f"db={result.get('db_alias')}:{result.get('database')} "
+                f"rows={result['row_count']} elapsed={result['elapsed_ms']}ms "
+                f"truncated={result['truncated']} simulated={result.get('simulated')}"
+            ),
         )
 
         return success_response(result, message="查询成功")

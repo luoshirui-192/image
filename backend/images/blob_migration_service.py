@@ -1,22 +1,38 @@
 """Migrate image BLOB columns from legacy tables into upload/ + image_info."""
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
+from typing import Any
 
 from django.conf import settings
-from django.db import connections
+from django.db import close_old_connections, connections
 from django.utils import timezone
 
+from images.blob_schema_helpers import (
+    OBJECT_TYPE_VIEW,
+    map_storage_table,
+    normalize_object_type,
+    parse_blob_column_path_mappings,
+    parse_blob_columns,
+    serialize_blob_column_path_mappings,
+    serialize_blob_columns,
+)
 from images.external_db_service import (
     db_alias_session,
     list_database_aliases,
     validate_db_alias_reference,
 )
-from images.models import BlobMigrationSource, ImageCategory, ImageInfo, ImageSourceMap
-from images.services import DuplicateImageError, save_image_bytes
+from images.category_service import resolve_category_id
+from images.models import BlobMigrationJob, BlobMigrationJobError, BlobMigrationSource, ImageCategory, ImageInfo, ImageSourceMap
+from images.services import DuplicateImageError, save_image_bytes_for_migration
 from utils.file_security import detect_image_type, extension_from_filename, normalize_suffix
 
 logger = logging.getLogger(__name__)
@@ -26,8 +42,14 @@ FORBIDDEN_WHERE_RE = re.compile(
     r";|--|/\*|\*/|\b(DROP|DELETE|UPDATE|INSERT|TRUNCATE|ALTER|CREATE|GRANT|REVOKE)\b",
     re.IGNORECASE,
 )
+_BASE64_IMAGE_RE = re.compile(r"^[A-Za-z0-9+/=\r\n]+$")
 
 BLOB_TYPES_MYSQL = frozenset({"blob", "tinyblob", "mediumblob", "longblob", "binary", "varbinary"})
+
+# Short-lived cache for expensive remote COUNT scans (job polling / source list).
+_STATS_CACHE: dict[tuple, tuple[float, dict]] = {}
+_STATS_CACHE_TTL_SECONDS = 20.0
+_STATS_CACHE_LOCK = Lock()
 
 
 class BlobMigrationError(Exception):
@@ -38,10 +60,21 @@ class BlobMigrationError(Exception):
 class MigrationItemResult:
     source_id: str
     success: bool
+    source_column: str = ""
     image_info_id: int | None = None
     filename: str = ""
     error: str = ""
     skipped: bool = False
+
+
+@dataclass
+class MigrationBatchResult:
+    rows_fetched: int = 0
+    processed: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    skipped: int = 0
+    last_pk: str = ""
 
 
 @dataclass
@@ -55,6 +88,70 @@ class MigrationRunResult:
     failed: int = 0
     skipped: int = 0
     items: list[MigrationItemResult] = field(default_factory=list)
+
+
+def _close_worker_connections() -> None:
+    """Drop stale thread-local handles. Never close_all() — that kills sibling requests."""
+    close_old_connections()
+
+
+def _upload_workers() -> int:
+    from django.db import connection
+
+    if connection.vendor == "sqlite":
+        return 1
+    workers = int(getattr(settings, "BLOB_MIGRATION_UPLOAD_WORKERS", 3))
+    return max(1, min(workers, 8))
+
+
+def _max_batch_size(batch_size: int) -> int:
+    cap = int(getattr(settings, "BLOB_MIGRATION_BATCH_MAX", 500))
+    return max(1, min(int(batch_size), max(1, cap)))
+
+
+def _job_cancelled(job_id: int) -> bool:
+    return BlobMigrationJob.objects.filter(pk=job_id, cancel_requested=1).exists()
+
+
+def _job_pause_requested(job_id: int) -> bool:
+    return BlobMigrationJob.objects.filter(pk=job_id, pause_requested=1).exists()
+
+
+def _job_stop_requested(job_id: int) -> bool:
+    return _job_cancelled(job_id) or _job_pause_requested(job_id)
+
+
+def _record_job_error(
+    job_id: int,
+    *,
+    source_pk: str,
+    source_column: str = "",
+    filename: str,
+    error: str,
+) -> None:
+    BlobMigrationJobError.objects.create(
+        job_id=job_id,
+        source_pk=source_pk[:128],
+        source_column=(source_column or "")[:64],
+        filename=(filename or "")[:255],
+        error_message=(error or "")[:1000],
+        create_time=timezone.now(),
+    )
+
+
+def _update_job_progress(job: BlobMigrationJob, batch: MigrationBatchResult, *, last_pk: str | None = None) -> None:
+    updates = {
+        "processed": job.processed + batch.processed,
+        "succeeded": job.succeeded + batch.succeeded,
+        "failed": job.failed + batch.failed,
+        "skipped": job.skipped + batch.skipped,
+        "updated_at": timezone.now(),
+    }
+    if last_pk is not None:
+        updates["last_pk_cursor"] = last_pk[:128]
+    BlobMigrationJob.objects.filter(pk=job.pk).update(**updates)
+    for key, value in updates.items():
+        setattr(job, key, value)
 
 
 def validate_identifier(name: str, *, label: str = "标识符") -> str:
@@ -93,24 +190,35 @@ def _discover_blob_tables_on_connection(conn) -> list[dict]:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
-                FROM information_schema.COLUMNS
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND DATA_TYPE IN ('blob', 'tinyblob', 'mediumblob', 'longblob', 'binary', 'varbinary')
-                ORDER BY TABLE_NAME, ORDINAL_POSITION
+                SELECT c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE, c.CHARACTER_MAXIMUM_LENGTH
+                FROM information_schema.COLUMNS c
+                JOIN information_schema.TABLES t
+                  ON t.TABLE_SCHEMA = c.TABLE_SCHEMA
+                 AND t.TABLE_NAME = c.TABLE_NAME
+                WHERE c.TABLE_SCHEMA = DATABASE()
+                  AND c.DATA_TYPE IN ('blob', 'tinyblob', 'mediumblob', 'longblob', 'binary', 'varbinary')
+                ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
                 """
             )
             rows = cursor.fetchall()
-        grouped: dict[str, list[dict]] = {}
-        for table_name, column_name, data_type, max_len in rows:
-            grouped.setdefault(table_name, []).append(
+        grouped: dict[str, dict] = {}
+        for table_name, table_type, column_name, data_type, max_len in rows:
+            entry = grouped.setdefault(
+                table_name,
+                {
+                    "table": table_name,
+                    "object_type": "view" if table_type == "VIEW" else "table",
+                    "columns": [],
+                },
+            )
+            entry["columns"].append(
                 {
                     "column": column_name,
                     "data_type": data_type,
                     "max_length": max_len,
                 }
             )
-        return [{"table": table, "columns": cols} for table, cols in sorted(grouped.items())]
+        return list(sorted(grouped.values(), key=lambda item: item["table"]))
 
     if conn.vendor == "sqlite":
         tables = conn.introspection.table_names()
@@ -130,8 +238,379 @@ def _discover_blob_tables_on_connection(conn) -> list[dict]:
     raise BlobMigrationError(f"暂不支持 {conn.vendor} 的 BLOB 表发现")
 
 
+def _source_database_name(source: BlobMigrationSource) -> str | None:
+    value = (getattr(source, "database_name", "") or "").strip()
+    return value or None
+
+
+def resolve_source_database_name(source: BlobMigrationSource) -> str:
+    """Return persisted or inferred database name for remote scans."""
+    direct = _source_database_name(source)
+    if direct:
+        return direct
+
+    from images.models import BlobTableView
+
+    obj_type = normalize_object_type(source.source_object_type)
+    views = list(
+        BlobTableView.objects.filter(
+            db_alias=source.db_alias,
+            source_table=source.source_table,
+            source_object_type=obj_type,
+        )
+        .exclude(database_name="")
+        .order_by("-id")
+    )
+    db_names = sorted({(v.database_name or "").strip() for v in views if (v.database_name or "").strip()})
+    if len(db_names) == 1:
+        return db_names[0]
+
+    from images.external_db_service import parse_external_alias
+
+    ext_id = parse_external_alias(source.db_alias)
+    if ext_id is not None and db_names:
+        from images.models import ExternalDbConnection
+
+        conn = ExternalDbConnection.objects.filter(pk=ext_id, enabled=1).first()
+        conn_db = (conn.db_name or "").strip() if conn else ""
+        if conn_db and conn_db in db_names:
+            return conn_db
+        return ""
+
+    if ext_id is not None:
+        from images.models import ExternalDbConnection
+
+        conn = ExternalDbConnection.objects.filter(pk=ext_id, enabled=1).first()
+        if conn and (conn.db_name or "").strip():
+            return conn.db_name.strip()
+
+    return ""
+
+
+def find_migration_source_match(
+    *,
+    db_alias: str,
+    database: str,
+    source_table: str,
+    source_object_type: str = "table",
+    source_uid: str | None = None,
+) -> tuple[BlobMigrationSource | None, bool]:
+    """Match a catalog object to a migration source without cross-database ambiguity.
+
+    Returns (source, ambiguous). When ambiguous is True, multiple configs could apply
+    and callers must not show stats from another database on the same connection.
+    """
+    from images.source_identity import is_valid_source_uid, normalize_source_uid
+
+    uid = normalize_source_uid(source_uid)
+    if is_valid_source_uid(uid):
+        matched = BlobMigrationSource.objects.filter(source_uid=uid).order_by("-id").first()
+        if matched is not None:
+            return prepare_migration_source(matched), False
+
+    alias = validate_db_alias_reference(db_alias)
+    table = validate_identifier(source_table, label="源表名")
+    obj_type = normalize_object_type(source_object_type)
+    catalog_db = (database or "").strip()
+
+    candidates = list(
+        BlobMigrationSource.objects.filter(
+            db_alias=alias,
+            source_table=table,
+            source_object_type=obj_type,
+        ).order_by("-id")
+    )
+    if not candidates:
+        return None, False
+
+    def _db_name(source: BlobMigrationSource) -> str:
+        return (getattr(source, "database_name", "") or "").strip()
+
+    if catalog_db:
+        exact = [s for s in candidates if _db_name(s) == catalog_db]
+        if len(exact) == 1:
+            return prepare_migration_source(exact[0]), False
+        if len(exact) > 1:
+            return None, True
+
+        empty_db = [s for s in candidates if not _db_name(s)]
+        explicit_other = [s for s in candidates if _db_name(s) and _db_name(s) != catalog_db]
+        if explicit_other:
+            return None, False
+
+        if len(empty_db) == 1 and len(candidates) == 1:
+            source = prepare_migration_source(empty_db[0])
+            resolved = (source.database_name or "").strip()
+            if not resolved or resolved == catalog_db:
+                return source, False
+            return None, False
+
+        if len(empty_db) > 1 or (empty_db and len(candidates) > 1):
+            return None, True
+        return None, False
+
+    if len(candidates) == 1:
+        return prepare_migration_source(candidates[0]), False
+    return None, True
+
+
+def prepare_migration_source(source: BlobMigrationSource, *, persist: bool = True) -> BlobMigrationSource:
+    """Ensure database_name and JOIN path mappings are ready before remote scans."""
+    from images.source_identity import ensure_source_record_uid
+
+    resolved = resolve_source_database_name(source)
+    current = (getattr(source, "database_name", "") or "").strip()
+    if resolved and resolved != current:
+        if persist and source.pk:
+            BlobMigrationSource.objects.filter(pk=source.pk).update(database_name=resolved)
+        source.database_name = resolved
+    source = _refresh_path_mappings_if_needed(source, persist=persist)
+    ensure_source_record_uid(source, persist=persist)
+    return source
+
+
+def _refresh_path_mappings_if_needed(source: BlobMigrationSource, *, persist: bool) -> BlobMigrationSource:
+    """Backfill lookup_id_column on stored JOIN view mappings from the view SQL."""
+    mappings = _path_mappings(source)
+    if not mappings or normalize_object_type(source.source_object_type) != OBJECT_TYPE_VIEW:
+        return source
+    if all((m.get("lookup_id_column") or "").strip() for m in mappings):
+        return source
+    try:
+        blob_cols = _source_blob_columns(source)
+        with _source_db_session(source) as alias:
+            conn = _remote_connection(alias)
+            if conn.vendor != "mysql":
+                return source
+            from images.blob_view_path_service import infer_view_path_mappings
+
+            db_name = _source_database_name(source) or str(conn.settings_dict.get("NAME") or "")
+            inferred = {
+                m["view_column"]: m
+                for m in infer_view_path_mappings(
+                    conn,
+                    database=db_name,
+                    object_name=source.source_table,
+                    blob_columns=blob_cols,
+                )
+            }
+    except Exception:
+        logger.warning(
+            "refresh path mappings failed source_id=%s table=%s",
+            source.id,
+            source.source_table,
+            exc_info=True,
+        )
+        return source
+
+    updated = False
+    merged: list[dict[str, str]] = []
+    for mapping in mappings:
+        item = dict(mapping)
+        if not (item.get("lookup_id_column") or "").strip():
+            fresh = inferred.get(item.get("view_column") or "")
+            if fresh and fresh.get("lookup_id_column"):
+                item["lookup_id_column"] = fresh["lookup_id_column"]
+                updated = True
+        merged.append(item)
+    if not updated:
+        return source
+    serialized = serialize_blob_column_path_mappings(merged)
+    source.blob_column_path_mappings = serialized
+    if persist and source.pk:
+        BlobMigrationSource.objects.filter(pk=source.pk).update(
+            blob_column_path_mappings=serialized,
+        )
+    return source
+
+
+def _source_db_session(source: BlobMigrationSource):
+    """Open the correct remote DB for a migration source (alias + optional database)."""
+    return db_alias_session(source.db_alias, database=_source_database_name(source))
+
+
+def _remote_connection(conn_alias: str):
+    """Connection for remote scans; caller must hold _source_db_session."""
+    return connections[conn_alias]
+
+
+def _live_image_subquery():
+    return ImageInfo.objects.filter(is_delete=0).values("id")
+
+
+def _map_exists_for_migration(
+    *,
+    source: BlobMigrationSource,
+    lookup_table: str,
+    source_id: str,
+    map_column: str,
+    blob_columns: list[str],
+) -> bool:
+    """True only when a live image_source_map points at a non-deleted image_info."""
+    from images.source_map_service import map_queryset_for_source
+
+    qs = map_queryset_for_source(source, source_ids=[source_id], columns=[map_column])
+    if qs.exists():
+        return True
+    if len(blob_columns) == 1 and map_column == blob_columns[0]:
+        return map_queryset_for_source(source, source_ids=[source_id], columns=[""]).exists()
+    return False
+
+
+def _probe_remote_blob_rows(source: BlobMigrationSource) -> dict[str, Any]:
+    """Cheap sanity check before walking the cursor."""
+    blob_cols = _source_blob_columns(source)
+    with _source_db_session(source) as alias:
+        conn = _remote_connection(alias)
+        table = _quote_ident(source.source_table)
+        extra = validate_where_clause(source.where_clause)
+        where_sql = f" WHERE ({extra})" if extra else ""
+        blob_checks = [_blob_nonempty_sql(conn, _quote_ident(col)) for col in blob_cols]
+        blob_where = f"({' OR '.join(blob_checks)})"
+        with conn.cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) FROM {table}{where_sql}")
+            table_rows = int((cursor.fetchone() or [0])[0] or 0)
+            cursor.execute(f"SELECT COUNT(*) FROM {table}{where_sql}{' AND ' if where_sql else ' WHERE '}{blob_where}")
+            blob_rows = int((cursor.fetchone() or [0])[0] or 0)
+            current_db = ""
+            try:
+                cursor.execute("SELECT DATABASE()")
+                current_db = str((cursor.fetchone() or [""])[0] or "")
+            except Exception:
+                pass
+    return {
+        "database": current_db or _source_database_name(source) or source.db_alias,
+        "table_rows": table_rows,
+        "blob_rows": blob_rows,
+        "blob_columns": blob_cols,
+    }
+
+
 def _quote_ident(name: str) -> str:
     return f"`{validate_identifier(name)}`"
+
+
+def _sql_blob_select(conn, col_name: str) -> str:
+    """Select a BLOB column without charset decoding corrupting binary bytes."""
+    quoted = _quote_ident(col_name)
+    vendor = (getattr(conn, "vendor", "") or "").lower()
+    if vendor == "mysql":
+        # Connection charset (utf8) can turn BINARY/BLOB into str/garbage; CAST forces bytes.
+        return f"CAST({quoted} AS BINARY) AS {quoted}"
+    if vendor == "sqlite":
+        return f"CAST({quoted} AS BLOB) AS {quoted}"
+    return quoted
+
+
+def _try_decode_base64_image(text: str) -> bytes | None:
+    raw_text = (text or "").strip()
+    if not raw_text or len(raw_text) < 64:
+        return None
+    if raw_text.startswith("data:image") and "," in raw_text:
+        raw_text = raw_text.split(",", 1)[1].strip()
+    if not _BASE64_IMAGE_RE.match(raw_text):
+        return None
+    try:
+        decoded = base64.b64decode(raw_text, validate=False)
+    except (binascii.Error, ValueError):
+        return None
+    if detect_image_type(decoded[:32]):
+        return decoded
+    return None
+
+
+def _recover_image_bytes(content: bytes) -> bytes:
+    """Best-effort repair when drivers return charset-decoded or base64 image payloads."""
+    if not content:
+        return content
+    if detect_image_type(content[:32]):
+        return content
+    for encoding in ("ascii", "latin-1", "utf-8"):
+        try:
+            text = content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        decoded = _try_decode_base64_image(text)
+        if decoded:
+            return decoded
+    return content
+
+
+def _as_storage_path_text(value: Any) -> str | None:
+    """Detect path-export style values such as ``upload/20260630/1/uuid.jpg``."""
+    from utils.path_builder import normalize_relative_path
+
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        if not raw or detect_image_type(raw[:32]):
+            return None
+        if len(raw) > 500 or b"\x00" in raw[:64]:
+            return None
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("latin-1")
+            except UnicodeDecodeError:
+                return None
+    else:
+        text = str(value)
+    text = text.strip().replace("\\", "/")
+    if not text or len(text) > 500:
+        return None
+    if text.startswith(("upload/", "templates/")):
+        return normalize_relative_path(text)
+    for marker in ("/upload/", "/templates/"):
+        idx = text.find(marker)
+        if idx >= 0:
+            return normalize_relative_path(text[idx + 1 :])
+    # data/image_db/upload/... → upload/...
+    normalized = normalize_relative_path(text)
+    if normalized.startswith(("upload/", "templates/")):
+        return normalized
+    return None
+
+
+@dataclass
+class _ResolvedPathPayload:
+    path: str
+    image: ImageInfo | None = None
+    content: bytes | None = None
+
+
+def _resolve_storage_path_payload(path: str) -> _ResolvedPathPayload:
+    """Bind a stored path to existing image_info, or load bytes from storage."""
+    from images.file_service import image_exists, read_image_bytes
+
+    safe = (path or "").strip().replace("\\", "/")
+    if not safe:
+        return _ResolvedPathPayload(path="")
+    image = (
+        ImageInfo.objects.filter(image_path=safe, is_delete=0)
+        .order_by("-id")
+        .first()
+    )
+    if image is not None:
+        return _ResolvedPathPayload(path=safe, image=image)
+    # Some older rows store path without the upload/ prefix.
+    if not safe.startswith(("upload/", "templates/")):
+        alt = f"upload/{safe.lstrip('/')}"
+        image = (
+            ImageInfo.objects.filter(image_path=alt, is_delete=0)
+            .order_by("-id")
+            .first()
+        )
+        if image is not None:
+            return _ResolvedPathPayload(path=alt, image=image)
+        safe = alt
+    if image_exists(safe):
+        try:
+            return _ResolvedPathPayload(path=safe, content=read_image_bytes(safe))
+        except Exception:
+            logger.warning("failed reading storage path %s", safe, exc_info=True)
+    return _ResolvedPathPayload(path=safe)
 
 
 def _load_source(source_id: int) -> BlobMigrationSource:
@@ -141,16 +620,275 @@ def _load_source(source_id: int) -> BlobMigrationSource:
         raise BlobMigrationError(f"迁移配置不存在: id={source_id}") from exc
 
 
+def _source_blob_columns(source: BlobMigrationSource) -> list[str]:
+    cols = parse_blob_columns(source.blob_columns, source.blob_column)
+    if not cols:
+        raise BlobMigrationError("至少需要一个 BLOB 列")
+    for col in cols:
+        validate_identifier(col, label="BLOB 列")
+    return cols
+
+
+def _storage_table(source: BlobMigrationSource) -> str:
+    try:
+        return map_storage_table(
+            source_table=source.source_table,
+            source_object_type=source.source_object_type,
+            path_lookup_table=source.path_lookup_table,
+        )
+    except ValueError as exc:
+        raise BlobMigrationError(str(exc)) from exc
+
+
+def _path_mappings(source: BlobMigrationSource) -> list[dict[str, str]]:
+    return parse_blob_column_path_mappings(getattr(source, "blob_column_path_mappings", ""))
+
+
+def _mapping_for_column(source: BlobMigrationSource, blob_column: str) -> dict[str, str] | None:
+    for item in _path_mappings(source):
+        if item.get("view_column") == blob_column:
+            return item
+    return None
+
+
+def _map_target_for_column(
+    source: BlobMigrationSource,
+    row: dict,
+    blob_column: str,
+) -> tuple[str, str, str]:
+    """
+    Resolve (storage_table, source_id, map_column) for image_source_map.
+
+    JOIN views use per-column mappings so each BLOB lands on its base table.
+    """
+    mapping = _mapping_for_column(source, blob_column)
+    if mapping:
+        sid_col = mapping["source_id_column"]
+        if sid_col not in row:
+            raise BlobMigrationError(
+                f"视图行缺少路径映射键列 {sid_col}（BLOB 列 {blob_column}）"
+            )
+        return (
+            mapping["lookup_table"],
+            str(row[sid_col]),
+            mapping.get("source_column") or blob_column,
+        )
+    return _storage_table(source), str(row[source.source_pk_column]), blob_column
+
+
+def _extra_select_columns(source: BlobMigrationSource) -> list[str]:
+    """Columns needed beyond PK/BLOB for filename and per-column path mappings."""
+    cols: list[str] = []
+    seen = {source.source_pk_column, *_source_blob_columns(source)}
+    for candidate in (
+        source.name_column,
+        source.suffix_column,
+        *[m["source_id_column"] for m in _path_mappings(source)],
+    ):
+        name = (candidate or "").strip()
+        if not name or name in seen:
+            continue
+        validate_identifier(name, label="列名")
+        cols.append(name)
+        seen.add(name)
+    return cols
+
+
+def _blob_nonempty_sql(conn, blob_quoted: str) -> str:
+    """
+    Cheap non-empty check for BLOB columns.
+
+    Avoid LENGTH(blob): on MySQL/SQLite it forces reading the full binary value,
+    which makes COUNT/cursor scans on large tables extremely slow.
+    Empty image BLOBs are rare; IS NOT NULL is sufficient for migration scans.
+    """
+    return f"({blob_quoted} IS NOT NULL)"
+
+
+def _is_character_column(conn, *, table: str, column: str) -> bool:
+    """True when column is varchar/text (path-export), not binary BLOB."""
+    table = (table or "").strip()
+    column = (column or "").strip()
+    if not table or not column:
+        return False
+    try:
+        if conn.vendor == "mysql":
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT DATA_TYPE
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = %s
+                      AND COLUMN_NAME = %s
+                    LIMIT 1
+                    """,
+                    [table, column],
+                )
+                row = cursor.fetchone()
+            dtype = str((row or [""])[0] or "").lower()
+            return dtype in {
+                "varchar",
+                "char",
+                "tinytext",
+                "text",
+                "mediumtext",
+                "longtext",
+            }
+        if conn.vendor == "sqlite":
+            with conn.cursor() as cursor:
+                cursor.execute(f"PRAGMA table_info({_quote_ident(table)})")
+                for _cid, name, col_type, *_rest in cursor.fetchall():
+                    if str(name) == column:
+                        t = str(col_type or "").upper()
+                        return any(tok in t for tok in ("CHAR", "CLOB", "TEXT"))
+                        # BLOB type stays False
+            return False
+    except Exception:
+        logger.debug(
+            "column type probe failed table=%s column=%s",
+            table,
+            column,
+            exc_info=True,
+        )
+    return False
+
+
+def _path_text_nonempty_sql(conn, col_quoted: str) -> str:
+    if conn.vendor == "sqlite":
+        return f"({col_quoted} IS NOT NULL AND TRIM(CAST({col_quoted} AS TEXT)) != '')"
+    return f"({col_quoted} IS NOT NULL AND TRIM({col_quoted}) <> '')"
+
+def _cursor_candidate_checks(source: BlobMigrationSource, conn) -> list[str]:
+    """
+    Filters for finding migratable rows without reading BLOB bytes.
+
+    JOIN views often expose NULL in view BLOB columns while bytes live on base
+    tables; when path mappings exist, key columns are a reliable scan filter.
+    """
+    path_mappings = _path_mappings(source)
+    if path_mappings:
+        seen: set[str] = set()
+        checks: list[str] = []
+        for mapping in path_mappings:
+            col = (mapping.get("source_id_column") or "").strip()
+            if not col or col in seen:
+                continue
+            seen.add(col)
+            checks.append(_blob_nonempty_sql(conn, _quote_ident(col)))
+        if checks:
+            return checks
+    blob_cols = _source_blob_columns(source)
+    return [_blob_nonempty_sql(conn, _quote_ident(col)) for col in blob_cols]
+
+
+def _lookup_id_column(mapping: dict[str, str]) -> str:
+    explicit = (mapping.get("lookup_id_column") or "").strip()
+    if explicit:
+        return explicit
+    return (mapping.get("source_id_column") or "").strip()
+
+
+def _fetch_blob_from_lookup_table(
+    source: BlobMigrationSource,
+    mapping: dict[str, str],
+    row: dict,
+    *,
+    conn_alias: str | None = None,
+) -> bytes | None:
+    """Read BLOB bytes from the mapped base table when the view column is NULL."""
+    lookup_table = (mapping.get("lookup_table") or "").strip()
+    blob_col = (mapping.get("source_column") or mapping.get("view_column") or "").strip()
+    sid_col = (mapping.get("source_id_column") or "").strip()
+    lookup_id_col = _lookup_id_column(mapping)
+    if not lookup_table or not blob_col or not sid_col or not lookup_id_col:
+        return None
+    if sid_col not in row:
+        return None
+    lookup_id_val = row[sid_col]
+    if lookup_id_val is None:
+        return None
+
+    table = _quote_ident(lookup_table)
+    id_col = _quote_ident(lookup_id_col)
+
+    def _read(conn) -> bytes | None:
+        blob_expr = _sql_blob_select(conn, blob_col)
+        sql = f"SELECT {blob_expr} FROM {table} WHERE {id_col} = %s LIMIT 1"
+        with conn.cursor() as cursor:
+            cursor.execute(sql, [lookup_id_val])
+            raw = cursor.fetchone()
+        if not raw:
+            return None
+        return _recover_image_bytes(_coerce_blob(raw[0])) or None
+
+    try:
+        if conn_alias:
+            return _read(_remote_connection(conn_alias))
+        with _source_db_session(source) as alias:
+            return _read(_remote_connection(alias))
+    except BlobMigrationError:
+        raise
+    except Exception:
+        logger.warning(
+            "lookup blob fetch failed source=%s table=%s column=%s",
+            getattr(source, "id", None),
+            lookup_table,
+            blob_col,
+            exc_info=True,
+        )
+        return None
+
+
+def _blob_bytes_for_column(
+    source: BlobMigrationSource,
+    row: dict,
+    blob_column: str,
+    *,
+    conn_alias: str | None = None,
+) -> bytes | None:
+    raw = row.get(blob_column)
+    mapping = _mapping_for_column(source, blob_column)
+
+    view_bytes = b""
+    try:
+        view_bytes = _recover_image_bytes(_coerce_blob(raw))
+    except BlobMigrationError:
+        view_bytes = b""
+
+    view_ok = bool(view_bytes) and detect_image_type(view_bytes[:32]) is not None
+
+    # Prefer mapped base-table bytes when the view cell is missing or not a real image
+    # (charset corruption / NULL / placeholder text). Soft-fail lookup and fall back.
+    if mapping and not view_ok:
+        looked = _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
+        if looked:
+            return looked
+
+    if view_ok:
+        return view_bytes
+
+    if mapping:
+        looked = _fetch_blob_from_lookup_table(source, mapping, row, conn_alias=conn_alias)
+        if looked:
+            return looked
+
+    return view_bytes or None
+
+
 def _validate_source_config(source: BlobMigrationSource) -> None:
     validate_identifier(source.source_table, label="源表名")
     validate_identifier(source.source_pk_column, label="主键列")
-    validate_identifier(source.blob_column, label="BLOB 列")
+    _source_blob_columns(source)
     if source.name_column:
         validate_identifier(source.name_column, label="文件名列")
     if source.suffix_column:
         validate_identifier(source.suffix_column, label="后缀列")
+    if source.path_lookup_table:
+        validate_identifier(source.path_lookup_table, label="路径映射表")
     validate_where_clause(source.where_clause)
     validate_db_alias(source.db_alias)
+    _storage_table(source)
     if not ImageCategory.objects.filter(id=source.category_id).exists():
         raise BlobMigrationError(f"分类不存在: id={source.category_id}")
 
@@ -182,105 +920,1222 @@ def _infer_filename(
     if not detected and suffix in {"jpg", "jpeg", "png", "gif", "webp", "bmp"}:
         detected = suffix
     if not detected:
-        raise BlobMigrationError("无法识别图片格式（魔数校验失败）")
+        head = content[:12].hex() if content else ""
+        raise BlobMigrationError(
+            f"无法识别图片格式（魔数校验失败，len={len(content or b'')}, head={head})"
+        )
     return f"{source_table}_{source_id}.{detected}"
 
 
 def _coerce_blob(value) -> bytes:
+    """Normalize driver-specific BLOB cell values to bytes.
+
+    MySQL clients under some charset settings decode BINARY/BLOB as ``str``.
+    Prefer base64 image payloads when present; otherwise latin-1 round-trips 0–255.
+    """
     if value is None:
         return b""
     if isinstance(value, memoryview):
         return value.tobytes()
     if isinstance(value, (bytes, bytearray)):
         return bytes(value)
-    raise BlobMigrationError("BLOB 列返回值类型无效")
+    if isinstance(value, str):
+        if not value:
+            return b""
+        decoded = _try_decode_base64_image(value)
+        if decoded is not None:
+            return decoded
+        try:
+            return value.encode("latin-1")
+        except UnicodeEncodeError:
+            # Rare: non-latin-1 code points from utf-8 mis-decode; keep raw utf-8 bytes.
+            return value.encode("utf-8", errors="surrogatepass")
+    try:
+        return bytes(value)
+    except (TypeError, ValueError):
+        pass
+    raise BlobMigrationError(f"BLOB 列返回值类型无效: {type(value).__name__}")
 
 
-def _fetch_source_rows(source: BlobMigrationSource, *, limit: int, offset: int = 0) -> list[dict]:
-    conn = connections[source.db_alias]
-    table = _quote_ident(source.source_table)
-    pk = _quote_ident(source.source_pk_column)
-    blob = _quote_ident(source.blob_column)
+@dataclass
+class _MigrationBatchContext:
+    """Bulk-loaded image_source_map keys for one batch — avoids per-row exists queries."""
 
-    select_cols = [pk, blob]
-    if source.name_column:
-        select_cols.append(_quote_ident(source.name_column))
-    if source.suffix_column:
-        select_cols.append(_quote_ident(source.suffix_column))
+    storage_table: str
+    blob_columns: list[str]
+    migrated_keys: set[tuple[str, str, str]]  # (lookup_table, source_id, map_column)
+    path_mappings: list[dict[str, str]]
 
-    where_parts = [f"{blob} IS NOT NULL"]
+    @classmethod
+    def load(cls, source: BlobMigrationSource, light_rows: list[dict]) -> _MigrationBatchContext:
+        from images.source_map_service import migrated_key_set_for_batch
+
+        storage_table = _storage_table(source)
+        blob_columns = _source_blob_columns(source)
+        path_mappings = _path_mappings(source)
+        migrated_keys: set[tuple[str, str, str]] = set()
+        if not light_rows:
+            return cls(
+                storage_table=storage_table,
+                blob_columns=blob_columns,
+                migrated_keys=migrated_keys,
+                path_mappings=path_mappings,
+            )
+
+        targets_by_table: dict[str, set[str]] = {}
+        map_columns_by_table: dict[str, set[str]] = {}
+        for light in light_rows:
+            for col in blob_columns:
+                try:
+                    lookup_table, source_id, map_column = _map_target_for_column(source, light, col)
+                except BlobMigrationError:
+                    continue
+                targets_by_table.setdefault(lookup_table, set()).add(source_id)
+                map_columns_by_table.setdefault(lookup_table, set()).add(map_column)
+                if len(blob_columns) == 1:
+                    map_columns_by_table[lookup_table].add("")
+
+        for lookup_table, source_ids in targets_by_table.items():
+            cols = list(map_columns_by_table.get(lookup_table) or blob_columns)
+            migrated_keys.update(
+                migrated_key_set_for_batch(
+                    source,
+                    lookup_table=lookup_table,
+                    source_ids=list(source_ids),
+                    map_columns=cols,
+                )
+            )
+
+        return cls(
+            storage_table=storage_table,
+            blob_columns=blob_columns,
+            migrated_keys=migrated_keys,
+            path_mappings=path_mappings,
+        )
+
+    def is_migrated(self, lookup_table: str, source_id: str, map_column: str) -> bool:
+        return (lookup_table, source_id, map_column) in self.migrated_keys
+
+    def is_row_column_migrated(self, source: BlobMigrationSource, row: dict, blob_column: str) -> bool:
+        try:
+            lookup_table, source_id, map_column = _map_target_for_column(source, row, blob_column)
+        except BlobMigrationError:
+            return False
+        return self.is_migrated(lookup_table, source_id, map_column)
+
+
+@dataclass
+class _PreparedMigrationBatch:
+    rows_fetched: int
+    last_pk: str
+    blob_rows: list[dict]
+    pre_skipped: list[MigrationItemResult]
+    map_ctx: _MigrationBatchContext | None = None
+    # Count of already-migrated cells jumped over (prefer this over huge pre_skipped lists).
+    pre_skipped_count: int = 0
+
+
+def _cursor_where_parts(
+    source: BlobMigrationSource,
+    conn,
+    *,
+    after_pk: str = "",
+) -> tuple[list[str], list, str]:
+    """Shared WHERE clause for cursor scans over legacy source rows."""
+    pk_col_name = source.source_pk_column
+    pk = _quote_ident(pk_col_name)
+
+    blob_checks = _cursor_candidate_checks(source, conn)
+    where_parts = ["(" + " OR ".join(blob_checks) + ")"]
     params: list = []
     extra = validate_where_clause(source.where_clause)
     if extra:
         where_parts.append(f"({extra})")
+    if after_pk:
+        where_parts.append(f"{pk} > %s")
+        params.append(after_pk)
+    return where_parts, params, pk
 
-    if conn.vendor == "mysql":
-        where_parts.append(f"LENGTH({blob}) > 0")
-    else:
-        where_parts.append(f"length({blob}) > 0")
+
+def _fetch_source_pks_cursor(
+    source: BlobMigrationSource,
+    *,
+    conn_alias: str,
+    after_pk: str = "",
+    limit: int = 1,
+) -> list[dict]:
+    """Light scan: PK (+ optional name/suffix) without reading BLOB columns."""
+    conn = _remote_connection(conn_alias)
+    table = _quote_ident(source.source_table)
+    pk_col_name = source.source_pk_column
+    where_parts, params, pk = _cursor_where_parts(source, conn, after_pk=after_pk)
+
+    select_cols = [pk]
+    for col in _extra_select_columns(source):
+        select_cols.append(_quote_ident(col))
 
     sql = (
         f"SELECT {', '.join(select_cols)} FROM {table} "
         f"WHERE {' AND '.join(where_parts)} "
         f"ORDER BY {pk} "
-        f"LIMIT %s OFFSET %s"
+        f"LIMIT %s"
     )
-    params.extend([limit, offset])
+    params.append(limit)
 
     with conn.cursor() as cursor:
         cursor.execute(sql, params)
         columns = [col[0] for col in cursor.description]
-        raw_rows = cursor.fetchall()
-
-    rows: list[dict] = []
-    for raw in raw_rows:
-        row = dict(zip(columns, raw))
-        rows.append(row)
-    return rows
+        return [dict(zip(columns, raw)) for raw in cursor.fetchall()]
 
 
-def _already_migrated(source_table: str, source_ids: list[str]) -> set[str]:
-    if not source_ids:
-        return set()
-    existing = ImageSourceMap.objects.filter(
-        source_table=source_table,
-        source_id__in=source_ids,
-    ).values_list("source_id", flat=True)
-    return set(existing)
+def _skip_scan_window(batch_size: int) -> int:
+    """How many light PKs to scan per round when skipping already-migrated rows."""
+    configured = int(getattr(settings, "BLOB_MIGRATION_SKIP_SCAN_WINDOW", 5000))
+    return max(int(batch_size), max(1, configured))
 
 
-def count_migration_candidates(source_id: int) -> dict:
-    source = _load_source(source_id)
+def _skip_scan_max_per_batch(batch_size: int) -> int:
+    """Soft cap per prepare call; 0 / negative means scan until pending batch is full or table ends.
+
+    Default is uncapped so sparse pending tails are not drip-fed through tiny skip windows.
+    """
+    configured = int(getattr(settings, "BLOB_MIGRATION_SKIP_SCAN_MAX_PER_BATCH", 0))
+    if configured <= 0:
+        return 0
+    return max(_skip_scan_window(batch_size), configured)
+
+
+def _fetch_source_rows_by_pks(
+    source: BlobMigrationSource,
+    pk_values: list[str],
+    *,
+    conn_alias: str | None = None,
+) -> list[dict]:
+    """Fetch full rows (including BLOB) for specific primary keys, ordered by PK."""
+    unique_pks: list[str] = list(dict.fromkeys(str(v) for v in pk_values if v is not None and str(v) != ""))
+    if not unique_pks:
+        return []
+
+    table = _quote_ident(source.source_table)
+    pk = _quote_ident(source.source_pk_column)
+    blob_cols = _source_blob_columns(source)
+    extra_cols = _extra_select_columns(source)
+    placeholders = ", ".join(["%s"] * len(unique_pks))
+
+    def _read(alias: str) -> list[dict]:
+        conn = _remote_connection(alias)
+        select_cols = [pk] + [_sql_blob_select(conn, col) for col in blob_cols]
+        for col in extra_cols:
+            select_cols.append(_quote_ident(col))
+        sql = (
+            f"SELECT {', '.join(select_cols)} FROM {table} "
+            f"WHERE {pk} IN ({placeholders}) ORDER BY {pk}"
+        )
+        with conn.cursor() as cursor:
+            cursor.execute(sql, unique_pks)
+            columns = [col[0] for col in cursor.description]
+            rows = []
+            for raw in cursor.fetchall():
+                item = dict(zip(columns, raw))
+                for col in blob_cols:
+                    if col in item:
+                        try:
+                            item[col] = _recover_image_bytes(_coerce_blob(item[col]))
+                        except BlobMigrationError:
+                            item[col] = b""
+                rows.append(item)
+            return rows
+
+    if conn_alias:
+        return _read(conn_alias)
+    with _source_db_session(source) as alias:
+        return _read(alias)
+
+
+def _fetch_source_rows_by_pks_map(
+    source: BlobMigrationSource,
+    pk_values: list[str],
+    *,
+    conn_alias: str | None = None,
+) -> dict[str, dict]:
+    """Batch-load source rows keyed by str(pk). Missing PKs are omitted."""
+    pk_col = source.source_pk_column
+    return {str(row[pk_col]): row for row in _fetch_source_rows_by_pks(source, pk_values, conn_alias=conn_alias)}
+
+
+def _fetch_source_row_by_pk(source: BlobMigrationSource, pk_value: str) -> dict | None:
+    return _fetch_source_rows_by_pks_map(source, [str(pk_value)]).get(str(pk_value))
+
+
+def _prepare_migration_batch(
+    source: BlobMigrationSource,
+    *,
+    after_pk: str,
+    batch_size: int,
+    skip_existing: bool,
+    conn_alias: str | None = None,
+) -> _PreparedMigrationBatch:
+    """Two-phase batch prep: scan PKs first, bulk-check maps, fetch BLOB only when needed.
+
+    With skip_existing, keep scanning light PK windows until we collect ``batch_size``
+    rows that still need migration (or the table ends). This avoids one-batch-at-a-time
+    re-walking huge already-migrated prefixes on resume / rerun.
+    """
+    pk_col = source.source_pk_column
+
+    def _classify_light_rows(
+        light_rows: list[dict],
+        map_ctx: _MigrationBatchContext,
+        *,
+        pending_budget: int | None = None,
+    ) -> tuple[list[dict], int, str, int]:
+        pending: list[dict] = []
+        skipped_cells = 0
+        last_pk = ""
+        examined = 0
+        for light in light_rows:
+            source_id_str = str(light[pk_col])
+            last_pk = source_id_str
+            examined += 1
+            needs_blob = False
+            for col in map_ctx.blob_columns:
+                if map_ctx.is_row_column_migrated(source, light, col):
+                    skipped_cells += 1
+                else:
+                    needs_blob = True
+            if needs_blob:
+                pending.append(light)
+                if pending_budget is not None and len(pending) >= pending_budget:
+                    break
+        return pending, skipped_cells, last_pk, examined
+
+    def _load_batch(alias: str) -> _PreparedMigrationBatch:
+        if not skip_existing:
+            light_rows = _fetch_source_pks_cursor(
+                source, conn_alias=alias, after_pk=after_pk, limit=batch_size
+            )
+            if not light_rows:
+                return _PreparedMigrationBatch(
+                    rows_fetched=0, last_pk=after_pk, blob_rows=[], pre_skipped=[]
+                )
+            last_pk = str(light_rows[-1][pk_col])
+            pk_values = [str(row[pk_col]) for row in light_rows]
+            blob_rows = _fetch_source_rows_by_pks(source, pk_values, conn_alias=alias)
+            return _PreparedMigrationBatch(
+                rows_fetched=len(light_rows),
+                last_pk=last_pk,
+                blob_rows=blob_rows,
+                pre_skipped=[],
+            )
+
+        scan_window = _skip_scan_window(batch_size)
+        max_examine = _skip_scan_max_per_batch(batch_size)
+        cursor_pk = after_pk
+        pending_lights: list[dict] = []
+        skipped_cells = 0
+        migrated_keys: set[tuple[str, str, str]] = set()
+        last_pk = after_pk
+        rows_scanned = 0
+        storage_table = _storage_table(source)
+        blob_columns = _source_blob_columns(source)
+        path_mappings = _path_mappings(source)
+
+        while len(pending_lights) < batch_size:
+            if max_examine > 0 and rows_scanned >= max_examine:
+                break
+            fetch_limit = scan_window
+            if max_examine > 0:
+                fetch_limit = min(scan_window, max_examine - rows_scanned)
+            light_rows = _fetch_source_pks_cursor(
+                source,
+                conn_alias=alias,
+                after_pk=cursor_pk,
+                limit=fetch_limit,
+            )
+            if not light_rows:
+                break
+
+            map_ctx = _MigrationBatchContext.load(source, light_rows)
+            migrated_keys.update(map_ctx.migrated_keys)
+            budget = batch_size - len(pending_lights)
+            pending_chunk, skipped_chunk, chunk_last_pk, examined = _classify_light_rows(
+                light_rows,
+                map_ctx,
+                pending_budget=budget,
+            )
+            skipped_cells += skipped_chunk
+            pending_lights.extend(pending_chunk)
+            rows_scanned += examined
+            if chunk_last_pk:
+                last_pk = chunk_last_pk
+                cursor_pk = chunk_last_pk
+            if len(pending_lights) >= batch_size:
+                break
+            if len(light_rows) < fetch_limit:
+                break
+
+        if not pending_lights and skipped_cells <= 0:
+            return _PreparedMigrationBatch(
+                rows_fetched=0, last_pk=after_pk, blob_rows=[], pre_skipped=[]
+            )
+
+        map_ctx = _MigrationBatchContext(
+            storage_table=storage_table,
+            blob_columns=blob_columns,
+            migrated_keys=migrated_keys,
+            path_mappings=path_mappings,
+        )
+        pks_needing_blob = [str(row[pk_col]) for row in pending_lights]
+        blob_rows = _fetch_source_rows_by_pks(source, pks_needing_blob, conn_alias=alias)
+        return _PreparedMigrationBatch(
+            rows_fetched=rows_scanned,
+            last_pk=last_pk,
+            blob_rows=blob_rows,
+            pre_skipped=[],
+            pre_skipped_count=skipped_cells,
+            map_ctx=map_ctx,
+        )
+
+    if conn_alias:
+        return _load_batch(conn_alias)
+
+    with _source_db_session(source) as alias:
+        return _load_batch(alias)
+
+
+def _fetch_source_rows_cursor(
+    source: BlobMigrationSource,
+    *,
+    after_pk: str = "",
+    limit: int = 1,
+) -> list[dict]:
+    """Full-row cursor fetch (legacy path for single-row retry lookups)."""
+    prepared = _prepare_migration_batch(
+        source,
+        after_pk=after_pk,
+        batch_size=limit,
+        skip_existing=False,
+    )
+    return prepared.blob_rows
+
+
+def _is_already_migrated(source: BlobMigrationSource, row: dict, blob_column: str) -> bool:
+    lookup_table, source_id_str, map_column = _map_target_for_column(source, row, blob_column)
+    return _map_exists_for_migration(
+        source=source,
+        lookup_table=lookup_table,
+        source_id=source_id_str,
+        map_column=map_column,
+        blob_columns=_source_blob_columns(source),
+    )
+
+
+def _upsert_source_map(
+    *,
+    source: BlobMigrationSource,
+    lookup_table: str,
+    map_source_id: str,
+    map_column: str,
+    image_info_id: int,
+) -> None:
+    from images.source_map_service import upsert_source_map
+
+    upsert_source_map(
+        source=source,
+        lookup_table=lookup_table,
+        map_source_id=map_source_id,
+        map_column=map_column,
+        image_info_id=image_info_id,
+    )
+
+
+def _migrate_single_column(
+    source: BlobMigrationSource,
+    row: dict,
+    *,
+    blob_column: str,
+    actor: str,
+    dry_run: bool,
+    skip_existing: bool,
+    conn_alias: str | None = None,
+    content: bytes | None = None,
+) -> MigrationItemResult:
+    pk_col = source.source_pk_column
+    row_pk = str(row[pk_col])
+    lookup_table, map_source_id, map_column = _map_target_for_column(source, row, blob_column)
+
+    if skip_existing and _is_already_migrated(source, row, blob_column):
+        return MigrationItemResult(
+            source_id=row_pk,
+            source_column=blob_column,
+            success=True,
+            skipped=True,
+        )
+
+    try:
+        if content is None:
+            content = _blob_bytes_for_column(source, row, blob_column, conn_alias=conn_alias)
+        if content:
+            content = _recover_image_bytes(content)
+        if not content:
+            return MigrationItemResult(
+                source_id=row_pk,
+                source_column=blob_column,
+                success=True,
+                skipped=True,
+            )
+
+        # Path-export tables store ``upload/...`` strings instead of BLOB bytes.
+        path_text = _as_storage_path_text(content)
+        if path_text:
+            payload = _resolve_storage_path_payload(path_text)
+            if payload.image is not None:
+                filename = Path(payload.path).name or payload.path
+                if dry_run:
+                    return MigrationItemResult(
+                        source_id=row_pk,
+                        source_column=blob_column,
+                        success=True,
+                        skipped=True,
+                        image_info_id=payload.image.id,
+                        filename=filename,
+                    )
+                _upsert_source_map(
+                    source=source,
+                    lookup_table=lookup_table,
+                    map_source_id=map_source_id,
+                    map_column=map_column,
+                    image_info_id=payload.image.id,
+                )
+                return MigrationItemResult(
+                    source_id=row_pk,
+                    source_column=blob_column,
+                    success=True,
+                    skipped=True,
+                    image_info_id=payload.image.id,
+                    filename=filename,
+                    error="源列已是路径，已关联现有图片",
+                )
+            if payload.content:
+                content = payload.content
+            else:
+                raise BlobMigrationError(
+                    f"源列存的是路径而非图片二进制，且文件不存在: {payload.path or path_text}"
+                )
+
+        name_value = row.get(source.name_column) if source.name_column else None
+        suffix_value = row.get(source.suffix_column) if source.suffix_column else None
+        filename = _infer_filename(
+            source_id=map_source_id,
+            content=content,
+            name_value=str(name_value) if name_value is not None else None,
+            suffix_value=str(suffix_value) if suffix_value is not None else None,
+            source_table=lookup_table,
+        )
+        if len(_source_blob_columns(source)) > 1:
+            stem = Path(filename).stem
+            ext = Path(filename).suffix
+            filename = f"{stem}_{blob_column}{ext}" if ext else f"{filename}_{blob_column}"
+
+        if dry_run:
+            return MigrationItemResult(
+                source_id=row_pk,
+                source_column=blob_column,
+                success=True,
+                filename=filename,
+            )
+
+        image = save_image_bytes_for_migration(
+            filename=filename,
+            content=content,
+            upload_user=actor,
+            category_id=source.category_id,
+            tags=source.tags,
+        )
+        _upsert_source_map(
+            source=source,
+            lookup_table=lookup_table,
+            map_source_id=map_source_id,
+            map_column=map_column,
+            image_info_id=image.id,
+        )
+        return MigrationItemResult(
+            source_id=row_pk,
+            source_column=blob_column,
+            success=True,
+            image_info_id=image.id,
+            filename=filename,
+        )
+    except DuplicateImageError as exc:
+        if dry_run:
+            return MigrationItemResult(
+                source_id=row_pk,
+                source_column=blob_column,
+                success=True,
+                skipped=True,
+                filename=getattr(exc, "filename", ""),
+                error="已存在相同图片",
+            )
+        existing = exc.existing
+        _upsert_source_map(
+            source=source,
+            lookup_table=lookup_table,
+            map_source_id=map_source_id,
+            map_column=map_column,
+            image_info_id=existing.id,
+        )
+        return MigrationItemResult(
+            source_id=row_pk,
+            source_column=blob_column,
+            success=True,
+            skipped=True,
+            image_info_id=existing.id,
+            filename=getattr(exc, "filename", ""),
+            error="已存在相同图片，已建立映射",
+        )
+    except Exception as exc:
+        logger.exception(
+            "blob migration failed source=%s id=%s column=%s",
+            source.source_table,
+            row_pk,
+            blob_column,
+        )
+        return MigrationItemResult(
+            source_id=row_pk,
+            source_column=blob_column,
+            success=False,
+            error=str(exc),
+        )
+
+
+def _build_work_units(
+    source: BlobMigrationSource,
+    blob_rows: list[dict],
+    *,
+    skip_existing: bool,
+    map_ctx: _MigrationBatchContext | None,
+) -> list[tuple[dict, str]]:
+    blob_cols = _source_blob_columns(source)
+    work: list[tuple[dict, str]] = []
+    for row in blob_rows:
+        for col in blob_cols:
+            if skip_existing and map_ctx and map_ctx.is_row_column_migrated(source, row, col):
+                continue
+            work.append((row, col))
+    return work
+
+
+def _migrate_work_unit(
+    source: BlobMigrationSource,
+    row: dict,
+    blob_column: str,
+    *,
+    actor: str,
+    dry_run: bool,
+    conn_alias: str | None = None,
+    content: bytes | None = None,
+) -> MigrationItemResult:
+    return _migrate_single_column(
+        source,
+        row,
+        blob_column=blob_column,
+        actor=actor,
+        dry_run=dry_run,
+        skip_existing=False,
+        conn_alias=conn_alias,
+        content=content,
+    )
+
+
+def _record_batch_item(
+    batch: MigrationBatchResult,
+    item: MigrationItemResult,
+    *,
+    job: BlobMigrationJob | None,
+    items: list[MigrationItemResult],
+    include_items: bool,
+    items_cap: int,
+) -> None:
+    _apply_item_to_batch(batch, item)
+    if include_items and len(items) < items_cap:
+        items.append(item)
+    if job and not item.success and not item.skipped:
+        _record_job_error(
+            job.id,
+            source_pk=item.source_id,
+            source_column=item.source_column,
+            filename=item.filename,
+            error=item.error or "unknown",
+        )
+
+
+def _migrate_row(
+    source: BlobMigrationSource,
+    row: dict,
+    *,
+    actor: str,
+    dry_run: bool,
+    skip_existing: bool,
+    blob_column: str | None = None,
+) -> list[MigrationItemResult]:
+    columns = [blob_column] if blob_column else _source_blob_columns(source)
+    return [
+        _migrate_single_column(
+            source,
+            row,
+            blob_column=col,
+            actor=actor,
+            dry_run=dry_run,
+            skip_existing=skip_existing,
+        )
+        for col in columns
+    ]
+
+
+def _apply_item_to_batch(batch: MigrationBatchResult, item: MigrationItemResult) -> None:
+    batch.processed += 1
+    if item.skipped:
+        batch.skipped += 1
+    elif item.success:
+        batch.succeeded += 1
+    else:
+        batch.failed += 1
+
+
+def _run_migration_batch_cursor(
+    source: BlobMigrationSource,
+    *,
+    batch_size: int,
+    after_pk: str,
+    dry_run: bool,
+    skip_existing: bool,
+    upload_user: str,
+    job: BlobMigrationJob | None = None,
+    include_items: bool = False,
+    items_cap: int = 100,
+) -> tuple[MigrationBatchResult, list[MigrationItemResult]]:
+    actor = upload_user or source.upload_user or "migration"
+    batch = MigrationBatchResult()
+    items: list[MigrationItemResult] = []
+
+    with _source_db_session(source) as alias:
+        prepared = _prepare_migration_batch(
+            source,
+            after_pk=after_pk,
+            batch_size=batch_size,
+            skip_existing=skip_existing,
+            conn_alias=alias,
+        )
+        batch.rows_fetched = prepared.rows_fetched
+        if not prepared.rows_fetched:
+            return batch, items
+
+        batch.last_pk = prepared.last_pk
+        skipped_n = int(getattr(prepared, "pre_skipped_count", 0) or 0)
+        if skipped_n:
+            # Keep skip counts on the batch result (one-shot / dry-run reporting).
+            batch.skipped += skipped_n
+            batch.processed += skipped_n
+        elif prepared.pre_skipped:
+            for item in prepared.pre_skipped:
+                _record_batch_item(
+                    batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap
+                )
+
+        # Always advance cursor past the scanned window (including pure-skip stretches).
+        # For async jobs with skip_existing, do not treat catch-up skips as progress work —
+        # total_estimate is pending-only so the bar tracks real migrations.
+        if job:
+            if skip_existing:
+                _update_job_progress(
+                    job,
+                    MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk),
+                    last_pk=prepared.last_pk,
+                )
+            elif batch.processed:
+                _update_job_progress(job, batch, last_pk=prepared.last_pk)
+            batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
+
+        work_units = _build_work_units(
+            source,
+            prepared.blob_rows,
+            skip_existing=skip_existing,
+            map_ctx=prepared.map_ctx,
+        )
+        if not work_units:
+            return batch, items
+
+        workers = 1 if dry_run else _upload_workers()
+        flush_every = 5
+        pk_col = source.source_pk_column
+
+        if workers <= 1:
+            for row, col in work_units:
+                if job and _job_stop_requested(job.id):
+                    break
+                item = _migrate_work_unit(
+                    source, row, col, actor=actor, dry_run=dry_run, conn_alias=alias
+                )
+                _record_batch_item(batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap)
+                if job and batch.processed >= flush_every:
+                    _update_job_progress(job, batch, last_pk=prepared.last_pk)
+                    batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
+        else:
+            blob_cache: dict[tuple[str, str], bytes | None] = {}
+            for row, col in work_units:
+                key = (str(row[pk_col]), col)
+                if key not in blob_cache:
+                    blob_cache[key] = _blob_bytes_for_column(source, row, col, conn_alias=alias)
+
+            lock = Lock()
+
+            def _task(row: dict, col: str) -> MigrationItemResult:
+                _close_worker_connections()
+                try:
+                    key = (str(row[pk_col]), col)
+                    return _migrate_work_unit(
+                        source,
+                        row,
+                        col,
+                        actor=actor,
+                        dry_run=dry_run,
+                        content=blob_cache.get(key),
+                    )
+                finally:
+                    _close_worker_connections()
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_task, row, col): (row, col) for row, col in work_units}
+                for future in as_completed(futures):
+                    if job and _job_stop_requested(job.id):
+                        break
+                    item = future.result()
+                    with lock:
+                        _record_batch_item(
+                            batch, item, job=job, items=items, include_items=include_items, items_cap=items_cap
+                        )
+                        if job and batch.processed >= flush_every:
+                            _update_job_progress(job, batch, last_pk=prepared.last_pk)
+                            batch = MigrationBatchResult(rows_fetched=prepared.rows_fetched, last_pk=prepared.last_pk)
+
+    return batch, items
+
+
+def _job_handled_count(job: BlobMigrationJob) -> int:
+    return int(job.succeeded or 0) + int(job.failed or 0) + int(job.skipped or 0)
+
+
+def _sync_job_estimate_from_handled(job: BlobMigrationJob) -> None:
+    """Grow UI-only total_estimate when processed rows exceed the pre-count."""
+    handled = _job_handled_count(job)
+    if handled > int(job.total_estimate or 0):
+        BlobMigrationJob.objects.filter(pk=job.pk).update(
+            total_estimate=handled,
+            updated_at=timezone.now(),
+        )
+
+
+def _record_empty_scan_diagnostic(job: BlobMigrationJob, source: BlobMigrationSource) -> None:
+    try:
+        with _source_db_session(source) as alias:
+            conn = _remote_connection(alias)
+            table = _quote_ident(source.source_table)
+            extra = validate_where_clause(source.where_clause)
+            where_sql = f" WHERE ({extra})" if extra else ""
+            with conn.cursor() as cursor:
+                cursor.execute(f"SELECT COUNT(*) FROM {table}{where_sql}")
+                table_rows = int((cursor.fetchone() or [0])[0] or 0)
+                current_db = ""
+                try:
+                    cursor.execute("SELECT DATABASE()")
+                    current_db = str((cursor.fetchone() or [""])[0] or "")
+                except Exception:
+                    pass
+        BlobMigrationJob.objects.filter(pk=job.pk).update(
+            message=(
+                f"源表扫描无 BLOB 候选行（库={current_db or _source_database_name(source) or source.db_alias} "
+                f"表={source.source_table} 行数={table_rows} "
+                f"WHERE={source.where_clause or '无'}）"
+            )[:500],
+            updated_at=timezone.now(),
+        )
+    except Exception:
+        logger.warning(
+            "empty-scan diagnostic failed job_id=%s source_id=%s",
+            job.id,
+            source.id,
+            exc_info=True,
+        )
+
+
+def execute_migration_job_batches(job: BlobMigrationJob) -> None:
+    """Walk the source cursor until exhausted.
+
+    total_estimate is UI-only and never gates whether batches run.
+    """
+    source = prepare_migration_source(_load_source(job.source_id))
     _validate_source_config(source)
+    batch_size = _max_batch_size(job.batch_size)
+    blob_cols = _source_blob_columns(source)
+    cols_label = ",".join(blob_cols)
+    db_label = _source_database_name(source) or source.db_alias
+    BlobMigrationJob.objects.filter(pk=job.pk).update(
+        message=(
+            f"迁移进行中（库={db_label} 表={source.source_table} BLOB列={cols_label}）"
+        )[:500],
+        updated_at=timezone.now(),
+    )
 
-    migrated = ImageSourceMap.objects.filter(source_table=source.source_table).count()
+    batches_run = 0
 
-    with db_alias_session(source.db_alias):
-        conn = connections[source.db_alias]
+    while True:
+        job.refresh_from_db()
+        if job.cancel_requested:
+            return
+        if job.pause_requested:
+            return
+
+        batch, _ = _run_migration_batch_cursor(
+            source,
+            batch_size=batch_size,
+            after_pk=job.last_pk_cursor or "",
+            dry_run=bool(job.dry_run),
+            skip_existing=bool(job.skip_existing),
+            upload_user=job.created_by,
+            job=job,
+        )
+        if batch.rows_fetched == 0:
+            if batches_run == 0:
+                _record_empty_scan_diagnostic(job, source)
+            break
+
+        batches_run += 1
+        _update_job_progress(job, batch, last_pk=batch.last_pk or job.last_pk_cursor)
+        job.refresh_from_db()
+        _sync_job_estimate_from_handled(job)
+
+        if not job.run_all:
+            break
+
+    if not job.dry_run:
+        BlobMigrationSource.objects.filter(pk=source.pk).update(last_run_at=timezone.now())
+    invalidate_migration_stats_cache(source.id)
+
+
+def _retry_migrate_error_item(
+    source: BlobMigrationSource,
+    err: BlobMigrationJobError,
+    row: dict | None,
+    *,
+    actor: str,
+    dry_run: bool,
+    conn_alias: str | None = None,
+    content: bytes | None = None,
+) -> MigrationItemResult:
+    if row is None:
+        return MigrationItemResult(
+            source_id=err.source_pk,
+            source_column=err.source_column or "",
+            success=False,
+            error="源表记录不存在",
+        )
+    target_col = (err.source_column or "").strip() or None
+    if target_col:
+        return _migrate_work_unit(
+            source,
+            row,
+            target_col,
+            actor=actor,
+            dry_run=dry_run,
+            conn_alias=conn_alias,
+            content=content,
+        )
+    results = _migrate_row(
+        source,
+        row,
+        actor=actor,
+        dry_run=dry_run,
+        skip_existing=False,
+        blob_column=None,
+    )
+    return results[0] if len(results) == 1 else results[-1]
+
+
+def _apply_retry_item_result(
+    job: BlobMigrationJob,
+    err: BlobMigrationJobError,
+    item: MigrationItemResult,
+    increment: MigrationBatchResult,
+) -> None:
+    _apply_item_to_batch(increment, item)
+    if item.success and not item.skipped:
+        BlobMigrationJobError.objects.filter(pk=err.pk).update(retried=1)
+    elif not item.success:
+        _record_job_error(
+            job.id,
+            source_pk=item.source_id,
+            source_column=item.source_column or err.source_column,
+            filename=item.filename or err.filename,
+            error=item.error or "retry failed",
+        )
+
+
+def retry_failed_rows_for_job(job: BlobMigrationJob) -> None:
+    """Retry parent-job failures in batches (IN-fetch + parallel upload), like normal migrate."""
+    if not job.parent_job_id:
+        raise BlobMigrationError("重试任务缺少 parent_job_id")
+
+    source = prepare_migration_source(_load_source(job.source_id))
+    _validate_source_config(source)
+    actor = job.created_by or source.upload_user or "migration"
+    dry_run = bool(job.dry_run)
+    batch_size = _max_batch_size(job.batch_size)
+    flush_every = 5
+    errors = list(
+        BlobMigrationJobError.objects.filter(job_id=job.parent_job_id, retried=0).order_by("id")
+    )
+    BlobMigrationJob.objects.filter(pk=job.pk).update(
+        message=f"重试失败项进行中（共 {len(errors)} 条）"[:500],
+        updated_at=timezone.now(),
+    )
+
+    for offset in range(0, len(errors), batch_size):
+        job.refresh_from_db()
+        if job.cancel_requested or job.pause_requested:
+            break
+
+        chunk = errors[offset : offset + batch_size]
+        increment = MigrationBatchResult(rows_fetched=len(chunk))
+
+        with _source_db_session(source) as alias:
+            rows_by_pk = _fetch_source_rows_by_pks_map(
+                source,
+                [err.source_pk for err in chunk],
+                conn_alias=alias,
+            )
+            units: list[tuple[BlobMigrationJobError, dict | None, bytes | None]] = []
+            for err in chunk:
+                row = rows_by_pk.get(str(err.source_pk))
+                content: bytes | None = None
+                target_col = (err.source_column or "").strip()
+                if row is not None and target_col:
+                    content = _blob_bytes_for_column(source, row, target_col, conn_alias=alias)
+                units.append((err, row, content))
+
+            workers = 1 if dry_run else _upload_workers()
+            if workers <= 1:
+                for err, row, content in units:
+                    if _job_stop_requested(job.id):
+                        break
+                    item = _retry_migrate_error_item(
+                        source,
+                        err,
+                        row,
+                        actor=actor,
+                        dry_run=dry_run,
+                        conn_alias=alias,
+                        content=content,
+                    )
+                    _apply_retry_item_result(job, err, item, increment)
+                    if increment.processed >= flush_every:
+                        _update_job_progress(job, increment, last_pk=None)
+                        increment = MigrationBatchResult()
+            else:
+                lock = Lock()
+
+                def _task(
+                    err: BlobMigrationJobError,
+                    row: dict | None,
+                    content: bytes | None,
+                ) -> tuple[BlobMigrationJobError, MigrationItemResult]:
+                    _close_worker_connections()
+                    try:
+                        item = _retry_migrate_error_item(
+                            source,
+                            err,
+                            row,
+                            actor=actor,
+                            dry_run=dry_run,
+                            content=content,
+                        )
+                        return err, item
+                    finally:
+                        _close_worker_connections()
+
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(_task, err, row, content) for err, row, content in units]
+                    for future in as_completed(futures):
+                        if _job_stop_requested(job.id):
+                            break
+                        err, item = future.result()
+                        with lock:
+                            _apply_retry_item_result(job, err, item, increment)
+                            if increment.processed >= flush_every:
+                                _update_job_progress(job, increment, last_pk=None)
+                                increment = MigrationBatchResult()
+
+        if increment.processed:
+            _update_job_progress(job, increment, last_pk=None)
+
+        if _job_stop_requested(job.id):
+            break
+
+    if not job.dry_run:
+        BlobMigrationSource.objects.filter(pk=source.pk).update(last_run_at=timezone.now())
+    invalidate_migration_stats_cache(source.id)
+
+
+def count_migration_candidates(source_id: int, *, use_cache: bool = True) -> dict:
+    source = prepare_migration_source(_load_source(source_id))
+    _validate_source_config(source)
+    blob_cols = _source_blob_columns(source)
+    storage_table = _storage_table(source)
+    path_mappings = _path_mappings(source)
+
+    cache_key = (
+        source.id,
+        (getattr(source, "source_uid", "") or "").strip(),
+        _source_database_name(source) or "",
+        source.source_table,
+        source.where_clause or "",
+        tuple(blob_cols),
+        source.path_lookup_table or "",
+        getattr(source, "blob_column_path_mappings", "") or "",
+    )
+    now = time.monotonic()
+    if use_cache:
+        with _STATS_CACHE_LOCK:
+            cached = _STATS_CACHE.get(cache_key)
+            if cached and now - cached[0] < _STATS_CACHE_TTL_SECONDS:
+                return dict(cached[1])
+
+    with _source_db_session(source) as alias:
+        conn = _remote_connection(alias)
         table = _quote_ident(source.source_table)
-        blob = _quote_ident(source.blob_column)
-        where_parts = [f"{blob} IS NOT NULL"]
         extra = validate_where_clause(source.where_clause)
+        where_parts: list[str] = []
         if extra:
             where_parts.append(f"({extra})")
-        if conn.vendor == "mysql":
-            where_parts.append(f"LENGTH({blob}) > 0")
+        if path_mappings:
+            # JOIN views often repeat the same base keys across many view rows.
+            # Count DISTINCT mapping keys per BLOB column so pending matches real work.
+            total_with_blob = 0
+            with conn.cursor() as cursor:
+                for mapping in path_mappings:
+                    key_col = (mapping.get("source_id_column") or "").strip()
+                    if not key_col:
+                        continue
+                    try:
+                        validate_identifier(key_col, label="路径映射键列")
+                    except BlobMigrationError:
+                        continue
+                    parts = list(where_parts)
+                    parts.append(_blob_nonempty_sql(conn, _quote_ident(key_col)))
+                    sql = (
+                        f"SELECT COUNT(DISTINCT {_quote_ident(key_col)}) FROM {table}"
+                    )
+                    if parts:
+                        sql += f" WHERE {' AND '.join(parts)}"
+                    cursor.execute(sql)
+                    total_with_blob += int((cursor.fetchone() or [0])[0] or 0)
+            if total_with_blob <= 0:
+                # Fallback: row×column estimate when mappings lack usable keys
+                checks = _cursor_candidate_checks(source, conn)
+                parts = list(where_parts)
+                if checks:
+                    parts.append("(" + " OR ".join(checks) + ")")
+                sql = f"SELECT COUNT(*) FROM {table}"
+                if parts:
+                    sql += f" WHERE {' AND '.join(parts)}"
+                with conn.cursor() as cursor:
+                    cursor.execute(sql)
+                    rows_with_keys = int((cursor.fetchone() or [0])[0] or 0)
+                total_with_blob = rows_with_keys * max(1, len(blob_cols))
         else:
-            where_parts.append(f"length({blob}) > 0")
+            # Path-export tables (varchar upload/...) often repeat the same path
+            # across many match rows — count DISTINCT paths, not row fan-out.
+            total_with_blob = 0
+            where_sql = f" WHERE ({extra})" if extra else ""
+            with conn.cursor() as cursor:
+                for col in blob_cols:
+                    col_q = _quote_ident(col)
+                    if _is_character_column(conn, table=source.source_table, column=col):
+                        pred = _path_text_nonempty_sql(conn, col_q)
+                        sql = f"SELECT COUNT(DISTINCT {col_q}) FROM {table}"
+                        if where_sql:
+                            sql += f"{where_sql} AND {pred}"
+                        else:
+                            sql += f" WHERE {pred}"
+                        cursor.execute(sql)
+                        total_with_blob += int((cursor.fetchone() or [0])[0] or 0)
+                    else:
+                        sql = (
+                            f"SELECT SUM(CASE WHEN {_blob_nonempty_sql(conn, col_q)}"
+                            f" THEN 1 ELSE 0 END) FROM {table}{where_sql}"
+                        )
+                        cursor.execute(sql)
+                        total_with_blob += int((cursor.fetchone() or [0])[0] or 0)
 
-        sql = f"SELECT COUNT(*) FROM {table} WHERE {' AND '.join(where_parts)}"
-        with conn.cursor() as cursor:
-            cursor.execute(sql)
-            total_with_blob = int(cursor.fetchone()[0])
+    from images.source_map_service import count_live_map_entries_for_source
 
-    return {
+    migrated = count_live_map_entries_for_source(source)
+
+    result = {
         "source_id": source.id,
+        "source_uid": (getattr(source, "source_uid", "") or "").strip(),
         "source_table": source.source_table,
+        "storage_table": storage_table,
         "db_alias": source.db_alias,
+        "blob_columns": blob_cols,
+        "source_object_type": source.source_object_type,
+        "path_lookup_table": source.path_lookup_table,
+        "blob_column_path_mappings": path_mappings,
         "total_with_blob": total_with_blob,
         "migrated": migrated,
         "pending": max(total_with_blob - migrated, 0),
     }
+    if use_cache:
+        with _STATS_CACHE_LOCK:
+            _STATS_CACHE[cache_key] = (now, dict(result))
+            if len(_STATS_CACHE) > 64:
+                oldest = sorted(_STATS_CACHE.items(), key=lambda item: item[1][0])[:16]
+                for key, _ in oldest:
+                    _STATS_CACHE.pop(key, None)
+    return result
+
+
+def invalidate_migration_stats_cache(source_id: int | None = None) -> None:
+    with _STATS_CACHE_LOCK:
+        if source_id is None:
+            _STATS_CACHE.clear()
+            return
+        for key in list(_STATS_CACHE):
+            if key and key[0] == source_id:
+                _STATS_CACHE.pop(key, None)
+
+
+def count_live_map_entries_by_source_table() -> dict[str, int]:
+    """Count non-deleted image_source_map rows grouped by source_table."""
+    from django.db.models import Count
+
+    live_ids = ImageInfo.objects.filter(is_delete=0).values("id")
+    rows = (
+        ImageSourceMap.objects.filter(image_info_id__in=live_ids)
+        .values("source_table")
+        .annotate(count=Count("id"))
+    )
+    return {
+        str(row["source_table"]): int(row["count"])
+        for row in rows
+        if (row.get("source_table") or "").strip()
+    }
+
+
+def count_map_entries_for_source(source: BlobMigrationSource) -> int:
+    """Count live map rows for one migration source."""
+    from images.source_map_service import count_live_map_entries_for_source
+
+    return count_live_map_entries_for_source(source)
 
 
 def run_blob_migration(
@@ -291,12 +2146,12 @@ def run_blob_migration(
     skip_existing: bool = True,
     upload_user: str | None = None,
 ) -> MigrationRunResult:
-    source = _load_source(source_id)
+    source = prepare_migration_source(_load_source(source_id))
     _validate_source_config(source)
 
     if batch_size <= 0:
         raise BlobMigrationError("batch_size 必须大于 0")
-    batch_size = min(batch_size, 500)
+    batch_size = _max_batch_size(batch_size)
 
     result = MigrationRunResult(
         source_id=source.id,
@@ -304,168 +2159,118 @@ def run_blob_migration(
         dry_run=dry_run,
     )
 
-    migrated_ids = set(
-        ImageSourceMap.objects.filter(source_table=source.source_table).values_list("source_id", flat=True)
+    batch, items = _run_migration_batch_cursor(
+        source,
+        batch_size=batch_size,
+        after_pk="",
+        dry_run=dry_run,
+        skip_existing=skip_existing,
+        upload_user=upload_user or source.upload_user or "migration",
+        job=None,
+        include_items=True,
+        items_cap=500,
     )
-    offset = 0
-    actor = upload_user or source.upload_user or "migration"
-
-    with db_alias_session(source.db_alias):
-        while result.processed < batch_size:
-            fetch_size = batch_size - result.processed
-            rows = _fetch_source_rows(source, limit=max(fetch_size * 3, fetch_size), offset=offset)
-            if not rows:
-                break
-            offset += len(rows)
-
-            pk_col = source.source_pk_column
-            pending_rows = []
-            for row in rows:
-                source_id_str = str(row[pk_col])
-                if skip_existing and source_id_str in migrated_ids:
-                    continue
-                pending_rows.append(row)
-                if len(pending_rows) >= fetch_size:
-                    break
-
-            if not pending_rows:
-                continue
-
-            result.total_candidates += len(pending_rows)
-
-            for row in pending_rows:
-                if result.processed >= batch_size:
-                    break
-
-                source_id_str = str(row[pk_col])
-                result.processed += 1
-
-                if skip_existing and source_id_str in migrated_ids:
-                    result.skipped += 1
-                    result.items.append(
-                        MigrationItemResult(source_id=source_id_str, success=True, skipped=True)
-                    )
-                    continue
-
-                try:
-                    content = _coerce_blob(row[source.blob_column])
-                    if not content:
-                        raise BlobMigrationError("BLOB 为空")
-
-                    name_value = row.get(source.name_column) if source.name_column else None
-                    suffix_value = row.get(source.suffix_column) if source.suffix_column else None
-                    filename = _infer_filename(
-                        source_id=source_id_str,
-                        content=content,
-                        name_value=str(name_value) if name_value is not None else None,
-                        suffix_value=str(suffix_value) if suffix_value is not None else None,
-                        source_table=source.source_table,
-                    )
-
-                    if dry_run:
-                        result.succeeded += 1
-                        result.items.append(
-                            MigrationItemResult(
-                                source_id=source_id_str,
-                                success=True,
-                                filename=filename,
-                            )
-                        )
-                        continue
-
-                    image = save_image_bytes(
-                        filename=filename,
-                        content=content,
-                        upload_user=actor,
-                        category_id=source.category_id,
-                        tags=source.tags,
-                        overwrite=False,
-                    )
-                    ImageSourceMap.objects.create(
-                        source_table=source.source_table,
-                        source_id=source_id_str,
-                        image_info_id=image.id,
-                        migrated_at=timezone.now(),
-                    )
-                    migrated_ids.add(source_id_str)
-                    result.succeeded += 1
-                    result.items.append(
-                        MigrationItemResult(
-                            source_id=source_id_str,
-                            success=True,
-                            image_info_id=image.id,
-                            filename=filename,
-                        )
-                    )
-                except DuplicateImageError as exc:
-                    if dry_run:
-                        result.skipped += 1
-                        result.items.append(
-                            MigrationItemResult(
-                                source_id=source_id_str,
-                                success=True,
-                                skipped=True,
-                                filename=getattr(exc, "filename", ""),
-                                error="已存在相同图片",
-                            )
-                        )
-                    else:
-                        existing = exc.existing
-                        ImageSourceMap.objects.create(
-                            source_table=source.source_table,
-                            source_id=source_id_str,
-                            image_info_id=existing.id,
-                            migrated_at=timezone.now(),
-                        )
-                        migrated_ids.add(source_id_str)
-                        result.skipped += 1
-                        result.items.append(
-                            MigrationItemResult(
-                                source_id=source_id_str,
-                                success=True,
-                                skipped=True,
-                                image_info_id=existing.id,
-                                filename=getattr(exc, "filename", ""),
-                                error="已存在相同图片，已建立映射",
-                            )
-                        )
-                except Exception as exc:
-                    result.failed += 1
-                    logger.exception(
-                        "blob migration failed source=%s id=%s",
-                        source.source_table,
-                        source_id_str,
-                    )
-                    result.items.append(
-                        MigrationItemResult(
-                            source_id=source_id_str,
-                            success=False,
-                            error=str(exc),
-                        )
-                    )
+    result.total_candidates = batch.rows_fetched
+    result.processed = batch.processed
+    result.succeeded = batch.succeeded
+    result.failed = batch.failed
+    result.skipped = batch.skipped
+    result.items = items
 
     if not dry_run:
         BlobMigrationSource.objects.filter(pk=source.pk).update(last_run_at=timezone.now())
+    invalidate_migration_stats_cache(source.id)
 
     return result
 
 
 def create_migration_source(**fields) -> BlobMigrationSource:
+    from images.blob_view_path_service import BlobViewPathError, resolve_source_metadata
+
+    blob_columns_raw = fields.get("blob_columns")
+    if isinstance(blob_columns_raw, list):
+        blob_columns_list = [str(col).strip() for col in blob_columns_raw if str(col).strip()]
+    else:
+        blob_columns_list = parse_blob_columns(
+            blob_columns_raw if isinstance(blob_columns_raw, str) else None,
+            fields.get("blob_column"),
+        )
+
+    db_alias = fields.get("db_alias") or "default"
+    initial_db = (fields.get("database_name") or "").strip()
+    with db_alias_session(db_alias, database=initial_db or None) as alias:
+        conn = connections[alias]
+        db_name = initial_db or str(conn.settings_dict.get("NAME") or "")
+        try:
+            meta = resolve_source_metadata(
+                conn,
+                database=db_name,
+                object_name=fields["source_table"],
+                object_type=fields.get("source_object_type"),
+                path_lookup_table=fields.get("path_lookup_table"),
+                blob_columns=blob_columns_list or None,
+                blob_column=fields.get("blob_column"),
+            )
+        except BlobViewPathError as exc:
+            raise BlobMigrationError(str(exc)) from exc
+
     source = BlobMigrationSource(
         name=fields.get("name", ""),
         source_table=fields["source_table"],
         source_pk_column=fields.get("source_pk_column") or "id",
-        blob_column=fields["blob_column"],
+        blob_column=meta["blob_column"],
+        blob_columns=serialize_blob_columns(meta["blob_columns"]),
+        source_object_type=meta["source_object_type"],
+        path_lookup_table=meta["path_lookup_table"],
+        blob_column_path_mappings=serialize_blob_column_path_mappings(
+            fields.get("blob_column_path_mappings")
+            or meta.get("blob_column_path_mappings")
+            or []
+        ),
         name_column=fields.get("name_column") or "",
         suffix_column=fields.get("suffix_column") or "",
-        category_id=fields["category_id"],
+        category_id=resolve_category_id(fields.get("category_id")),
         upload_user=fields.get("upload_user") or "migration",
         tags=(fields.get("tags") or "")[:500],
         where_clause=fields.get("where_clause") or "",
-        db_alias=fields.get("db_alias") or "default",
+        db_alias=db_alias,
+        database_name=db_name,
         enabled=1,
+        auto_sync_enabled=1,
+        change_track_mode="hash",
+        source_uid=fields.get("source_uid") or "",
         create_time=timezone.now(),
     )
+    if not (source.source_uid or "").strip():
+        from images.source_identity import ensure_source_record_uid
+
+        source.source_uid = ensure_source_record_uid(source, persist=False)
     _validate_source_config(source)
     source.save(force_insert=True)
+    from images.source_identity import ensure_source_record_uid
+
+    ensure_source_record_uid(source, persist=True)
+    _link_views_to_source_uid(source)
     return source
+
+
+def _link_views_to_source_uid(source: BlobMigrationSource) -> None:
+    from images.models import BlobTableView
+
+    uid = (getattr(source, "source_uid", "") or "").strip()
+    if not uid:
+        return
+    BlobTableView.objects.filter(source_uid=uid).update(
+        db_alias=source.db_alias,
+        database_name=source.database_name or "",
+        source_table=source.source_table,
+        source_object_type=source.source_object_type or "table",
+        path_lookup_table=source.path_lookup_table or "",
+    )
+    BlobTableView.objects.filter(
+        db_alias=source.db_alias,
+        database_name=source.database_name or "",
+        source_table=source.source_table,
+        source_object_type=source.source_object_type or "table",
+        source_uid="",
+    ).update(source_uid=uid)

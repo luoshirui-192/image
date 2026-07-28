@@ -1,0 +1,50 @@
+# Machine A one-click start (Windows PowerShell)
+$ErrorActionPreference = "Stop"
+Set-Location $PSScriptRoot
+$ComposeFile = "docker-compose.app.yml"
+
+if ($PSScriptRoot -match '[^\u0000-\u007F]') {
+    Write-Host "ERROR: Docker cannot build in a folder with non-ASCII characters in the path."
+    Write-Host "Use an ASCII-only path, e.g. E:\image_db"
+    exit 1
+}
+
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Host "Please install Docker Desktop: https://www.docker.com/products/docker-desktop/"
+    exit 1
+}
+
+if (-not (Test-Path .env)) {
+    Copy-Item .env.app.example .env
+    Write-Host "Created .env from .env.app.example"
+    Write-Host "Edit MYSQL_* passwords, PUBLIC_URL, MINIO_*, then run again."
+    exit 0
+}
+
+python docker/set-env.py
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+$composeArgs = @()
+bash scripts/compose-app-args.sh 2>$null | ForEach-Object { $composeArgs += $_ }
+
+$dbHost = (Select-String -Path .env -Pattern '^DB_HOST=' | Select-Object -First 1)
+if ($dbHost -and $dbHost.Line -notmatch '=db\s*$' -and $dbHost.Line -notmatch '=db$') {
+  docker start mysql8039 2>$null
+  docker compose -f docker-compose.app.yml stop db 2>$null
+}
+
+docker compose @composeArgs up -d --build
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+$public = "http://localhost"
+$match = Select-String -Path .env -Pattern '^PUBLIC_URL=' | Select-Object -First 1
+if ($match) { $public = $match.Line.Split('=', 2)[1].Trim() }
+
+Write-Host ""
+Write-Host "=========================================="
+Write-Host " Machine A started (MySQL + app layer)"
+Write-Host " Browser: $public"
+Write-Host " Image storage: MinIO (STORAGE_BACKEND=minio in .env)"
+Write-Host " Stop: docker compose -f $ComposeFile down"
+Write-Host " Docs: README-MACHINE-A.md"
+Write-Host "=========================================="

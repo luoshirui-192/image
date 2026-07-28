@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Initialize upload storage directories and verify write permission (Step 8)."""
+"""Initialize upload storage and verify write permission."""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -9,32 +10,45 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = PROJECT_ROOT / "upload"
 THUMB_CACHE_DIR = PROJECT_ROOT / "backend" / "thumb_cache"
 
-# Ensure backend.utils import works when run as script
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
-from utils.path_builder import build_relative_path, ensure_parent_dir, resolve_upload_file  # noqa: E402
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+
+import django  # noqa: E402
+
+django.setup()
+
+from django.conf import settings  # noqa: E402
+
+from utils.path_builder import build_relative_path  # noqa: E402
+from utils.storage import get_image_storage, reset_image_storage_cache  # noqa: E402
 
 
 def main() -> int:
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    reset_image_storage_cache()
+    storage = get_image_storage()
 
-    # Smoke test: create a sample path layout without leaving a real image
-    sample_rel = build_relative_path(category_id=1, suffix="jpg")
-    sample_abs = ensure_parent_dir(UPLOAD_DIR, sample_rel)
-    probe = sample_abs.with_suffix(".probe")
-    probe.write_text("ok", encoding="utf-8")
-    probe.unlink()
-
-    resolved = resolve_upload_file(UPLOAD_DIR, sample_rel)
-    if resolved.parent != sample_abs.parent:
-        print("ERROR: path resolution mismatch", file=sys.stderr)
+    ok, detail = storage.check_writable()
+    if not ok:
+        print(f"ERROR: storage not writable: {detail}", file=sys.stderr)
         return 1
 
-    print(f"upload root:      {UPLOAD_DIR}")
+    sample_rel = build_relative_path(category_id=1, suffix="jpg")
+    probe_key = sample_rel.replace(".jpg", ".probe")
+    storage.write_bytes(probe_key, b"ok")
+    storage.delete(probe_key)
+
+    print(f"storage backend:  {storage.backend_name}")
+    print(f"storage target:   {detail}")
     print(f"thumb cache root: {THUMB_CACHE_DIR}")
     print(f"sample path:      {sample_rel}")
-    print(f"sample abs dir:   {sample_abs.parent}")
+    if settings.STORAGE_BACKEND == "local":
+        print(f"upload root:      {settings.UPLOAD_ROOT}")
+    else:
+        print(f"minio endpoint:   {settings.MINIO_ENDPOINT}")
+        print(f"minio bucket:     {settings.MINIO_BUCKET}")
+        print(f"minio prefix:     {settings.MINIO_PREFIX}")
     print("storage init OK")
     return 0
 

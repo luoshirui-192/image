@@ -94,17 +94,79 @@ class BlobMigrationSourceSerializer(serializers.Serializer):
     name = serializers.CharField(required=False, allow_blank=True, max_length=100, default="")
     source_table = serializers.CharField(max_length=64, trim_whitespace=True)
     source_pk_column = serializers.CharField(required=False, default="id", max_length=64, trim_whitespace=True)
-    blob_column = serializers.CharField(max_length=64, trim_whitespace=True)
+    blob_column = serializers.CharField(required=False, max_length=64, trim_whitespace=True, allow_blank=True)
+    blob_columns = serializers.ListField(
+        child=serializers.CharField(max_length=64, trim_whitespace=True),
+        required=False,
+        allow_empty=False,
+    )
+    source_object_type = serializers.ChoiceField(
+        choices=["table", "view"],
+        required=False,
+        default="table",
+    )
+    path_lookup_table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
     name_column = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
     suffix_column = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
-    category_id = serializers.IntegerField(min_value=1)
+    category_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     upload_user = serializers.CharField(required=False, allow_blank=True, default="migration", max_length=100)
     tags = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
     where_clause = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
     db_alias = serializers.CharField(required=False, default="default", max_length=32)
+    database_name = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    source_uid = serializers.CharField(required=False, allow_blank=True, default="", max_length=36)
     enabled = serializers.IntegerField(required=False, default=1)
     last_run_at = serializers.DateTimeField(read_only=True)
     create_time = serializers.DateTimeField(read_only=True)
+
+    def validate(self, attrs):
+        blob_column = (attrs.get("blob_column") or "").strip()
+        blob_columns = attrs.get("blob_columns") or []
+        if not blob_column and not blob_columns:
+            raise serializers.ValidationError("请提供 blob_column 或 blob_columns")
+        if blob_column and not blob_columns:
+            attrs["blob_column"] = blob_column
+        elif blob_columns and not blob_column:
+            attrs["blob_column"] = blob_columns[0]
+        return attrs
+
+    def to_representation(self, instance):
+        from images.blob_schema_helpers import parse_blob_column_path_mappings, parse_blob_columns
+        from images.models import BlobMigrationSource
+
+        if isinstance(instance, BlobMigrationSource):
+            return {
+                "id": instance.id,
+                "name": instance.name,
+                "source_table": instance.source_table,
+                "source_pk_column": instance.source_pk_column,
+                "blob_column": instance.blob_column,
+                "blob_columns": parse_blob_columns(instance.blob_columns, instance.blob_column),
+                "source_object_type": instance.source_object_type or "table",
+                "path_lookup_table": instance.path_lookup_table or "",
+                "blob_column_path_mappings": parse_blob_column_path_mappings(
+                    instance.blob_column_path_mappings
+                ),
+                "name_column": instance.name_column,
+                "suffix_column": instance.suffix_column,
+                "category_id": instance.category_id,
+                "upload_user": instance.upload_user,
+                "tags": instance.tags,
+                "where_clause": instance.where_clause,
+                "db_alias": instance.db_alias,
+                "database_name": getattr(instance, "database_name", "") or "",
+                "source_uid": getattr(instance, "source_uid", "") or "",
+                "enabled": instance.enabled,
+                "last_run_at": instance.last_run_at,
+                "auto_sync_enabled": bool(getattr(instance, "auto_sync_enabled", 1)),
+                "sync_interval_minutes": int(getattr(instance, "sync_interval_minutes", 0) or 60),
+                "sync_batch_size": int(getattr(instance, "sync_batch_size", 0) or 200),
+                "sync_last_run_at": getattr(instance, "sync_last_run_at", None),
+                "change_track_mode": getattr(instance, "change_track_mode", "") or "hash",
+                "change_track_column": getattr(instance, "change_track_column", "") or "",
+                "create_time": instance.create_time,
+            }
+        return super().to_representation(instance)
 
 
 class BlobMigrationRunSerializer(serializers.Serializer):
@@ -112,6 +174,26 @@ class BlobMigrationRunSerializer(serializers.Serializer):
     batch_size = serializers.IntegerField(required=False, default=50, min_value=1, max_value=500)
     dry_run = serializers.BooleanField(required=False, default=False)
     skip_existing = serializers.BooleanField(required=False, default=True)
+
+
+class BlobMigrationJobCreateSerializer(serializers.Serializer):
+    source_id = serializers.IntegerField(min_value=1)
+    batch_size = serializers.IntegerField(required=False, default=50, min_value=1, max_value=500)
+    dry_run = serializers.BooleanField(required=False, default=False)
+    skip_existing = serializers.BooleanField(required=False, default=True)
+    run_all = serializers.BooleanField(required=False, default=True)
+    warm_thumbs_after = serializers.BooleanField(required=False, default=True)
+
+
+class BlobMigrationJobRetrySerializer(serializers.Serializer):
+    parent_job_id = serializers.IntegerField(min_value=1)
+    batch_size = serializers.IntegerField(required=False, default=50, min_value=1, max_value=500)
+    dry_run = serializers.BooleanField(required=False, default=False)
+    warm_thumbs_after = serializers.BooleanField(required=False, default=True)
+
+
+class BlobMigrationJobClearSerializer(serializers.Serializer):
+    source_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
 
 
 class ExternalDbConnectionSerializer(serializers.Serializer):
@@ -141,9 +223,18 @@ class BlobTableViewSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True)
     name = serializers.CharField(max_length=100)
     db_alias = serializers.CharField(max_length=32)
+    database_name = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    source_uid = serializers.CharField(required=False, allow_blank=True, default="", max_length=36)
     source_table = serializers.CharField(max_length=64)
+    source_object_type = serializers.ChoiceField(choices=["table", "view"], required=False, default="table")
+    path_lookup_table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
     source_pk_column = serializers.CharField(max_length=64)
     blob_column = serializers.CharField(max_length=64)
+    blob_columns = serializers.ListField(
+        child=serializers.CharField(max_length=64),
+        required=False,
+        allow_empty=True,
+    )
     display_columns = serializers.CharField(required=False, allow_blank=True, default="")
     where_clause = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
     remark = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
@@ -151,13 +242,50 @@ class BlobTableViewSerializer(serializers.Serializer):
     create_time = serializers.DateTimeField(read_only=True, allow_null=True)
     update_time = serializers.DateTimeField(read_only=True, allow_null=True)
 
+    def to_representation(self, instance):
+        from images.blob_schema_helpers import parse_blob_column_path_mappings, parse_blob_columns
+        from images.models import BlobTableView
+
+        if isinstance(instance, BlobTableView):
+            return {
+                "id": instance.id,
+                "name": instance.name,
+                "db_alias": instance.db_alias,
+                "database_name": instance.database_name or "",
+                "source_uid": getattr(instance, "source_uid", "") or "",
+                "source_table": instance.source_table,
+                "source_object_type": instance.source_object_type or "table",
+                "path_lookup_table": instance.path_lookup_table or "",
+                "blob_column_path_mappings": parse_blob_column_path_mappings(
+                    instance.blob_column_path_mappings
+                ),
+                "source_pk_column": instance.source_pk_column,
+                "blob_column": instance.blob_column,
+                "blob_columns": parse_blob_columns(instance.blob_columns, instance.blob_column),
+                "display_columns": instance.display_columns,
+                "where_clause": instance.where_clause,
+                "remark": instance.remark,
+                "last_viewed_at": instance.last_viewed_at,
+                "create_time": instance.create_time,
+                "update_time": instance.update_time,
+            }
+        return super().to_representation(instance)
+
 
 class BlobTableViewCreateSerializer(serializers.Serializer):
     name = serializers.CharField(required=False, allow_blank=True, default="", max_length=100)
     db_alias = serializers.CharField(required=False, default="default", max_length=32)
+    database_name = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
     source_table = serializers.CharField(max_length=64, trim_whitespace=True)
+    source_object_type = serializers.ChoiceField(choices=["table", "view"], required=False, default="table")
+    path_lookup_table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
     source_pk_column = serializers.CharField(required=False, default="id", max_length=64, trim_whitespace=True)
-    blob_column = serializers.CharField(max_length=64, trim_whitespace=True)
+    blob_column = serializers.CharField(required=False, max_length=64, trim_whitespace=True, allow_blank=True)
+    blob_columns = serializers.ListField(
+        child=serializers.CharField(max_length=64, trim_whitespace=True),
+        required=False,
+        allow_empty=True,
+    )
     display_columns = serializers.ListField(
         child=serializers.CharField(max_length=64),
         required=False,
@@ -166,9 +294,47 @@ class BlobTableViewCreateSerializer(serializers.Serializer):
     where_clause = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
     remark = serializers.CharField(required=False, allow_blank=True, default="", max_length=500)
 
+    def validate(self, attrs):
+        blob_column = (attrs.get("blob_column") or "").strip()
+        blob_columns = attrs.get("blob_columns") or []
+        if blob_column and not blob_columns:
+            attrs["blob_column"] = blob_column
+        elif blob_columns and not blob_column:
+            attrs["blob_column"] = blob_columns[0]
+        return attrs
+
+    def to_representation(self, instance):
+        from images.blob_schema_helpers import parse_blob_column_path_mappings, parse_blob_columns
+        from images.models import BlobTableView
+
+        if isinstance(instance, BlobTableView):
+            return {
+                "id": instance.id,
+                "name": instance.name,
+                "db_alias": instance.db_alias,
+                "database_name": instance.database_name or "",
+                "source_table": instance.source_table,
+                "source_object_type": instance.source_object_type or "table",
+                "path_lookup_table": instance.path_lookup_table or "",
+                "blob_column_path_mappings": parse_blob_column_path_mappings(
+                    instance.blob_column_path_mappings
+                ),
+                "source_pk_column": instance.source_pk_column,
+                "blob_column": instance.blob_column,
+                "blob_columns": parse_blob_columns(instance.blob_columns, instance.blob_column),
+                "display_columns": instance.display_columns,
+                "where_clause": instance.where_clause,
+                "remark": instance.remark,
+                "last_viewed_at": instance.last_viewed_at,
+                "create_time": instance.create_time,
+                "update_time": instance.update_time,
+            }
+        return super().to_representation(instance)
+
 
 class BlobTableViewUpdateSerializer(serializers.Serializer):
     name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    database_name = serializers.CharField(required=False, allow_blank=True, max_length=64)
     display_columns = serializers.ListField(
         child=serializers.CharField(max_length=64),
         required=False,
@@ -178,9 +344,26 @@ class BlobTableViewUpdateSerializer(serializers.Serializer):
     remark = serializers.CharField(required=False, allow_blank=True, max_length=500)
 
 
+class BlobMigrationSourceSyncUpdateSerializer(serializers.Serializer):
+    auto_sync_enabled = serializers.BooleanField(required=False)
+    sync_interval_minutes = serializers.IntegerField(required=False, min_value=5, max_value=10080)
+    sync_batch_size = serializers.IntegerField(required=False, min_value=10, max_value=2000)
+    refresh_change_track = serializers.BooleanField(required=False, default=False)
+
+
+class BlobSyncBackfillSerializer(serializers.Serializer):
+    table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    batch_size = serializers.IntegerField(required=False, min_value=10, max_value=2000)
+    limit = serializers.IntegerField(required=False, min_value=1, max_value=500000)
+    dry_run = serializers.BooleanField(required=False, default=False)
+
+
 class BlobTableViewRowsSerializer(serializers.Serializer):
     offset = serializers.IntegerField(required=False, default=0, min_value=0)
     limit = serializers.IntegerField(required=False, default=100, min_value=1, max_value=500)
+    include_total = serializers.BooleanField(required=False, default=False)
+    skip_blob_presence = serializers.BooleanField(required=False, default=True)
+    after_pk = serializers.CharField(required=False, allow_blank=True, default="", max_length=128)
 
 
 class BlobTableViewPreviewSchemaSerializer(serializers.Serializer):
@@ -193,3 +376,35 @@ class BlobTableViewPreviewSchemaSerializer(serializers.Serializer):
         required=False,
         allow_empty=True,
     )
+
+
+class BlobMigrationSourceRebindSerializer(serializers.Serializer):
+    db_alias = serializers.CharField(max_length=32)
+    database_name = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    source_table = serializers.CharField(max_length=64, trim_whitespace=True)
+    source_object_type = serializers.ChoiceField(choices=["table", "view"], required=False, default="table")
+    path_lookup_table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+
+
+class BlobTableViewLinkSourceSerializer(serializers.Serializer):
+    source_uid = serializers.CharField(max_length=36, trim_whitespace=True)
+
+
+class BlobSimulatedExportSerializer(serializers.Serializer):
+    target_connection_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    target_db_alias = serializers.CharField(required=False, allow_blank=True, default="", max_length=32)
+    target_database = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    target_table = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
+    if_exists = serializers.ChoiceField(
+        choices=["fail", "replace", "truncate"],
+        required=False,
+        default="fail",
+    )
+
+    def validate(self, attrs):
+        conn_id = attrs.get("target_connection_id")
+        alias = (attrs.get("target_db_alias") or "").strip()
+        if not conn_id and not alias:
+            raise serializers.ValidationError("请提供 target_connection_id 或 target_db_alias")
+        attrs["target_db_alias"] = alias
+        return attrs

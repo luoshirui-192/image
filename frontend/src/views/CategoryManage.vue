@@ -1,17 +1,23 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { ArrowLeft, Plus } from '@element-plus/icons-vue'
 import {
   createCategoryApi,
   deleteCategoryApi,
-  formatDateTime,
   listCategoriesApi,
   updateCategoryApi,
 } from '@/api/images'
+import { formatDateTime } from '@/utils/format'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
+
+const route = useRoute()
+const router = useRouter()
 
 const loading = ref(false)
 const categories = ref([])
+const categoriesLoadedOnce = ref(false)
 
 const dialogVisible = ref(false)
 const dialogSaving = ref(false)
@@ -23,11 +29,23 @@ const form = reactive({
   sort: 0,
 })
 
+const backTarget = computed(() => {
+  const from = String(route.query.from || '').replace(/^\//, '')
+  if (from === 'upload') {
+    return { path: '/upload', label: '返回上传' }
+  }
+  if (from === 'blob-migrate') {
+    return { path: '/blob-migrate', label: '返回任务台' }
+  }
+  return { path: '/', label: '返回首页' }
+})
+
 async function loadCategories() {
   loading.value = true
   try {
     const res = await listCategoriesApi()
     categories.value = res.data || []
+    categoriesLoadedOnce.value = true
   } finally {
     loading.value = false
   }
@@ -99,7 +117,18 @@ async function handleDelete(row) {
   }
 }
 
-onMounted(loadCategories)
+function goBack() {
+  router.push(backTarget.value.path)
+}
+
+usePageDataRefresh(loadCategories, {
+  // Zero categories can be a valid steady state after first load.
+  isEmpty: () => !categoriesLoadedOnce.value,
+  alwaysRefreshOnVisible: false,
+  intervalMs: 1500,
+  maxEmptyRetries: 10,
+  mountRetryDelaysMs: [200, 600, 1500, 3000],
+})
 </script>
 
 <template>
@@ -107,8 +136,14 @@ onMounted(loadCategories)
     <div class="page-card">
       <div class="header-row">
         <div>
+          <el-button link type="primary" class="back-btn" @click="goBack">
+            <el-icon><ArrowLeft /></el-icon>
+            {{ backTarget.label }}
+          </el-button>
           <h2 class="page-title">分类管理</h2>
-          <p class="page-desc">维护图片分类，上传时可选择分类。分类下有图片时不可删除。</p>
+          <p class="page-desc">
+            维护上传与迁移使用的图片分类。上传、迁移页可直接新建；此处可改名、排序或删除空分类。
+          </p>
         </div>
         <el-button type="primary" :icon="Plus" @click="openCreate">新增分类</el-button>
       </div>
@@ -161,6 +196,11 @@ onMounted(loadCategories)
   gap: 16px;
   margin-bottom: 16px;
   flex-wrap: wrap;
+}
+
+.back-btn {
+  padding-left: 0;
+  margin-bottom: 4px;
 }
 
 .page-desc {

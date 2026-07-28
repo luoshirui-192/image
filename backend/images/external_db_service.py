@@ -4,7 +4,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
 import re
+import sys
+import threading
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -17,11 +21,70 @@ from images.models import ExternalDbConnection
 logger = logging.getLogger(__name__)
 
 EXTERNAL_ALIAS_PREFIX = "external_"
+SESSION_ALIAS_PREFIX = "session_"
 PASSWORD_KEY_SALT = "external-db-password-v1"
 HOST_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 PORT_MIN = 1
 PORT_MAX = 65535
 CONNECT_TIMEOUT = 10
+_SESSION_ALIAS_LOCK = threading.Lock()
+# Env-derived expected NAME for system aliases (survives in-process corruption).
+_SYSTEM_DB_EXPECTED: dict[str, str] = {}
+
+
+def _running_tests() -> bool:
+    return "test" in sys.argv or getattr(settings, "DB_ENGINE", "mysql") == "sqlite"
+
+
+def expected_system_db_name(alias: str) -> str | None:
+    """Return the configured NAME for default/legacy from env (not live connections)."""
+    value = (alias or "").strip()
+    if value == "default":
+        if _running_tests():
+            return None
+        return os.getenv("DB_NAME") or os.getenv("MYSQL_DATABASE") or "image_db"
+    if value == "legacy":
+        return os.getenv("LEGACY_DB_NAME") or None
+    return None
+
+
+def ensure_system_database_names() -> list[str]:
+    """
+    Repair process-local corruption of default/legacy DATABASE NAME.
+
+    Older SQL/catalog code could leave default pointing at a catalog schema;
+    image serve and migration stats then fail until the worker restarts.
+    """
+    if _running_tests():
+        return []
+
+    repaired: list[str] = []
+    expectations = {
+        "default": os.getenv("DB_NAME") or os.getenv("MYSQL_DATABASE") or "",
+        "legacy": os.getenv("LEGACY_DB_NAME") or "",
+    }
+    for alias, expected in expectations.items():
+        expected = (expected or "").strip()
+        if not expected or alias not in connections.databases:
+            continue
+        _SYSTEM_DB_EXPECTED.setdefault(alias, expected)
+        cfg = connections.databases[alias]
+        current = str(cfg.get("NAME") or "")
+        if current == expected:
+            continue
+        logger.error(
+            "Repairing poisoned system DB alias %s NAME %r -> %r",
+            alias,
+            current,
+            expected,
+        )
+        cfg["NAME"] = expected
+        try:
+            connections[alias].close()
+        except Exception:
+            logger.warning("close after DB NAME repair failed alias=%s", alias, exc_info=True)
+        repaired.append(alias)
+    return repaired
 
 
 def _running_in_docker() -> bool:
@@ -160,11 +223,12 @@ def _format_mysql_error(exc: Exception, *, host: str, port: int) -> str:
     return message
 
 
-def build_database_settings(record: ExternalDbConnection, *, password: str | None = None) -> dict:
+def build_database_settings(record: ExternalDbConnection, *, password: str | None = None, database: str | None = None) -> dict:
     pwd = password if password is not None else decrypt_password(record.password_encrypted)
+    db_name = (database or record.db_name or "").strip() or record.db_name
     return {
         "ENGINE": "config.db_backend",
-        "NAME": record.db_name,
+        "NAME": db_name,
         "USER": record.username,
         "PASSWORD": pwd,
         "HOST": record.host,
@@ -238,37 +302,6 @@ def test_connection_settings(settings_dict: dict) -> str:
     return "连接成功"
 
 
-def register_external_connection(connection_id: int) -> str:
-    alias = external_alias(connection_id)
-    try:
-        record = ExternalDbConnection.objects.get(pk=connection_id, enabled=1)
-    except ExternalDbConnection.DoesNotExist as exc:
-        raise ExternalDbError(f"外部库连接不存在或已禁用: id={connection_id}") from exc
-
-    connections.databases[alias] = build_database_settings(record)
-    connections[alias].ensure_connection()
-    return alias
-
-
-def unregister_external_connection(connection_id: int) -> None:
-    alias = external_alias(connection_id)
-    if alias in connections.databases:
-        try:
-            connections[alias].close()
-        except Exception:
-            logger.warning("close external connection failed alias=%s", alias, exc_info=True)
-        connections.databases.pop(alias, None)
-
-
-@contextmanager
-def open_external_connection(connection_id: int):
-    alias = register_external_connection(connection_id)
-    try:
-        yield alias
-    finally:
-        unregister_external_connection(connection_id)
-
-
 def validate_db_alias_reference(alias: str) -> str:
     """Validate alias without opening a connection."""
     value = (alias or "default").strip() or "default"
@@ -282,29 +315,82 @@ def validate_db_alias_reference(alias: str) -> str:
     return value
 
 
-@contextmanager
-def db_alias_session(alias: str):
-    """Open external connection for the duration of a migration/discover operation."""
-    value = validate_db_alias_reference(alias)
-    ext_id = parse_external_alias(value)
+def alias_from_connection_config(config: dict) -> str:
+    """Resolve logical alias from {connection_id} or {db_alias} config dicts."""
+    if config.get("connection_id") is not None:
+        return external_alias(int(config["connection_id"]))
+    return str(config.get("db_alias") or "default")
+
+
+def _session_settings(alias: str, *, database: str | None) -> dict | None:
+    """
+    Build settings for an ephemeral session, or None to reuse ``alias`` as-is.
+
+    External aliases always get a private session copy.
+    System aliases (default/legacy) only clone when NAME must change.
+    """
+    ext_id = parse_external_alias(alias)
     if ext_id is not None:
-        register_external_connection(ext_id)
+        try:
+            record = ExternalDbConnection.objects.get(pk=ext_id, enabled=1)
+        except ExternalDbConnection.DoesNotExist as exc:
+            raise ExternalDbError(f"外部库连接不存在或已禁用: id={ext_id}") from exc
+        return build_database_settings(record, database=database)
+
+    base = connections.databases.get(alias)
+    if base is None:
+        raise ExternalDbError(f"数据库别名不存在: {alias}")
+    if not database or database == str(base.get("NAME") or ""):
+        return None
+    # Shallow copy + copy OPTIONS so session never mutates system alias settings.
+    patched = dict(base)
+    patched["NAME"] = database
+    if isinstance(base.get("OPTIONS"), dict):
+        patched["OPTIONS"] = dict(base["OPTIONS"])
+    return patched
+
+
+def _alloc_session_alias(settings_dict: dict) -> str:
+    with _SESSION_ALIAS_LOCK:
+        session_alias = f"{SESSION_ALIAS_PREFIX}{uuid.uuid4().hex}"
+        connections.databases[session_alias] = settings_dict
+    return session_alias
+
+
+def _cleanup_session_alias(session_alias: str) -> None:
+    # Only close if this thread already opened the wrapper — avoid creating one just to destroy it.
     try:
+        conn = getattr(connections._connections, session_alias, None)
+        if conn is not None:
+            conn.close()
+            delattr(connections._connections, session_alias)
+    except Exception:
+        logger.warning("close session alias failed alias=%s", session_alias, exc_info=True)
+    with _SESSION_ALIAS_LOCK:
+        connections.databases.pop(session_alias, None)
+
+
+@contextmanager
+def db_alias_session(alias: str, *, database: str | None = None):
+    """
+    Yield a DB alias for catalog/SQL/migration work.
+
+    Never mutates process-global default/legacy NAME. External connections and
+    database switches use ephemeral session_* aliases only.
+    """
+    ensure_system_database_names()
+    value = validate_db_alias_reference(alias)
+    db_name = (database or "").strip() or None
+    settings_dict = _session_settings(value, database=db_name)
+    if settings_dict is None:
         yield value
+        return
+
+    session_alias = _alloc_session_alias(settings_dict)
+    try:
+        yield session_alias
     finally:
-        if ext_id is not None:
-            unregister_external_connection(ext_id)
-
-
-def resolve_db_alias(alias: str) -> str:
-    """Ensure alias is usable and return normalized alias."""
-    value = (alias or "default").strip() or "default"
-    ext_id = parse_external_alias(value)
-    if ext_id is not None:
-        return register_external_connection(ext_id)
-    if value not in connections:
-        raise ExternalDbError(f"数据库别名不存在: {value}")
-    return value
+        _cleanup_session_alias(session_alias)
 
 
 def list_database_aliases() -> list[dict]:
@@ -422,7 +508,6 @@ def update_external_connection(record: ExternalDbConnection, **fields) -> Extern
         record.password_encrypted = encrypt_password(password)
     record.update_time = timezone.now()
     record.save()
-    unregister_external_connection(record.id)
     return record
 
 

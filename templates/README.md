@@ -1,0 +1,3 @@
+# Fingerprint ISO feature templates (bidiso / neuiso / …)
+# Relative DB paths: templates/{YYYYMMDD}/{uuid}.{suffix}
+# On MinIO (machine A): object key = {MINIO_PREFIX}/templates/...

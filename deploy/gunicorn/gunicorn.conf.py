@@ -20,7 +20,10 @@ LOG_DIR = BACKEND_DIR / "logs"
 bind = os.getenv("GUNICORN_BIND", os.getenv("BACKEND_UPSTREAM", "127.0.0.1:8000"))
 backlog = 2048
 
-_default_workers = max(2, multiprocessing.cpu_count() * 2 + 1)
+# Small-office default (~4–5 concurrent browsers):
+# Cap workers so dual-socket hosts do not spawn dozens of processes and exhaust MySQL.
+_cpus = multiprocessing.cpu_count() or 2
+_default_workers = min(6, max(4, _cpus))
 workers = int(os.getenv("GUNICORN_WORKERS", str(_default_workers)))
 worker_class = "sync"
 threads = 1

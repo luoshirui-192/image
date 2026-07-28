@@ -21,34 +21,26 @@ export const MENU_ITEMS = [
   {
     path: 'blob-migrate',
     name: 'blob-migrate',
-    title: 'BLOB 迁移',
+    title: '任务台',
     icon: 'Connection',
     adminOnly: false,
-    description: '从旧库 BLOB 导出到 upload 并生成路径表',
+    description: 'BLOB 迁移、路径导出、指纹 ZIP 导入任务监控',
   },
   {
-    path: 'blob-views',
-    name: 'blob-views',
-    title: 'BLOB 表视图',
+    path: 'blob-browse',
+    name: 'blob-browse',
+    title: '模拟数据库',
     icon: 'View',
     adminOnly: false,
-    description: '浏览远程旧表，BLOB 列显示为本地路径',
+    description: '目录、连接、建配置、一键迁移、SQL 与导出',
   },
   {
-    path: 'sql',
-    name: 'sql',
-    title: 'SQL 查询',
-    icon: 'Document',
+    path: 'fingerprint-pairs',
+    name: 'fingerprint-pairs',
+    title: '指纹对比',
+    icon: 'CopyDocument',
     adminOnly: false,
-    description: '自定义 SELECT 查询与图片预览',
-  },
-  {
-    path: 'categories',
-    name: 'categories',
-    title: '分类管理',
-    icon: 'Menu',
-    adminOnly: false,
-    description: '维护图片分类',
+    description: '业务表样本浏览、路径写回导入与细节点叠加',
   },
   {
     path: 'logs',
@@ -81,8 +73,21 @@ export function findMenuItemByPath(path) {
   return MENU_ITEMS.find((item) => item.path === normalized || (item.path === '' && normalized === ''))
 }
 
-export function resolveActiveMenuPath(routePath) {
+export function resolveActiveMenuPath(routePath, query = {}) {
   const path = routePath.replace(/^\//, '')
+  if (path === 'categories' && query.from) {
+    const from = String(query.from).replace(/^\//, '')
+    const parent = MENU_ITEMS.find((item) => item.path === from || item.name === from)
+    if (parent) {
+      return parent.path ? `/${parent.path}` : '/'
+    }
+  }
+  if (path === 'blob-views' || path.startsWith('blob-views/') || path === 'sql-query' || path === 'sql') {
+    return '/blob-browse'
+  }
+  if (path.startsWith('fingerprint-pairs/')) {
+    return '/fingerprint-pairs'
+  }
   const match = MENU_ITEMS.find((item) => {
     if (item.path === '') {
       return path === ''

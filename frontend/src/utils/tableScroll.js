@@ -1,18 +1,29 @@
 import { nextTick } from 'vue'
 
 /**
- * Highlight a table row and scroll it into the visible viewport.
+ * Highlight a table row and optionally scroll it into a viewport.
+ *
+ * @param {import('vue').Ref} tableRef el-table ref
+ * @param {object|null} row
+ * @param {(a: object, b: object) => boolean} [matchFn]
+ * @param {{ scroll?: boolean, scrollParent?: HTMLElement|null }} [options]
+ *   - scroll: default true; set false on mouse click (row already visible)
+ *   - scrollParent: outer overflow container (preferred). Avoids el.scrollIntoView
+ *     which can scroll ancestor panels / reset to top.
  */
-export function highlightAndScrollTableRow(tableRef, row, matchFn) {
+export function highlightAndScrollTableRow(tableRef, row, matchFn, options = {}) {
+  const scroll = options.scroll !== false
+  const scrollParent = options.scrollParent || null
+
   nextTick(() => {
     const table = tableRef?.value
     if (!table) return
 
     table.setCurrentRow(row ?? undefined)
-    if (!row) return
+    if (!row || !scroll) return
 
     nextTick(() => {
-      scrollRowIntoView(table, row, matchFn)
+      scrollRowIntoView(table, row, matchFn, scrollParent)
     })
   })
 }
@@ -30,7 +41,23 @@ function getMainBodyRows(table) {
   return { scrollWrap, rows }
 }
 
-function scrollRowIntoView(table, row, matchFn) {
+function adjustScrollParentToRow(scrollParent, target) {
+  if (!scrollParent || !target) return
+  const wrapRect = scrollParent.getBoundingClientRect()
+  const rowRect = target.getBoundingClientRect()
+  let nextTop = scrollParent.scrollTop
+
+  if (rowRect.top < wrapRect.top) {
+    nextTop += rowRect.top - wrapRect.top - 8
+  } else if (rowRect.bottom > wrapRect.bottom) {
+    nextTop += rowRect.bottom - wrapRect.bottom + 8
+  } else {
+    return
+  }
+  scrollParent.scrollTop = Math.max(0, nextTop)
+}
+
+function scrollRowIntoView(table, row, matchFn, scrollParent) {
   const data = getTableData(table)
   let index = data.indexOf(row)
   if (index < 0 && matchFn) {
@@ -42,22 +69,17 @@ function scrollRowIntoView(table, row, matchFn) {
   const target = rows[index]
   if (!target) return
 
-  if (scrollWrap && scrollWrap.scrollHeight > scrollWrap.clientHeight + 1) {
-    const wrapRect = scrollWrap.getBoundingClientRect()
-    const rowRect = target.getBoundingClientRect()
-    let nextTop = scrollWrap.scrollTop
-
-    if (rowRect.top < wrapRect.top) {
-      nextTop += rowRect.top - wrapRect.top - 8
-    } else if (rowRect.bottom > wrapRect.bottom) {
-      nextTop += rowRect.bottom - wrapRect.bottom + 8
-    } else {
-      return
-    }
-
-    scrollWrap.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' })
+  // Prefer the explicit outer viewport (browse/SQL list scroll).
+  if (scrollParent) {
+    adjustScrollParentToRow(scrollParent, target)
     return
   }
 
-  target.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  if (scrollWrap && scrollWrap.scrollHeight > scrollWrap.clientHeight + 1) {
+    adjustScrollParentToRow(scrollWrap, target)
+    return
+  }
+
+  // Last resort: only nudge nearest without smooth ancestor jumps when possible.
+  adjustScrollParentToRow(scrollWrap, target)
 }

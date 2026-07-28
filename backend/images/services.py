@@ -10,11 +10,13 @@ from pathlib import Path
 from django.conf import settings
 from PIL import Image
 
+from images.category_service import resolve_category_id
+from images.models import ImageInfo
 from images.file_service import thumb_cache_path
-from images.models import ImageCategory, ImageInfo
 from utils.db_time import fetch_db_now
 from utils.file_security import UploadValidationError, validate_upload_file
-from utils.path_builder import build_relative_path, ensure_parent_dir, normalize_suffix
+from utils.path_builder import build_relative_path, normalize_suffix
+from utils.storage import get_image_storage
 
 logger = logging.getLogger(__name__)
 
@@ -108,11 +110,7 @@ def _collect_batch_duplicates(
 
 
 def _resolve_category_id(category_id: int | None) -> int:
-    if category_id is None or category_id <= 0:
-        raise ValueError("必须选择有效分类")
-    if not ImageCategory.objects.filter(id=category_id).exists():
-        raise ValueError(f"分类不存在: id={category_id}")
-    return category_id
+    return resolve_category_id(category_id)
 
 
 def _read_image_dimensions(content: bytes) -> tuple[int, int]:
@@ -144,23 +142,20 @@ def _overwrite_existing_image(
     old_path = existing.image_path
     suffix = validated.suffix
 
+    storage = get_image_storage()
     if normalize_suffix(Path(old_path).suffix.lstrip(".")) == suffix:
-        abs_path = ensure_parent_dir(settings.UPLOAD_ROOT, old_path)
-        abs_path.write_bytes(content)
+        storage.write_bytes(old_path, content)
         relative_path = old_path
     else:
         now = fetch_db_now()
         relative_path = build_relative_path(cat_id, suffix, when=now)
-        abs_path = ensure_parent_dir(settings.UPLOAD_ROOT, relative_path)
-        abs_path.write_bytes(content)
+        storage.write_bytes(relative_path, content)
         if old_path and old_path != relative_path:
-            try:
-                old_abs = ensure_parent_dir(settings.UPLOAD_ROOT, old_path)
-                if old_abs.is_file():
-                    old_abs.unlink()
+            deleted, _ = storage.delete(old_path)
+            if deleted:
                 _invalidate_thumbnail(old_path)
-            except OSError:
-                logger.warning("failed to remove old file %s", old_path, exc_info=True)
+            elif old_path:
+                logger.warning("failed to remove old file %s", old_path)
 
     _invalidate_thumbnail(relative_path)
 
@@ -230,8 +225,54 @@ def save_image_bytes(
 
     now = fetch_db_now()
     relative_path = build_relative_path(cat_id, validated.suffix, when=now)
-    abs_path = ensure_parent_dir(settings.UPLOAD_ROOT, relative_path)
-    abs_path.write_bytes(content)
+    get_image_storage().write_bytes(relative_path, content)
+
+    record = ImageInfo.objects.create(
+        image_name=Path(filename).name,
+        image_path=relative_path,
+        image_width=width,
+        image_height=height,
+        file_size=validated.size,
+        file_suffix=validated.suffix,
+        file_hash=content_hash,
+        upload_time=now,
+        update_time=now,
+        upload_user=upload_user,
+        is_delete=0,
+        category_id=cat_id,
+        tags=(tags or "").strip()[:500],
+    )
+    return record
+
+
+def save_image_bytes_for_migration(
+    *,
+    filename: str,
+    content: bytes,
+    upload_user: str,
+    category_id: int | None = None,
+    tags: str = "",
+    declared_mime: str | None = None,
+) -> ImageInfo:
+    """Fast upload path for BLOB migration — skips duplicate lookup and optional dimension read."""
+    validated = validate_upload_file(
+        filename,
+        content,
+        max_bytes=settings.MAX_UPLOAD_SIZE_BYTES,
+        declared_mime=declared_mime,
+    )
+    skip_dimensions = getattr(settings, "BLOB_MIGRATION_SKIP_DIMENSIONS", True)
+    if skip_dimensions:
+        width, height = 0, 0
+    else:
+        width, height = _read_image_dimensions(content)
+
+    cat_id = _resolve_category_id(category_id)
+    content_hash = compute_content_hash(content)
+
+    now = fetch_db_now()
+    relative_path = build_relative_path(cat_id, validated.suffix, when=now)
+    get_image_storage().write_bytes(relative_path, content)
 
     record = ImageInfo.objects.create(
         image_name=Path(filename).name,

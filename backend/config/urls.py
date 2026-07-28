@@ -12,6 +12,7 @@ urlpatterns = [
     path("api/config/", SystemConfigView.as_view(), name="system-config"),
     path("api/auth/", include("users.urls")),
     path("api/images/", include("images.urls")),
+    path("api/fingerprints/", include("fingerprints.urls")),
     path("api/sql/", include("sqlquery.urls")),
     path("api/logs/", include("logs.urls")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),

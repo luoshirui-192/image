@@ -1,0 +1,89 @@
+import request from './request'
+
+/** Business-table browse: t_match_result_image + T_CAP_FP_DATA + T_FEATURE_RECORD */
+export function fetchFingerprintBizMetaApi(params = {}) {
+  return request.get('/fingerprints/biz/meta/', { params })
+}
+
+export function fetchFingerprintBizPairsApi(params = {}) {
+  return request.get('/fingerprints/biz/pairs/', { params })
+}
+
+export function fetchFingerprintBizPairViewApi(matchId, params = {}) {
+  return request.get(`/fingerprints/biz/pairs/${matchId}/view/`, { params })
+}
+
+/** Dual-panel view from image_reg + image_match (SQL-filter browse without match id). */
+export function fetchFingerprintBizPairViewByCapsApi(params = {}) {
+  return request.get('/fingerprints/biz/pairs/view-by-caps/', { params })
+}
+
+export function fetchFingerprintBizSamplesApi(params = {}) {
+  return request.get('/fingerprints/biz/samples/', { params })
+}
+
+/** Biometric eval: EER / FMR / DET from t_match_result_image */
+export function fetchFingerprintBizEvalMetaApi(params = {}) {
+  return request.get('/fingerprints/biz/eval/meta/', { params })
+}
+
+export function fetchFingerprintBizEvalReportApi(params = {}) {
+  return request.get('/fingerprints/biz/eval/report/', { params })
+}
+
+export function fetchFingerprintBizSampleViewApi(capImageId, params = {}) {
+  return request.get(`/fingerprints/biz/samples/${encodeURIComponent(capImageId)}/view/`, { params })
+}
+
+export function fetchFingerprintLayerTypesApi(params = {}) {
+  return request.get('/fingerprints/layer-types/', { params })
+}
+
+export function createFingerprintLayerTypeApi(data) {
+  return request.post('/fingerprints/layer-types/', data)
+}
+
+export function updateFingerprintLayerTypeApi(id, data) {
+  return request.patch(`/fingerprints/layer-types/${id}/`, data)
+}
+
+export function importFingerprintZipApi(
+  file,
+  {
+    tags,
+    algo_version,
+    skip_existing,
+    fail_on_duplicates,
+    category_id,
+    path_writeback,
+    onUploadProgress,
+  } = {},
+) {
+  const form = new FormData()
+  form.append('file', file)
+  if (tags) form.append('tags', tags)
+  if (algo_version) form.append('algo_version', algo_version)
+  if (skip_existing != null) form.append('skip_existing', skip_existing ? '1' : '0')
+  if (fail_on_duplicates != null) form.append('fail_on_duplicates', fail_on_duplicates ? '1' : '0')
+  if (category_id != null) form.append('category_id', String(category_id))
+  if (path_writeback && path_writeback.enabled) {
+    form.append('path_writeback', JSON.stringify(path_writeback))
+  }
+  return request.post('/fingerprints/pairs/import-zip/', form, {
+    onUploadProgress,
+    timeout: 600000,
+  })
+}
+
+export function fetchFingerprintImportJobApi(id) {
+  // Polling handles its own errors; avoid duplicate global toasts.
+  return request.get(`/fingerprints/import-jobs/${id}/`, { skipGlobalError: true })
+}
+
+export function fetchFingerprintImportJobsApi(params = {}) {
+  return request.get('/fingerprints/import-jobs/', { params })
+}
+
+export function cancelFingerprintImportJobApi(id) {
+  return request.post(`/fingerprints/import-jobs/${id}/`, { action: 'cancel' })
+}

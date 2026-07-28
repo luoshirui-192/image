@@ -1,0 +1,17 @@
+---
+description: Biometric eval report — implemented baseline; remaining gaps
+alwaysApply: false
+---
+
+# Biometric evaluation report (status)
+
+Baseline **implemented** on fingerprint module:
+
+- Unit: `data_set_code`
+- Score columns scanned: `score`, `NeuNTms`, `Bionems`, `BioIdms`, `HXms`, `AlgVersion`
+- `sameflag`: 1=Genuine, 0=Impostor
+- Metrics: EER (+ CI), FMR100/1000/10000, ZeroFMR/FNMR, score hist, FMR/FNMR(t), DET
+- UI: `/fingerprint-eval` from 指纹浏览「评测指标」
+- APIs: `/api/fingerprints/biz/eval/meta/`, `/api/fingerprints/biz/eval/report/`
+
+**Still skipped** (no fields): REJ*, enroll/match time, model size, memory.

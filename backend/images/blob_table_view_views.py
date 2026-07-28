@@ -7,6 +7,17 @@ from drf_spectacular.utils import extend_schema
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
+from images.blob_simulated_export_job_service import (
+    cancel_export_job,
+    create_export_job,
+    kick_export_job_async,
+    kick_export_queue,
+    list_export_jobs,
+    pause_export_job,
+    resume_export_job,
+    serialize_export_job,
+)
+from images.blob_simulated_export_service import SimulatedExportError
 from images.blob_table_view_service import (
     BlobTableViewError,
     count_view_rows,
@@ -18,8 +29,9 @@ from images.blob_table_view_service import (
     update_table_view,
 )
 from images.external_db_service import list_database_aliases
-from images.models import BlobTableView
+from images.models import BlobSimulatedExportJob, BlobTableView
 from images.serializers import (
+    BlobSimulatedExportSerializer,
     BlobTableViewCreateSerializer,
     BlobTableViewPreviewSchemaSerializer,
     BlobTableViewRowsSerializer,
@@ -74,7 +86,13 @@ class BlobTableViewListCreateView(APIView):
 
     def get(self, request):
         views = BlobTableView.objects.all().order_by("-id")
-        data = [_serialize_view(view, include_stats=True) for view in views]
+        # Never COUNT remote tables for every saved view on page load — that stalls workers.
+        include_stats = str(request.query_params.get("include_stats", "0")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        data = [_serialize_view(view, include_stats=include_stats) for view in views]
         return success_response(data)
 
     def post(self, request):
@@ -93,7 +111,7 @@ class BlobTableViewListCreateView(APIView):
             detail=f"view={view.name} table={view.source_table}",
         )
         return success_response(
-            _serialize_view(view, include_stats=True),
+            _serialize_view(view, include_stats=False),
             message="表视图已保存",
             status=201,
         )
@@ -115,7 +133,7 @@ class BlobTableViewDetailView(APIView):
         view = self._get_view(pk)
         if view is None:
             return error_response("表视图不存在", code=4044, status=404)
-        return success_response(_serialize_view(view, include_stats=True))
+        return success_response(_serialize_view(view, include_stats=False))
 
     def patch(self, request, pk: int):
         view = self._get_view(pk)
@@ -129,7 +147,7 @@ class BlobTableViewDetailView(APIView):
         except BlobTableViewError as exc:
             return error_response(str(exc), code=4001, status=400)
         write_operate_log(request, "blob_table_view_update", detail=f"view_id={pk}")
-        return success_response(_serialize_view(updated, include_stats=True), message="已更新")
+        return success_response(_serialize_view(updated, include_stats=False), message="已更新")
 
     def delete(self, request, pk: int):
         view = self._get_view(pk)
@@ -174,10 +192,33 @@ class BlobTableViewRowsView(APIView):
                 pk,
                 offset=data.get("offset", 0),
                 limit=data.get("limit", 100),
+                include_total=data.get("include_total", False),
+                skip_blob_presence=data.get("skip_blob_presence", True),
+                after_pk=(data.get("after_pk") or "").strip() or None,
             )
         except BlobTableViewError as exc:
             return error_response(str(exc), code=4001, status=400)
+        except Exception:
+            logger.exception("fetch_view_rows failed view_id=%s", pk)
+            return error_response("加载表视图数据失败", code=5001, status=500)
         return success_response(payload)
+
+
+@extend_schema(tags=["blob-table-view"])
+class BlobTableViewRowCountView(APIView):
+    """GET /api/images/blob-migration/table-views/{id}/row-count/ — COUNT(*) only."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request, pk: int):
+        try:
+            total = count_view_rows(pk)
+        except BlobTableViewError as exc:
+            return error_response(str(exc), code=4001, status=400)
+        except Exception:
+            logger.exception("count_view_rows failed view_id=%s", pk)
+            return error_response("统计行数失败", code=5001, status=500)
+        return success_response({"total": total})
 
 
 @extend_schema(tags=["blob-table-view"], request=BlobTableViewPreviewSchemaSerializer)
@@ -195,3 +236,120 @@ class BlobTableViewPreviewSchemaView(APIView):
         except BlobTableViewError as exc:
             return error_response(str(exc), code=4001, status=400)
         return success_response(schema)
+
+
+@extend_schema(tags=["blob-table-view"], request=BlobSimulatedExportSerializer)
+class BlobTableViewExportToConnectionView(APIView):
+    """POST /api/images/blob-browse/{id}/export-to-connection/ — start async export job."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def post(self, request, pk: int):
+        if not BlobTableView.objects.filter(pk=pk).exists():
+            return error_response("浏览配置不存在", code=4041, status=404)
+        serializer = BlobSimulatedExportSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(_format_errors(serializer.errors), code=4001, status=400)
+        data = serializer.validated_data
+        username = getattr(request.user, "username", "") or ""
+        blocker = (
+            BlobSimulatedExportJob.objects.filter(
+                status__in={
+                    BlobSimulatedExportJob.STATUS_RUNNING,
+                    BlobSimulatedExportJob.STATUS_PAUSED,
+                }
+            )
+            .order_by("id")
+            .first()
+        )
+        try:
+            job = create_export_job(
+                view_id=pk,
+                created_by=username,
+                target_connection_id=data.get("target_connection_id"),
+                target_db_alias=data.get("target_db_alias") or "",
+                target_database=data.get("target_database") or "",
+                target_table=data.get("target_table") or "",
+                if_exists=data.get("if_exists") or "fail",
+            )
+            # Start this job immediately. Claim logic keeps exports serial.
+            kick_export_job_async(job.id)
+            kick_export_queue()
+        except Exception:
+            logger.exception("create export job failed view_id=%s", pk)
+            return error_response("创建导出任务失败", code=5001, status=500)
+
+        job = BlobSimulatedExportJob.objects.get(pk=job.id)
+        write_operate_log(
+            request,
+            "export_job_start",
+            detail=(
+                f"job_id={job.id} view_id={pk} "
+                f"target={job.target_db_alias or job.target_connection_id}."
+                f"{job.target_database}.{job.target_table}"
+            ),
+        )
+        msg = "导出任务已加入队列"
+        if blocker and job.status == BlobSimulatedExportJob.STATUS_PENDING:
+            msg = (
+                f"导出任务已创建（#{job.id}），但队列被"
+                f"{'进行中' if blocker.status == 'running' else '已暂停'}"
+                f"任务 #{blocker.id} 占用；请到任务台继续/取消该任务，或等待其完成"
+            )
+        return success_response(
+            {"job": serialize_export_job(job), "async": True, "blocked_by": blocker.id if blocker else None},
+            message=msg,
+            status=202,
+        )
+
+
+@extend_schema(tags=["blob-table-view"])
+class BlobSimulatedExportJobListView(APIView):
+    """GET /api/images/blob-browse/export-jobs/ — list export jobs (for 任务台)."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request):
+        active_only = str(request.query_params.get("active_only") or "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        try:
+            limit = int(request.query_params.get("limit") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        jobs = list_export_jobs(limit=limit, active_only=active_only)
+        return success_response([serialize_export_job(j) for j in jobs])
+
+
+@extend_schema(tags=["blob-table-view"])
+class BlobSimulatedExportJobDetailView(APIView):
+    """GET/POST /api/images/blob-browse/export-jobs/{id}/ — status or cancel/pause/resume."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request, pk: int):
+        job = BlobSimulatedExportJob.objects.filter(pk=pk).first()
+        if not job:
+            return error_response("导出任务不存在", code=4041, status=404)
+        return success_response(serialize_export_job(job))
+
+    def post(self, request, pk: int):
+        action = str(request.data.get("action") or "").strip().lower()
+        if action not in {"cancel", "pause", "resume"}:
+            return error_response("仅支持 action=cancel|pause|resume", code=4001, status=400)
+        try:
+            if action == "cancel":
+                job = cancel_export_job(pk)
+                write_operate_log(request, "export_job_cancel", detail=f"job_id={pk}")
+                return success_response(serialize_export_job(job), message="已请求取消")
+            if action == "pause":
+                job = pause_export_job(pk)
+                write_operate_log(request, "export_job_pause", detail=f"job_id={pk}")
+                return success_response(serialize_export_job(job), message="已请求暂停")
+            job = resume_export_job(pk)
+            write_operate_log(request, "export_job_resume", detail=f"job_id={pk}")
+            return success_response(serialize_export_job(job), message="已重新排队")
+        except SimulatedExportError as exc:
+            return error_response(str(exc), code=4001, status=400)

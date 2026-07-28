@@ -9,7 +9,8 @@ const PagePlaceholder = () => import('@/views/PagePlaceholder.vue')
 const UploadView = () => import('@/views/Upload.vue')
 const BlobMigrateView = () => import('@/views/BlobMigrate.vue')
 const BlobTableViewsView = () => import('@/views/BlobTableViews.vue')
-const SqlQueryView = () => import('@/views/SqlQuery.vue')
+const FingerprintPairsView = () => import('@/views/FingerprintPairs.vue')
+const FingerprintEvalView = () => import('@/views/FingerprintEval.vue')
 const CategoryManageView = () => import('@/views/CategoryManage.vue')
 const LogsView = () => import('@/views/Logs.vue')
 const SettingsView = () => import('@/views/Settings.vue')
@@ -18,25 +19,69 @@ const VIEW_MAP = {
   home: HomeView,
   upload: UploadView,
   'blob-migrate': BlobMigrateView,
-  'blob-views': BlobTableViewsView,
-  sql: SqlQueryView,
-  categories: CategoryManageView,
+  'blob-browse': BlobTableViewsView,
+  'fingerprint-pairs': FingerprintPairsView,
   logs: LogsView,
   settings: SettingsView,
 }
 
 function buildChildRoutes() {
-  return MENU_ITEMS.map((item) => ({
+  const routes = MENU_ITEMS.map((item) => ({
     path: item.path,
     name: item.name,
     component: VIEW_MAP[item.name] || PagePlaceholder,
-      meta: {
+    meta: {
       title: item.title,
       icon: item.icon,
       adminOnly: item.adminOnly,
       description: item.description,
     },
   }))
+  routes.push(
+    {
+      path: 'categories',
+      name: 'categories',
+      component: CategoryManageView,
+      meta: {
+        title: '分类管理',
+        hiddenInMenu: true,
+      },
+    },
+    {
+      path: 'fingerprint-pairs/:id/compare',
+      name: 'fingerprint-compare',
+      redirect: (to) => ({
+        name: 'fingerprint-pairs',
+        query: { id: String(to.params.id || ''), ...to.query },
+      }),
+      meta: {
+        title: '指纹对比详情',
+        hiddenInMenu: true,
+      },
+    },
+    {
+      path: 'fingerprint-eval',
+      name: 'fingerprint-eval',
+      component: FingerprintEvalView,
+      meta: {
+        title: '指纹评测指标',
+        hiddenInMenu: true,
+      },
+    },
+    {
+      path: 'blob-views',
+      redirect: (to) => ({ name: 'blob-browse', query: to.query, hash: to.hash }),
+    },
+    {
+      path: 'sql-query',
+      redirect: { name: 'blob-browse', query: { mode: 'sql' } },
+    },
+    {
+      path: 'sql',
+      redirect: { name: 'blob-browse', query: { mode: 'sql' } },
+    },
+  )
+  return routes
 }
 
 const router = createRouter({

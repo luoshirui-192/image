@@ -5,10 +5,20 @@ import { useAuthStore } from '@/stores/auth'
 
 const request = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
-  timeout: 30000,
+  timeout: 60000,
 })
 
 let refreshing = null
+/** Depth counter: while > 0, interceptor skips ElMessage (used by callWithRetry mid-attempts). */
+let suppressGlobalErrorDepth = 0
+
+export function beginSuppressGlobalError() {
+  suppressGlobalErrorDepth += 1
+}
+
+export function endSuppressGlobalError() {
+  suppressGlobalErrorDepth = Math.max(0, suppressGlobalErrorDepth - 1)
+}
 
 request.interceptors.request.use((config) => {
   const auth = useAuthStore()
@@ -31,13 +41,13 @@ request.interceptors.response.use(
         const err = new Error(payload.message || '请求失败')
         err.code = payload.code
         err.data = payload.data
+        // Business errors: let the caller toast (may be quiet / custom UX).
         return Promise.reject(err)
       }
       return payload
     }
     return payload
-  },
-  async (error) => {
+  },  async (error) => {
     const auth = useAuthStore()
     const original = error.config
     const status = error.response?.status
@@ -62,12 +72,13 @@ request.interceptors.response.use(
       error.response?.data?.message ||
       error.message ||
       '网络请求失败'
-    if (status !== 401 && !error.config?.skipGlobalError) {
-      ElMessage.error(message)
-    }
     const err = new Error(message)
     err.data = error.response?.data?.data
     err.code = error.response?.data?.code
+    if (status !== 401 && !error.config?.skipGlobalError && suppressGlobalErrorDepth === 0) {
+      ElMessage.error(message)
+      err.__globalToastShown = true
+    }
     return Promise.reject(err)
   },
 )

@@ -31,6 +31,10 @@ READONLY_KEYS = (
     "DB_PORT",
     "DB_NAME",
     "THUMB_CACHE_ROOT",
+    "STORAGE_BACKEND",
+    "MINIO_ENDPOINT",
+    "MINIO_BUCKET",
+    "MINIO_PREFIX",
 )
 
 
@@ -124,7 +128,7 @@ def update_system_config(payload: dict[str, Any]) -> dict:
     for key, raw in payload.items():
         coerced[key] = _coerce_value(key, raw)
 
-    if "UPLOAD_ROOT" in coerced:
+    if "UPLOAD_ROOT" in coerced and getattr(settings, "STORAGE_BACKEND", "local").lower() == "local":
         path = Path(coerced["UPLOAD_ROOT"])
         path.mkdir(parents=True, exist_ok=True)
 

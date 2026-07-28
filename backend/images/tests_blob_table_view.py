@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import tempfile
+from unittest.mock import patch
 
 from django.contrib.auth.hashers import make_password
 from django.db import connection
@@ -11,8 +12,15 @@ from django.utils import timezone
 from PIL import Image
 from rest_framework.test import APIClient
 
-from images.blob_table_view_service import create_table_view, fetch_view_rows
-from images.models import BlobTableView, ImageInfo, ImageSourceMap
+from images.blob_table_view_service import (
+    _batch_ids_with_nonempty_blob,
+    auto_provision_table_views_for_connection,
+    create_table_view,
+    fetch_view_rows,
+    infer_pk_column_from_detail,
+    update_table_view,
+)
+from images.models import BlobTableView, ExternalDbConnection, ImageInfo, ImageSourceMap
 from users.models import SysUser
 
 SQLITE_TABLES = """
@@ -38,13 +46,19 @@ CREATE TABLE IF NOT EXISTS blob_table_view (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name VARCHAR(100) NOT NULL DEFAULT '',
     db_alias VARCHAR(32) NOT NULL DEFAULT 'default',
+    database_name VARCHAR(64) NOT NULL DEFAULT '',
     source_table VARCHAR(64) NOT NULL,
+    source_object_type VARCHAR(20) NOT NULL DEFAULT 'table',
+    path_lookup_table VARCHAR(64) NOT NULL DEFAULT '',
+    blob_column_path_mappings TEXT NOT NULL DEFAULT '',
     source_pk_column VARCHAR(64) NOT NULL DEFAULT 'id',
     blob_column VARCHAR(64) NOT NULL,
+    blob_columns TEXT NOT NULL DEFAULT '',
     display_columns TEXT NOT NULL DEFAULT '',
     where_clause VARCHAR(500) NOT NULL DEFAULT '',
     remark VARCHAR(500) NOT NULL DEFAULT '',
     last_viewed_at DATETIME NULL,
+    source_uid VARCHAR(36) NOT NULL DEFAULT '',
     create_time DATETIME NULL,
     update_time DATETIME NULL
 );
@@ -68,14 +82,32 @@ CREATE TABLE IF NOT EXISTS image_source_map (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_table VARCHAR(64) NOT NULL,
     source_id VARCHAR(64) NOT NULL,
+    source_column VARCHAR(64) NOT NULL DEFAULT '',
     image_info_id INTEGER NOT NULL,
     migrated_at DATETIME NOT NULL,
-    UNIQUE(source_table, source_id)
+    source_content_hash VARCHAR(64) NOT NULL DEFAULT '',
+    source_blob_length INTEGER NOT NULL DEFAULT 0,
+    last_checked_at DATETIME NULL,
+    sync_status VARCHAR(20) NOT NULL DEFAULT 'unknown',
+    last_sync_error VARCHAR(500) NOT NULL DEFAULT '',
+    source_uid VARCHAR(36) NOT NULL DEFAULT '',
+    migration_source_id INTEGER NULL,
+    UNIQUE(source_table, source_id, source_column)
 );
 CREATE TABLE IF NOT EXISTS legacy_photos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title VARCHAR(100) NOT NULL DEFAULT '',
     photo BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS legacy_dual_blob (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title VARCHAR(100) NOT NULL DEFAULT '',
+    photo BLOB NOT NULL,
+    thumb BLOB NOT NULL DEFAULT X''
+);
+CREATE TABLE IF NOT EXISTS legacy_plain (
+    code VARCHAR(20) NOT NULL,
+    title VARCHAR(100) NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS external_db_connection (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,6 +126,36 @@ CREATE TABLE IF NOT EXISTS external_db_connection (
     create_time DATETIME NULL,
     update_time DATETIME NULL
 );
+CREATE TABLE IF NOT EXISTS blob_migration_source (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name VARCHAR(100) NOT NULL DEFAULT '',
+    source_table VARCHAR(64) NOT NULL,
+    source_pk_column VARCHAR(64) NOT NULL DEFAULT 'id',
+    blob_column VARCHAR(64) NOT NULL,
+    blob_columns TEXT NOT NULL DEFAULT '',
+    source_object_type VARCHAR(20) NOT NULL DEFAULT 'table',
+    path_lookup_table VARCHAR(64) NOT NULL DEFAULT '',
+    blob_column_path_mappings TEXT NOT NULL DEFAULT '',
+    name_column VARCHAR(64) NOT NULL DEFAULT '',
+    suffix_column VARCHAR(64) NOT NULL DEFAULT '',
+    category_id INTEGER NOT NULL DEFAULT 1,
+    upload_user VARCHAR(100) NOT NULL DEFAULT 'migration',
+    tags VARCHAR(500) NOT NULL DEFAULT '',
+    where_clause VARCHAR(500) NOT NULL DEFAULT '',
+    db_alias VARCHAR(32) NOT NULL DEFAULT 'default',
+    database_name VARCHAR(64) NOT NULL DEFAULT '',
+    enabled SMALLINT NOT NULL DEFAULT 1,
+    last_run_at DATETIME NULL,
+    auto_sync_enabled SMALLINT NOT NULL DEFAULT 1,
+    sync_interval_minutes INTEGER NOT NULL DEFAULT 60,
+    sync_batch_size INTEGER NOT NULL DEFAULT 200,
+    sync_last_run_at DATETIME NULL,
+    sync_last_checked_map_id INTEGER NOT NULL DEFAULT 0,
+    change_track_column VARCHAR(64) NOT NULL DEFAULT '',
+    change_track_mode VARCHAR(20) NOT NULL DEFAULT 'hash',
+    source_uid VARCHAR(36) NOT NULL DEFAULT '',
+    create_time DATETIME NULL
+);
 """
 
 
@@ -104,6 +166,9 @@ def make_png_bytes() -> bytes:
 
 
 class BlobTableViewTestCase(TestCase):
+    # Ephemeral db_alias_session aliases are created at runtime.
+    databases = "__all__"
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -139,6 +204,9 @@ class BlobTableViewTestCase(TestCase):
                 "INSERT INTO legacy_photos (id, title, photo) VALUES (2, 'b.png', ?)",
                 [png],
             )
+            cursor.execute(
+                "INSERT INTO legacy_photos (id, title, photo) VALUES (3, 'empty.png', X'')",
+            )
 
         self.image = ImageInfo.objects.create(
             image_name="a.png",
@@ -155,6 +223,7 @@ class BlobTableViewTestCase(TestCase):
         ImageSourceMap.objects.create(
             source_table="legacy_photos",
             source_id="1",
+            source_column="photo",
             image_info_id=self.image.id,
             migrated_at=now,
         )
@@ -168,9 +237,12 @@ class BlobTableViewTestCase(TestCase):
         )
 
     def test_fetch_view_rows_substitutes_path(self):
-        payload = fetch_view_rows(self.view.id, offset=0, limit=10)
-        self.assertEqual(payload["total"], 2)
-        self.assertEqual(len(payload["rows"]), 2)
+        payload = fetch_view_rows(self.view.id, offset=0, limit=10, include_total=True)
+        self.assertEqual(payload["total"], 3)
+        self.assertFalse(payload["has_more"])
+        self.assertEqual(len(payload["rows"]), 3)
+        self.assertIn("SELECT", payload.get("remote_sql") or "")
+        self.assertNotIn("photo", (payload.get("remote_sql") or "").split("FROM", 1)[0])
         row1 = payload["rows"][0]
         self.assertEqual(row1["title"], "a.png")
         self.assertEqual(row1["photo"]["status"], "migrated")
@@ -179,6 +251,207 @@ class BlobTableViewTestCase(TestCase):
         row2 = payload["rows"][1]
         self.assertEqual(row2["photo"]["status"], "pending")
         self.assertEqual(row2["photo"]["display"], "未迁移")
+
+    def test_fetch_view_rows_can_skip_total_count(self):
+        payload = fetch_view_rows(self.view.id, offset=0, limit=10, include_total=False)
+        self.assertEqual(payload["total"], -1)
+        self.assertFalse(payload["has_more"])
+        self.assertEqual(len(payload["rows"]), 3)
+
+    def test_fetch_view_rows_keyset_after_pk(self):
+        first = fetch_view_rows(self.view.id, offset=0, limit=1, include_total=False)
+        self.assertEqual(len(first["rows"]), 1)
+        self.assertTrue(first["has_more"])
+        cursor = first["next_after_pk"]
+        self.assertTrue(cursor)
+        second = fetch_view_rows(
+            self.view.id, after_pk=cursor, limit=10, include_total=False
+        )
+        self.assertEqual(len(second["rows"]), 2)
+        self.assertFalse(second["has_more"])
+        self.assertNotEqual(first["rows"][0]["id"], second["rows"][0]["id"])
+
+    def test_update_table_view_can_change_database_name(self):
+        updated = update_table_view(self.view.id, database_name="catalog_db")
+        self.assertEqual(updated.database_name, "catalog_db")
+
+    def test_blob_presence_skips_already_migrated_rows(self):
+        checked_ids: list[str] = []
+
+        def _track_ids(conn, *, lookup_table, lookup_id_column, blob_column, lookup_ids):
+            checked_ids.extend(lookup_ids)
+            return _batch_ids_with_nonempty_blob(
+                conn,
+                lookup_table=lookup_table,
+                lookup_id_column=lookup_id_column,
+                blob_column=blob_column,
+                lookup_ids=lookup_ids,
+            )
+
+        with patch(
+            "images.blob_table_view_service._batch_ids_with_nonempty_blob",
+            side_effect=_track_ids,
+        ):
+            fetch_view_rows(self.view.id, offset=0, limit=10, skip_blob_presence=False)
+
+        self.assertNotIn("1", checked_ids)
+        self.assertIn("2", checked_ids)
+        self.assertIn("3", checked_ids)
+
+    def test_blob_presence_db_error_defaults_to_pending(self):
+        from images.blob_table_view_service import _compute_blob_presence_for_page
+
+        with patch(
+            "images.blob_table_view_service._batch_ids_with_nonempty_blob",
+            return_value=(set(), False),
+        ):
+            presence = _compute_blob_presence_for_page(
+                None,
+                raw_rows=[(2, b"png")],
+                col_names=["id", "photo"],
+                blob_cols=["photo"],
+                path_mappings=None,
+                pk_column="id",
+                source_table="legacy_photos",
+                legacy_path_map={},
+                pk_index=0,
+            )
+        self.assertTrue(presence[0]["photo"])
+
+    def test_empty_blob_shows_no_data(self):
+        payload = fetch_view_rows(self.view.id, offset=0, limit=10, skip_blob_presence=False)
+        row3 = next(row for row in payload["rows"] if str(row["id"]) == "3")
+        self.assertEqual(row3["photo"]["status"], "no_data")
+        self.assertEqual(row3["photo"]["display"], "无数据")
+
+    def test_join_view_empty_lookup_blob_shows_no_data(self):
+        from images.blob_schema_helpers import serialize_blob_column_path_mappings
+
+        with connection.cursor() as cursor:
+            cursor.execute("DROP TABLE IF EXISTS join_view_rows")
+            cursor.execute("DROP TABLE IF EXISTS join_image_store")
+            cursor.execute(
+                """
+                CREATE TABLE join_view_rows (
+                    id INTEGER PRIMARY KEY,
+                    src_fname VARCHAR(100) NOT NULL DEFAULT '',
+                    src_image_data BLOB
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE join_image_store (
+                    Fname VARCHAR(100) PRIMARY KEY,
+                    image_data BLOB
+                )
+                """
+            )
+            cursor.execute(
+                "INSERT INTO join_view_rows (id, src_fname) VALUES (1, 'missing.jpg')"
+            )
+            cursor.execute(
+                "INSERT INTO join_view_rows (id, src_fname) VALUES (2, 'present.jpg')"
+            )
+            png = make_png_bytes()
+            cursor.execute(
+                "INSERT INTO join_image_store (Fname, image_data) VALUES ('present.jpg', ?)",
+                [png],
+            )
+
+        mappings = serialize_blob_column_path_mappings(
+            [
+                {
+                    "view_column": "src_image_data",
+                    "lookup_table": "join_image_store",
+                    "source_id_column": "src_fname",
+                    "source_column": "image_data",
+                    "lookup_id_column": "Fname",
+                }
+            ]
+        )
+        join_view = BlobTableView.objects.create(
+            name="join view",
+            db_alias="default",
+            source_table="join_view_rows",
+            source_object_type="view",
+            path_lookup_table="join_image_store",
+            blob_column_path_mappings=mappings,
+            source_pk_column="id",
+            blob_column="src_image_data",
+            blob_columns='["src_image_data"]',
+            create_time=timezone.now(),
+            update_time=timezone.now(),
+        )
+        payload = fetch_view_rows(join_view.id, offset=0, limit=10, skip_blob_presence=False)
+        by_id = {str(row["id"]): row for row in payload["rows"]}
+        self.assertEqual(by_id["1"]["src_image_data"]["status"], "no_data")
+        self.assertEqual(by_id["1"]["src_image_data"]["display"], "无数据")
+        self.assertEqual(by_id["2"]["src_image_data"]["status"], "pending")
+        self.assertEqual(by_id["2"]["src_image_data"]["display"], "未迁移")
+
+    def test_join_view_fetches_mapping_key_column_not_in_display(self):
+        from images.blob_schema_helpers import serialize_blob_column_path_mappings
+
+        with connection.cursor() as cursor:
+            cursor.execute("DROP TABLE IF EXISTS join_view_rows2")
+            cursor.execute("DROP TABLE IF EXISTS join_image_store2")
+            cursor.execute(
+                """
+                CREATE TABLE join_view_rows2 (
+                    id INTEGER PRIMARY KEY,
+                    title VARCHAR(100) NOT NULL DEFAULT '',
+                    src_fname VARCHAR(100) NOT NULL DEFAULT '',
+                    src_image_data BLOB
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE join_image_store2 (
+                    Fname VARCHAR(100) PRIMARY KEY,
+                    image_data BLOB
+                )
+                """
+            )
+            cursor.execute(
+                "INSERT INTO join_view_rows2 (id, title, src_fname) VALUES (1, 'row-a', 'present.jpg')"
+            )
+            png = make_png_bytes()
+            cursor.execute(
+                "INSERT INTO join_image_store2 (Fname, image_data) VALUES ('present.jpg', ?)",
+                [png],
+            )
+
+        mappings = serialize_blob_column_path_mappings(
+            [
+                {
+                    "view_column": "src_image_data",
+                    "lookup_table": "join_image_store2",
+                    "source_id_column": "src_fname",
+                    "source_column": "image_data",
+                    "lookup_id_column": "Fname",
+                }
+            ]
+        )
+        join_view = BlobTableView.objects.create(
+            name="join view no fname display",
+            db_alias="default",
+            source_table="join_view_rows2",
+            source_object_type="view",
+            path_lookup_table="join_image_store2",
+            blob_column_path_mappings=mappings,
+            source_pk_column="id",
+            blob_column="src_image_data",
+            blob_columns='["src_image_data"]',
+            display_columns='["title"]',
+            create_time=timezone.now(),
+            update_time=timezone.now(),
+        )
+        payload = fetch_view_rows(join_view.id, offset=0, limit=10)
+        row = payload["rows"][0]
+        self.assertEqual(row["title"], "row-a")
+        self.assertEqual(row["src_image_data"]["status"], "pending")
 
     def test_api_list_and_rows(self):
         self.client.force_authenticate(user=self.admin)
@@ -214,3 +487,202 @@ class BlobTableViewTestCase(TestCase):
         photo = payload["rows"][0]["photo"]
         self.assertEqual(photo["status"], "deleted")
         self.assertEqual(photo["display"], "已删除")
+
+    def test_multi_blob_columns_substitute_paths(self):
+        now = timezone.now()
+        png = make_png_bytes()
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM legacy_dual_blob")
+            cursor.execute(
+                "INSERT INTO legacy_dual_blob (id, title, photo, thumb) VALUES (1, 'a.png', ?, ?)",
+                [png, png],
+            )
+
+        photo_image = ImageInfo.objects.create(
+            image_name="dual-a.png",
+            image_path="2026/01/dual-a.png",
+            image_width=8,
+            image_height=6,
+            file_size=100,
+            file_suffix=".png",
+            upload_time=now,
+            update_time=now,
+            upload_user="test",
+            is_delete=0,
+        )
+        thumb_image = ImageInfo.objects.create(
+            image_name="dual-thumb.png",
+            image_path="2026/01/dual-thumb.png",
+            image_width=8,
+            image_height=6,
+            file_size=80,
+            file_suffix=".png",
+            upload_time=now,
+            update_time=now,
+            upload_user="test",
+            is_delete=0,
+        )
+        ImageSourceMap.objects.create(
+            source_table="legacy_dual_blob",
+            source_id="1",
+            source_column="photo",
+            image_info_id=photo_image.id,
+            migrated_at=now,
+        )
+        ImageSourceMap.objects.create(
+            source_table="legacy_dual_blob",
+            source_id="1",
+            source_column="thumb",
+            image_info_id=thumb_image.id,
+            migrated_at=now,
+        )
+
+        multi_view = create_table_view(
+            name="multi blob",
+            db_alias="default",
+            source_table="legacy_dual_blob",
+            source_pk_column="id",
+            blob_column="photo",
+            blob_columns=["photo", "thumb"],
+        )
+        payload = fetch_view_rows(multi_view.id, offset=0, limit=1)
+        row = payload["rows"][0]
+        self.assertEqual(row["photo"]["status"], "migrated")
+        self.assertEqual(row["thumb"]["status"], "migrated")
+        self.assertEqual(row["thumb"]["image_info_id"], thumb_image.id)
+
+    def test_infer_pk_column_falls_back_to_first_column(self):
+        pk = infer_pk_column_from_detail(
+            [
+                {"name": "code", "column_key": ""},
+                {"name": "title", "column_key": ""},
+            ]
+        )
+        self.assertEqual(pk, "code")
+
+    def test_create_and_fetch_plain_table_view_without_blob(self):
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM legacy_plain")
+            cursor.execute(
+                "INSERT INTO legacy_plain (code, title) VALUES ('A001', 'hello')"
+            )
+        plain_view = create_table_view(
+            name="plain",
+            db_alias="default",
+            source_table="legacy_plain",
+            source_pk_column="missing_pk",
+            blob_column="",
+            blob_columns=[],
+        )
+        payload = fetch_view_rows(plain_view.id, offset=0, limit=10, include_total=True)
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["rows"][0]["code"], "A001")
+        self.assertEqual(payload["rows"][0]["title"], "hello")
+
+    def test_create_and_fetch_path_column_view(self):
+        """Path-export style varchar column can be configured and previewed."""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS legacy_path_photos (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    title VARCHAR(100) NOT NULL DEFAULT '',
+                    photo VARCHAR(500) NOT NULL DEFAULT ''
+                )
+                """
+            )
+            cursor.execute("DELETE FROM legacy_path_photos")
+            cursor.execute(
+                "INSERT INTO legacy_path_photos (id, title, photo) VALUES "
+                "(1, 'a', 'upload/20260725/1/550e8400-e29b-41d4-a716-446655440001.jpg')"
+            )
+        path_view = create_table_view(
+            name="path photos",
+            db_alias="default",
+            source_table="legacy_path_photos",
+            source_pk_column="id",
+            blob_columns=["photo"],
+        )
+        payload = fetch_view_rows(path_view.id, offset=0, limit=10)
+        cell = payload["rows"][0]["photo"]
+        self.assertEqual(cell["status"], "migrated")
+        self.assertTrue(str(cell["path"]).startswith("upload/"))
+
+    def test_auto_provision_table_views_for_connection(self):
+        now = timezone.now()
+        record = ExternalDbConnection.objects.create(
+            name="mock legacy",
+            host="127.0.0.1",
+            port=3306,
+            db_name="legacy_db",
+            username="root",
+            password_encrypted="x",
+            enabled=1,
+            create_time=now,
+            update_time=now,
+        )
+        catalog = {
+            "objects": [
+                {"name": "legacy_photos", "object_type": "table", "blob_columns": [{"column": "photo"}]},
+                {"name": "legacy_plain", "object_type": "table", "blob_columns": []},
+            ]
+        }
+        photo_detail = {
+            "columns": [
+                {"name": "id", "column_key": "PRI"},
+                {"name": "title", "column_key": ""},
+                {"name": "photo", "column_key": ""},
+            ],
+            "blob_columns": [{"column": "photo", "data_type": "blob"}],
+            "path_columns": [],
+            "image_columns": [{"column": "photo", "data_type": "blob", "role": "blob"}],
+        }
+        plain_detail = {
+            "columns": [
+                {"name": "code", "column_key": ""},
+                {"name": "title", "column_key": ""},
+            ],
+            "blob_columns": [],
+            "path_columns": [],
+            "image_columns": [],
+        }
+
+        def _fake_create(**kwargs):
+            cols = kwargs.get("blob_columns") or []
+            return BlobTableView.objects.create(
+                name=kwargs.get("name") or "",
+                db_alias=kwargs["db_alias"],
+                database_name=kwargs.get("database_name") or "",
+                source_table=kwargs["source_table"],
+                source_object_type=kwargs.get("source_object_type") or "table",
+                path_lookup_table="",
+                blob_column_path_mappings="",
+                source_pk_column=kwargs["source_pk_column"],
+                blob_column=kwargs.get("blob_column") or "",
+                blob_columns='["photo"]' if cols else "",
+                display_columns="",
+                where_clause="",
+                remark=kwargs.get("remark") or "",
+                create_time=now,
+                update_time=now,
+            )
+
+        with patch("images.blob_catalog_service.list_database_objects", return_value=catalog), patch(
+            "images.blob_catalog_service.get_database_object_detail",
+            side_effect=[photo_detail, plain_detail],
+        ), patch("images.blob_table_view_service.create_table_view", side_effect=_fake_create):
+            result = auto_provision_table_views_for_connection(record)
+
+        self.assertEqual(result["created"], 2)
+        self.assertEqual(result["failed"], 0)
+        views = BlobTableView.objects.filter(db_alias=f"external_{record.id}").order_by("source_table")
+        self.assertEqual(views.count(), 2)
+        plain = views.get(source_table="legacy_plain")
+        self.assertEqual(plain.source_pk_column, "code")
+        self.assertEqual(plain.blob_column, "")
+
+    def test_api_blob_browse_alias_list(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get("/api/images/blob-browse/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.json()["data"]), 1)

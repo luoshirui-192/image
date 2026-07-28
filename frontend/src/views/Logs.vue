@@ -1,16 +1,18 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, View } from '@element-plus/icons-vue'
 import {
   actionTypeLabel,
-  formatDateTime,
   listLogsApi,
   LOG_ACTION_TYPES,
 } from '@/api/logs'
+import { formatDateTime } from '@/utils/format'
+import { usePageDataRefresh } from '@/utils/usePageDataRefresh'
 
 const loading = ref(false)
 const logs = ref([])
+const logsLoadedOnce = ref(false)
 const pagination = reactive({
   page: 1,
   pageSize: 20,
@@ -50,6 +52,7 @@ async function loadLogs() {
     const data = res.data || {}
     logs.value = data.results || []
     pagination.total = data.count || 0
+    logsLoadedOnce.value = true
   } finally {
     loading.value = false
   }
@@ -96,7 +99,14 @@ function copySql() {
   )
 }
 
-onMounted(loadLogs)
+usePageDataRefresh(loadLogs, {
+  // Empty filtered results are valid; only retry before first successful fetch.
+  isEmpty: () => !logsLoadedOnce.value,
+  alwaysRefreshOnVisible: false,
+  intervalMs: 1500,
+  maxEmptyRetries: 10,
+  mountRetryDelaysMs: [200, 600, 1500, 3000],
+})
 </script>
 
 <template>
