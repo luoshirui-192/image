@@ -3,7 +3,7 @@
  * Fingerprint ZIP import jobs panel — used on 任务台.
  * Refresh is owned by the parent 任务台 page / layout restore; this panel only polls via store.
  */
-import { onMounted, ref } from 'vue'
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useFingerprintImportStore } from '@/stores/fingerprintImport'
 import FingerprintImportDialog from '@/components/FingerprintImportDialog.vue'
@@ -11,10 +11,6 @@ import FingerprintImportDialog from '@/components/FingerprintImportDialog.vue'
 const store = useFingerprintImportStore()
 const router = useRouter()
 const importDialogVisible = ref(false)
-
-onMounted(() => {
-  void store.syncFromServer()
-})
 
 function statusLabel(status) {
   const map = {

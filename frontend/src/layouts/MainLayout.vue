@@ -89,9 +89,15 @@ function handleUserCommand(command) {
 onMounted(() => {
   checkMobile()
   window.addEventListener('resize', checkMobile)
-  // Resume background job polling; progress lives on 任务台.
-  void bgExport.restoreFromSession()
-  void fpImport.restoreFromSession()
+  // Defer session restore so first paint / title-bar clicks are not fighting API churn.
+  const defer =
+    typeof window.requestIdleCallback === 'function'
+      ? (cb) => window.requestIdleCallback(cb, { timeout: 1500 })
+      : (cb) => setTimeout(cb, 200)
+  defer(() => {
+    void bgExport.restoreFromSession()
+    void fpImport.restoreFromSession()
+  })
 })
 onUnmounted(() => {
   window.removeEventListener('resize', checkMobile)

@@ -77,6 +77,10 @@ export function usePageDataRefresh(refreshFn, options = {}) {
         stopEmptyPoll()
         return
       }
+      // Do not burn the main thread while the window/tab is minimized/hidden.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return
+      }
       if (!isEmpty()) {
         stopEmptyPoll()
         return

@@ -33,6 +33,7 @@ import FingerprintImportDock from '@/components/FingerprintImportDock.vue'
 import { useBackgroundExportStore } from '@/stores/backgroundExport'
 import { useFingerprintImportStore } from '@/stores/fingerprintImport'
 import { showRequestError } from '@/utils/showRequestError'
+import { createVisibilityAwarePoll } from '@/utils/visibilityAwarePoll'
 
 const router = useRouter()
 const route = useRoute()
@@ -168,7 +169,7 @@ async function viewJob(row) {
 function stopJobPolling() {
   jobRefreshSeq.value += 1
   if (pollTimer.value) {
-    clearInterval(pollTimer.value)
+    pollTimer.value.stop()
     pollTimer.value = null
   }
   pollingJobId.value = null
@@ -316,8 +317,7 @@ function startJobPolling(jobId) {
   if (pollingJobId.value === jobId && pollTimer.value) return
   stopJobPolling()
   pollingJobId.value = jobId
-  refreshActiveJob(jobId).catch(() => {})
-  pollTimer.value = setInterval(() => {
+  pollTimer.value = createVisibilityAwarePoll(() => {
     refreshActiveJob(jobId).catch(() => {})
   }, 3000)
 }
@@ -551,12 +551,12 @@ async function refreshConsole() {
 
 usePageDataRefresh(refreshConsole, {
   // Sources may be empty forever; treat job-history load readiness via length OR sources.
-  // Keep focus refresh for this volatile console only.
+  // Soften focus refresh: full reload on every focus races minimize/title-bar responsiveness.
   isEmpty: () => !sources.value.length && !jobHistory.value.length,
-  intervalMs: 1500,
-  maxEmptyRetries: 10,
-  alwaysRefreshOnVisible: true,
-  mountRetryDelaysMs: [200, 600, 1500, 3000],
+  intervalMs: 2500,
+  maxEmptyRetries: 8,
+  alwaysRefreshOnVisible: false,
+  mountRetryDelaysMs: [300, 1200, 3000],
 })
 
 watch(

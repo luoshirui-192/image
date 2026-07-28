@@ -6,8 +6,11 @@ import {
   fetchFingerprintImportJobApi,
   fetchFingerprintImportJobsApi,
 } from '@/api/fingerprints'
+import { createVisibilityAwarePoll } from '@/utils/visibilityAwarePoll'
 
 const STORAGE_KEY = 'image_db_fp_import_jobs'
+const POLL_MS = 3000
+const POLLABLE = ['pending', 'running']
 
 function loadPersistedIds() {
   try {
@@ -35,10 +38,11 @@ export const useFingerprintImportStore = defineStore('fingerprintImport', () => 
   /** @type {import('vue').Ref<Array<Record<string, any>>>} */
   const jobs = ref([])
   const loadingList = ref(false)
-  let pollTimer = null
+  /** @type {ReturnType<typeof createVisibilityAwarePoll> | null} */
+  let pollHandle = null
 
   const activeJobs = computed(() =>
-    jobs.value.filter((j) => ['pending', 'running'].includes(j.status)),
+    jobs.value.filter((j) => POLLABLE.includes(j.status)),
   )
   const visibleJobs = computed(() =>
     [...jobs.value]
@@ -48,6 +52,10 @@ export const useFingerprintImportStore = defineStore('fingerprintImport', () => 
   const hasVisible = computed(() => visibleJobs.value.length > 0)
   const latestActive = computed(() => activeJobs.value[0] || null)
 
+  function persistTrackedIds() {
+    persistIds(jobs.value.filter((j) => POLLABLE.includes(j.status)).map((j) => j.id))
+  }
+
   function upsertJob(job) {
     if (!job?.id) return
     const idx = jobs.value.findIndex((j) => j.id === job.id)
@@ -55,22 +63,22 @@ export const useFingerprintImportStore = defineStore('fingerprintImport', () => 
     const next = { ...prev, ...job, _dismissed: false }
     if (idx >= 0) jobs.value[idx] = next
     else jobs.value.unshift(next)
-    persistIds(jobs.value.map((j) => j.id))
+    persistTrackedIds()
   }
 
   function dismissJob(jobId) {
     const idx = jobs.value.findIndex((j) => j.id === jobId)
     if (idx < 0) return
     const job = jobs.value[idx]
-    if (['pending', 'running'].includes(job.status)) return
+    if (POLLABLE.includes(job.status)) return
     jobs.value.splice(idx, 1)
-    persistIds(jobs.value.map((j) => j.id))
+    persistTrackedIds()
     if (!activeJobs.value.length) stopPolling()
   }
 
   function clearFinished() {
-    jobs.value = jobs.value.filter((j) => ['pending', 'running'].includes(j.status))
-    persistIds(jobs.value.map((j) => j.id))
+    jobs.value = jobs.value.filter((j) => POLLABLE.includes(j.status))
+    persistTrackedIds()
   }
 
   async function refreshJob(jobId) {
@@ -78,7 +86,7 @@ export const useFingerprintImportStore = defineStore('fingerprintImport', () => 
     const job = normalizeJob(res)
     if (!job || typeof job !== 'object') return null
     const prev = jobs.value.find((j) => j.id === jobId)
-    const wasActive = prev && ['pending', 'running'].includes(prev.status)
+    const wasActive = prev && POLLABLE.includes(prev.status)
     upsertJob(job)
     if (wasActive && job.status === 'completed') {
       const dupTotal = Number(job.duplicate_report?.total || 0)
@@ -110,7 +118,7 @@ export const useFingerprintImportStore = defineStore('fingerprintImport', () => 
           : []
       for (const job of list) {
         if (!job?.id) continue
-        const active = ['pending', 'running'].includes(job.status)
+        const active = POLLABLE.includes(job.status)
         const known = jobs.value.some((j) => j.id === job.id)
         if (active || known) upsertJob(job)
       }
@@ -125,6 +133,7 @@ export const useFingerprintImportStore = defineStore('fingerprintImport', () => 
         }
       }
       if (activeJobs.value.length) startPolling()
+      else stopPolling()
     } catch {
       // ignore
     } finally {
@@ -134,7 +143,7 @@ export const useFingerprintImportStore = defineStore('fingerprintImport', () => 
 
   async function pollAll() {
     const ids = jobs.value
-      .filter((j) => ['pending', 'running'].includes(j.status))
+      .filter((j) => POLLABLE.includes(j.status))
       .map((j) => j.id)
     await Promise.all(
       ids.map(async (id) => {
@@ -149,16 +158,24 @@ export const useFingerprintImportStore = defineStore('fingerprintImport', () => 
   }
 
   function startPolling() {
-    if (pollTimer) return
-    pollTimer = setInterval(() => {
+    if (!activeJobs.value.length) {
+      stopPolling()
+      return
+    }
+    if (pollHandle?.isRunning()) return
+    if (pollHandle) {
+      pollHandle.restart()
+      return
+    }
+    pollHandle = createVisibilityAwarePoll(() => {
       void pollAll()
-    }, 1500)
+    }, POLL_MS)
   }
 
   function stopPolling() {
-    if (pollTimer) {
-      clearInterval(pollTimer)
-      pollTimer = null
+    if (pollHandle) {
+      pollHandle.stop()
+      pollHandle = null
     }
   }
 
@@ -195,6 +212,7 @@ export const useFingerprintImportStore = defineStore('fingerprintImport', () => 
       }),
     )
     if (activeJobs.value.length) startPolling()
+    else stopPolling()
   }
 
   return {

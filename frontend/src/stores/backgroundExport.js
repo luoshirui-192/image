@@ -8,8 +8,15 @@ import {
   pauseBlobSimulatedExportJobApi,
   resumeBlobSimulatedExportJobApi,
 } from '@/api/images'
+import { createVisibilityAwarePoll } from '@/utils/visibilityAwarePoll'
 
 const STORAGE_KEY = 'image_db_bg_export_jobs'
+/** Keep UI responsive: avoid 1.5s hammer when jobs linger / page is busy. */
+const POLL_MS = 3000
+
+const TRACKED = ['pending', 'running', 'paused']
+/** Interval poll only for work that can change without user action. */
+const POLLABLE = ['pending', 'running']
 
 function loadPersistedIds() {
   try {
@@ -29,10 +36,14 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
   /** @type {import('vue').Ref<Array<Record<string, any>>>} */
   const jobs = ref([])
   const loadingList = ref(false)
-  let pollTimer = null
+  /** @type {ReturnType<typeof createVisibilityAwarePoll> | null} */
+  let pollHandle = null
 
   const activeJobs = computed(() =>
-    jobs.value.filter((j) => ['pending', 'running', 'paused'].includes(j.status)),
+    jobs.value.filter((j) => TRACKED.includes(j.status)),
+  )
+  const pollableJobs = computed(() =>
+    jobs.value.filter((j) => POLLABLE.includes(j.status)),
   )
   const visibleJobs = computed(() =>
     [...jobs.value]
@@ -41,6 +52,10 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
   )
   const hasVisible = computed(() => visibleJobs.value.length > 0)
 
+  function persistTrackedIds() {
+    persistIds(jobs.value.filter((j) => TRACKED.includes(j.status)).map((j) => j.id))
+  }
+
   function upsertJob(job) {
     if (!job?.id) return
     const idx = jobs.value.findIndex((j) => j.id === job.id)
@@ -48,26 +63,24 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     const next = { ...prev, ...job, _dismissed: false }
     if (idx >= 0) jobs.value[idx] = next
     else jobs.value.unshift(next)
-    persistIds(jobs.value.map((j) => j.id))
+    persistTrackedIds()
   }
 
   function dismissJob(jobId) {
     const idx = jobs.value.findIndex((j) => j.id === jobId)
     if (idx < 0) return
     const job = jobs.value[idx]
-    if (['pending', 'running', 'paused'].includes(job.status)) {
+    if (TRACKED.includes(job.status)) {
       return
     }
     jobs.value.splice(idx, 1)
-    persistIds(jobs.value.map((j) => j.id))
-    if (!activeJobs.value.length) stopPolling()
+    persistTrackedIds()
+    if (!pollableJobs.value.length) stopPolling()
   }
 
   function clearFinished() {
-    jobs.value = jobs.value.filter((j) =>
-      ['pending', 'running', 'paused'].includes(j.status),
-    )
-    persistIds(jobs.value.map((j) => j.id))
+    jobs.value = jobs.value.filter((j) => TRACKED.includes(j.status))
+    persistTrackedIds()
   }
 
   async function refreshJob(jobId) {
@@ -75,7 +88,7 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
     const job = res?.data
     if (!job || typeof job !== 'object') return null
     const prev = jobs.value.find((j) => j.id === jobId)
-    const wasActive = prev && ['pending', 'running'].includes(prev.status)
+    const wasActive = prev && POLLABLE.includes(prev.status)
     upsertJob(job)
     if (wasActive && job.status === 'completed') {
       ElMessage.success(job.message || `导出任务 #${jobId} 已完成`)
@@ -98,7 +111,7 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
       for (const job of list) {
         if (!job?.id) continue
         // Keep finished jobs only if already tracked, or if still active/paused.
-        const active = ['pending', 'running', 'paused'].includes(job.status)
+        const active = TRACKED.includes(job.status)
         const known = jobs.value.some((j) => j.id === job.id)
         if (active || known) upsertJob(job)
       }
@@ -113,7 +126,8 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
           }
         }
       }
-      if (activeJobs.value.length) startPolling()
+      if (pollableJobs.value.length) startPolling()
+      else stopPolling()
     } catch {
       // ignore list errors; session restore may still work
     } finally {
@@ -132,9 +146,9 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
         seen.add(job.id)
         upsertJob(job)
       }
-      // Refresh any locally tracked active ids missing from list (race).
+      // Refresh any locally tracked pollable ids missing from list (race).
       for (const j of jobs.value) {
-        if (['pending', 'running', 'paused'].includes(j.status) && !seen.has(j.id)) {
+        if (POLLABLE.includes(j.status) && !seen.has(j.id)) {
           try {
             await refreshJob(j.id)
           } catch {
@@ -143,9 +157,7 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
         }
       }
     } catch {
-      const ids = jobs.value
-        .filter((j) => ['pending', 'running', 'paused'].includes(j.status))
-        .map((j) => j.id)
+      const ids = pollableJobs.value.map((j) => j.id)
       await Promise.all(
         ids.map(async (id) => {
           try {
@@ -156,20 +168,28 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
         }),
       )
     }
-    if (!activeJobs.value.length) stopPolling()
+    if (!pollableJobs.value.length) stopPolling()
   }
 
   function startPolling() {
-    if (pollTimer) return
-    pollTimer = setInterval(() => {
+    if (!pollableJobs.value.length) {
+      stopPolling()
+      return
+    }
+    if (pollHandle?.isRunning()) return
+    if (pollHandle) {
+      pollHandle.restart()
+      return
+    }
+    pollHandle = createVisibilityAwarePoll(() => {
       void pollAll()
-    }, 1500)
+    }, POLL_MS)
   }
 
   function stopPolling() {
-    if (pollTimer) {
-      clearInterval(pollTimer)
-      pollTimer = null
+    if (pollHandle) {
+      pollHandle.stop()
+      pollHandle = null
     }
   }
 
@@ -193,7 +213,9 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
   async function pauseJob(jobId) {
     await pauseBlobSimulatedExportJobApi(jobId)
     await refreshJob(jobId)
-    startPolling()
+    // Paused jobs no longer need interval polling.
+    if (pollableJobs.value.length) startPolling()
+    else stopPolling()
     ElMessage.info(`已请求暂停导出 #${jobId}`)
   }
 
@@ -220,7 +242,8 @@ export const useBackgroundExportStore = defineStore('backgroundExport', () => {
         }
       }),
     )
-    if (activeJobs.value.length) startPolling()
+    if (pollableJobs.value.length) startPolling()
+    else stopPolling()
   }
 
   return {

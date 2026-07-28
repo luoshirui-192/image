@@ -3,16 +3,11 @@
  * Inline panel for path/simulated export jobs — used on 任务台 (not a floating overlay).
  * Refresh is owned by the parent 任务台 page / layout restore; this panel only polls via store.
  */
-import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useBackgroundExportStore } from '@/stores/backgroundExport'
 
 const store = useBackgroundExportStore()
 const router = useRouter()
-
-onMounted(() => {
-  void store.syncFromServer()
-})
 
 function statusLabel(status) {
   const map = {
