@@ -51,6 +51,8 @@ const connDialogVisible = ref(false)
 
 const views = ref([])
 const loadingViews = ref(false)
+/** True after first successful table-views list fetch (empty list can be valid). */
+const viewsLoadedOnce = ref(false)
 const activeViewId = ref(null)
 const catalogTreeKey = ref(0)
 const catalogTreeRef = ref(null)
@@ -1668,6 +1670,7 @@ async function loadViews() {
     const res = await callWithRetry(() => listBlobTableViewsApi())
     if (seq !== viewsLoadSeq) return
     views.value = res.data || []
+    viewsLoadedOnce.value = true
     if (activeViewId.value && !views.value.some((v) => v.id === activeViewId.value)) {
       activeViewId.value = null
     }
@@ -2088,7 +2091,8 @@ usePageDataRefresh(
     }
   },
   {
-    isEmpty: () => !views.value.length && !browseReady.value,
+    // Retry until first successful views fetch (not "views empty" — empty can be valid).
+    isEmpty: () => !viewsLoadedOnce.value,
     intervalMs: 1500,
     maxEmptyRetries: 12,
     alwaysRefreshOnVisible: false,
@@ -2176,7 +2180,12 @@ onUnmounted(() => {
               </template>
             </div>
             <div class="catalog-actions">
-              <template v-if="!savedViewForSelection">
+              <template v-if="!viewsLoadedOnce">
+                <el-button size="small" plain disabled :loading="true">
+                  检测配置中…
+                </el-button>
+              </template>
+              <template v-else-if="!savedViewForSelection">
                 <el-button size="small" type="primary" plain @click="openCreateViewDialog">
                   创建配置
                 </el-button>
