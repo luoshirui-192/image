@@ -9,7 +9,8 @@ export function meApi() {
 }
 
 export function refreshApi(refresh) {
-  return request.post('/auth/refresh/', { refresh })
+  // skipGlobalError: refresh 401 is handled by the session interceptor / caller.
+  return request.post('/auth/refresh/', { refresh }, { skipGlobalError: true })
 }
 
 export function healthApi() {

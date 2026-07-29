@@ -45,8 +45,12 @@ export async function fetchImageBlob(path, { id, thumb = true, signal } = {}) {
         await auth.refreshAccessToken()
         res = await requestOnce()
       } catch {
-        throw new Error('图片加载失败')
+        auth.logout()
+        throw new Error('登录已过期，请重新登录')
       }
+    } else if (res.status === 401) {
+      auth.logout()
+      throw new Error('登录已过期，请重新登录')
     }
 
     if (!res.ok) {
